@@ -16,15 +16,15 @@ Welcome to the NEAT repository. NEAT is an autoregressive model that builds 3D m
 1. Clone the repository and cd into the repository's root:
 
 ```bash
-git clone https://github.com/molinfo-vienna/NEAT.git
+git clone https://github.com/molinfo-vienna/NEAT-Cond-Dev.git
 cd NEAT
 ```
 
 2. Create and activate an environment with the required python version:
 
 ```bash
-conda create --name neat python=3.11
-conda activate neat
+conda create --name neat_cond python=3.11
+conda activate neat_cond
 ```
 
 3. Install PyTorch and PyTorch-Geometric according to your hardware. For example, with GPU and CUDA 13.0 on Linux:

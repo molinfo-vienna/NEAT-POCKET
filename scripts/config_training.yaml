@@ -1,7 +1,7 @@
 accumulate_grad_batches: 1
 batch_size: 512
 bias: true
-data_set: GEOM
+data_set: CrossDocked
 dropout: 0.1
 learning_rate: 2.5e-5
 lr_decay_epochs: 1000

@@ -26,6 +26,8 @@ dependencies = [
     "tqdm==4.67.1",
     "tensorboard===2.20.0",
     "posebusters==0.6.5",
+    "gdown==6.0.0",
+    "biopython==1.87"
 ]
 
 [project.optional-dependencies]

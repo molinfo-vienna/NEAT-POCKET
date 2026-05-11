@@ -13,6 +13,7 @@ from torch_geometric.transforms import Distance
 from .augmentation import RandomRotationAugmentation
 from .dataset_geom import GEOMDataSet
 from .dataset_qm9 import QM9DataSet
+from .dataset_crossdocked import CrossDockedDataSet
 from .splitting import SourceTargetSplitter
 
 
@@ -230,7 +231,7 @@ class DataModule(LightningDataModule):
     def __init__(
         self,
         data_dir: str,
-        data_set: str = "QM9",
+        data_set: str = "CrossDocked",
         batch_size: int = 32,
         num_workers: int = 1,
         task: str = "neat",
@@ -258,6 +259,9 @@ class DataModule(LightningDataModule):
             self.vocab_size = len(QM9DataSet.VOCABULARY) + 1
             self.vocab = QM9DataSet.VOCABULARY
         elif self.data_set == "GEOM":
+            self.vocab_size = len(GEOMDataSet.VOCABULARY) + 1
+            self.vocab = GEOMDataSet.VOCABULARY
+        elif self.data_set == "CROSSDOCKED":
             self.vocab_size = len(GEOMDataSet.VOCABULARY) + 1
             self.vocab = GEOMDataSet.VOCABULARY
         else:
@@ -289,6 +293,7 @@ class DataModule(LightningDataModule):
     def setup(self, stage: str = "fit") -> None:
         if stage == "fit":
             if self.data_set == "QM9":
+                print("Using QM9 dataset.")
                 self.full_data = QM9DataSet(self.data_path)
                 splits = self.full_data.get_splits()
                 self.training_data = self.full_data[splits["train"]]
@@ -297,12 +302,21 @@ class DataModule(LightningDataModule):
                 print(f"Number of training graphs: {len(self.training_data)}")
                 print(f"Number of validation graphs: {len(self.validation_data)}")
                 print(f"Number of test graphs: {len(self.test_data)}")
+
             elif self.data_set == "GEOM":
                 print("Using GEOM dataset.")
                 self.training_data = GEOMDataSet(self.data_path, split="train")
                 self.validation_data = GEOMDataSet(self.data_path, split="val")
                 self.test_data = GEOMDataSet(self.data_path, split="test")
+                print(f"Number of training graphs: {len(self.training_data)}")
+                print(f"Number of validation graphs: {len(self.validation_data)}")
+                print(f"Number of test graphs: {len(self.test_data)}")
 
+            elif self.data_set == "CROSSDOCKED":
+                print("Using CrossDocked dataset.")
+                self.training_data = CrossDockedDataSet(self.data_path, split="train")
+                self.validation_data = CrossDockedDataSet(self.data_path, split="val")
+                self.test_data = CrossDockedDataSet(self.data_path, split="test")
                 print(f"Number of training graphs: {len(self.training_data)}")
                 print(f"Number of validation graphs: {len(self.validation_data)}")
                 print(f"Number of test graphs: {len(self.test_data)}")
