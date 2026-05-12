@@ -175,7 +175,7 @@ class NEAT(LightningModule):
             device,
             pocket_x=getattr(data, "pocket_x", None),
             pocket_pos=getattr(data, "pocket_pos", None),
-            pocket_residue_index=getattr(data, "pocket_residue_index", None),
+            pocket_residue_id=getattr(data, "pocket_residue_id", None),
             pocket_residue_type=getattr(data, "pocket_residue_type", None),
             pocket_batch=getattr(data, "pocket_pos_batch", None),
         )  # [batch_size, n_embd]
@@ -218,7 +218,7 @@ class NEAT(LightningModule):
         device: torch.device,
         pocket_x: Tensor | None = None,
         pocket_pos: Tensor | None = None,
-        pocket_residue_index: Tensor | None = None,
+        pocket_residue_id: Tensor | None = None,
         pocket_residue_type: Tensor | None = None,
         pocket_batch: Tensor | None = None,
     ) -> Tensor:
@@ -233,12 +233,36 @@ class NEAT(LightningModule):
         Returns:
             Tensor: The representation of the source atom sets. shape: [batch_size, n_embd]
         """
-        x_source = x_source.to(device)
-        pos_source = pos_source.to(device)
-        batch_source = batch_source.to(device)
-        batch_size = (
-            int(batch_source.max().item()) + 1 if batch_source.numel() > 0 else 0
-        )
+        x_source = x_source.to(device).long()
+        pos_source = pos_source.to(device).float()
+        batch_source = batch_source.to(device).long()
+        batch_size = (int(batch_source.max().item()) + 1 if batch_source.numel() > 0 else 0)
+
+        if pocket_x is not None:
+            pocket_x = pocket_x.to(device).long()
+            pocket_pos = pocket_pos.to(device).float()
+            pocket_residue_id = pocket_residue_id.to(device).long()
+            pocket_residue_type = pocket_residue_type.to(device).long()
+            pocket_batch = pocket_batch.to(device).long()
+
+            # Make the pocket_residue_id continuous across the batch
+            # e.g. [0,0,0,1,1,2,2,2,0,0,1,1] -> [0,0,0,1,1,2,2,2,3,3,4,4]
+            num_res_per_graph = torch.zeros(
+                batch_size, device=device, dtype=torch.long
+            )
+            for graph_idx in range(batch_size):
+                mask_g = pocket_batch == graph_idx
+                if mask_g.any():
+                    num_res_per_graph[graph_idx] = (
+                        int(pocket_residue_id[mask_g].max().item()) + 1
+                    )
+            id_offsets = torch.cat(
+                [
+                    torch.zeros(1, device=device, dtype=torch.long),
+                    torch.cumsum(num_res_per_graph[:-1], dim=0),
+                ]
+            )
+            pocket_residue_id = pocket_residue_id + id_offsets[pocket_batch]
 
         # (1) Compute atom counts of the source sets
         atom_count_source = torch.bincount(batch_source)
@@ -291,7 +315,7 @@ class NEAT(LightningModule):
             device=device,
             pocket_x=pocket_x,
             pocket_pos=pocket_pos,
-            pocket_residue_index=pocket_residue_index,
+            pocket_residue_id=pocket_residue_id,
             pocket_residue_type=pocket_residue_type,
             pocket_batch=pocket_batch,
         )
@@ -328,7 +352,7 @@ class NEAT(LightningModule):
         device: torch.device,
         pocket_x: Tensor | None = None,
         pocket_pos: Tensor | None = None,
-        pocket_residue_index: Tensor | None = None,
+        pocket_residue_id: Tensor | None = None,
         pocket_residue_type: Tensor | None = None,
         pocket_batch: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
@@ -347,7 +371,7 @@ class NEAT(LightningModule):
         if (
             pocket_x is None
             or pocket_pos is None
-            or pocket_residue_index is None
+            or pocket_residue_id is None
             or pocket_residue_type is None
             or pocket_batch is None
             or pocket_x.numel() == 0
@@ -356,16 +380,6 @@ class NEAT(LightningModule):
                 torch.zeros(batch_size, 0, self.hparams.n_embd, device=device),
                 torch.zeros(batch_size, 0, dtype=torch.bool, device=device),
             )
-
-        pocket_x = pocket_x.to(device)
-        pocket_pos = pocket_pos.to(device)
-        pocket_residue_index = pocket_residue_index.to(device).long()
-        pocket_residue_type = pocket_residue_type.to(device).long()
-        pocket_batch = pocket_batch.to(device).long()
-        
-        _, pocket_residue_index = torch.unique(
-            pocket_residue_index.clone(), return_inverse=True
-        )
 
         # (1) Atom-level embeddings
         atom_embedding = self.atom_type_embedding_layer(pocket_x)
@@ -378,7 +392,7 @@ class NEAT(LightningModule):
         )  # shape: [n_atoms, n_embd]
 
         # (2) Create attention mask on a residue level
-        atom_count_per_residue = torch.bincount(pocket_residue_index)
+        atom_count_per_residue = torch.bincount(pocket_residue_id)
         dim = [
             len(atom_count_per_residue),
             atom_count_per_residue.max(),
@@ -411,10 +425,8 @@ class NEAT(LightningModule):
             -1
         )  # [num_residues, max_atom_count_per_residue, n_embd]
 
-        # (4) Pool atom-level tokens into residue-level tokens via mean pooling.
-        residue_tokens = x.sum(dim=1) / atom_mask.sum(
-            dim=1, keepdim=True
-        )  # [num_residues, n_embd]
+        # (4) Pool atom-level tokens into residue-level tokens via sum pooling
+        residue_tokens = x.sum(dim=1)  # [num_residues, n_embd]
 
         # (5) Now we need a residue-level attention mask
         ptr = torch.cat(
