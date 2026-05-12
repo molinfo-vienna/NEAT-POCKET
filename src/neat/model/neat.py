@@ -99,6 +99,13 @@ class NEAT(LightningModule):
             ]
         )
 
+        # Classifier-free guidance: during training, randomly drop pocket
+        # conditioning so the model sees an explicit unconditional signal.
+        self.cfg_null_pocket_token = nn.Parameter(
+            torch.zeros(1, 1, self.hparams.n_embd)
+        )
+        nn.init.normal_(self.cfg_null_pocket_token, mean=0.0, std=0.02)
+
         # Cross-attention from ligand source tokens (queries) to pocket
         # residue tokens (keys/values). A value of 0 disables cross-attention
         # so the model falls back to the unconditioned baseline behavior.
@@ -273,6 +280,10 @@ class NEAT(LightningModule):
             pocket_batch=pocket_batch,
         )
 
+        pocket_tokens, pocket_mask = self.maybe_drop_pocket(
+            pocket_tokens, pocket_mask
+        )
+
         # (1) Compute atom counts of the source sets
         atom_count_source = torch.bincount(batch_source)
 
@@ -378,6 +389,8 @@ class NEAT(LightningModule):
 
         Returns padded tokens and token mask with shape [B, R_max, C] and [B, R_max].
         """
+
+        # 0. Early exit if the batch is empty or if the pocket data is missing.
         if batch_size == 0:
             return (
                 torch.zeros(0, 0, self.hparams.n_embd, device=device),
@@ -403,38 +416,45 @@ class NEAT(LightningModule):
         pocket_residue_type = pocket_residue_type.to(device).long()
         pocket_batch = pocket_batch.to(device).long()
 
+        # 1. Atom-level embeddings
         atom_embedding = self.atom_type_embedding_layer(pocket_x)
         pos_embedding = self.fourier_embedding_layer(pocket_pos)
         residue_type_embedding = self.pocket_residue_type_embedding_layer(pocket_residue_type)
-        atom_tokens = self.dropout_layer(atom_embedding + pos_embedding + residue_type_embedding)
+        atom_tokens = self.dropout_layer(atom_embedding + pos_embedding + residue_type_embedding)  # shape: [n_atoms, n_embd]
         # TODO: Not so sure about adding the residue_type_embedding. 
         # This is not what we originally wanted, but maybe it helps. 
         # Decide later.
 
+        # 2. Residue-level embeddings
+        # 2.1 Track which atom belongs to which residue.
         max_residue_index = int(pocket_residue_index.max().item()) + 1
         global_residue_index = pocket_batch * max_residue_index + pocket_residue_index
         unique_global_residue_index, atom_to_residue = torch.unique(
             global_residue_index, return_inverse=True, sorted=True
-        )
-        residue_count = unique_global_residue_index.numel()
+        )  # sorted list of unique residue indices in the batch, and a mapping from atom indices to residue indices
+        residue_count = unique_global_residue_index.numel()  # Number of distinct residues in the batch
         if residue_count == 0:
             return (
                 torch.zeros(batch_size, 0, self.hparams.n_embd, device=device),
                 torch.zeros(batch_size, 0, dtype=torch.bool, device=device),
             )
 
+        # 2.2 Pool atom-level tokens into residue-level tokens via attention pooling.
         pooled_tokens = self.pool_atoms_to_residues_with_attention(
             atom_tokens=atom_tokens,
             atom_to_residue=atom_to_residue,
             residue_count=residue_count,
-        )
+        )  # shape: [R_max, n_embd]
 
+        # 2.3 Compute the number of residues per graph and the maximum number of residues per graph.
         residue_batch = torch.div(
             unique_global_residue_index, max_residue_index, rounding_mode="floor"
-        )
+        )  # shape: [n_atoms] Recovers graph id for each residue
         residue_count_per_graph = torch.bincount(residue_batch, minlength=batch_size)
         max_residues = int(residue_count_per_graph.max().item())
 
+        # 2.4 Pad the residue-level tokens to the maximum number of residues per graph.
+        # and compute a boolean mask s.t. residues only attend within the same graph and not to padding residues.
         pocket_mask = (
             torch.arange(max_residues, device=device).unsqueeze(0)
             < residue_count_per_graph.unsqueeze(1)
@@ -444,14 +464,61 @@ class NEAT(LightningModule):
         )
         pocket_tokens[pocket_mask] = pooled_tokens
 
-        pocket_attn_mask = pocket_mask.unsqueeze(1) * pocket_mask.unsqueeze(2)
+        # 3. Pass through transformer blocks
+        # 3.1 Compute a boolean attention mask 
+        # s.t. residues only attend within the same graph and not to padding residues.
+        pocket_attn_mask = pocket_mask.unsqueeze(1) * pocket_mask.unsqueeze(2)  # shape: [batch_size, R_max, R_max]
         pocket_attn_mask = pocket_attn_mask.unsqueeze(1).expand(
             -1, self.hparams.n_head, -1, -1
-        )
+        )  # shape: [batch_size, n_head, R_max, R_max]
+        # 3.2 Pass through transformer blocks.
         for block in self.pocket_transformer_blocks:
             pocket_tokens = block(pocket_tokens, attn_mask=pocket_attn_mask, pos=None)
+        # 3.3 Apply the output layer normalization
         pocket_tokens = self.layer_norm_after_pocket_transformer(pocket_tokens)
+        # 3.4 Apply the atom mask to the input embedding (not really needed, could be removed)
         pocket_tokens = pocket_tokens * pocket_mask.unsqueeze(-1)
+
+        return pocket_tokens, pocket_mask
+
+    def maybe_drop_pocket(
+        self,
+        pocket_tokens: Tensor,
+        pocket_mask: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Training-time CFG: randomly replace pocket tokens with a learnable null.
+
+        Uses per-graph Bernoulli sampling so a fraction of the batch trains as
+        unconditional while the rest stays pocket-conditioned.
+        """
+        p = float(self.hparams.cfg_train_drop_prob)
+
+        # 0. Early exit if the module is in eval mode or if the drop probability is 0.
+        if (
+            not self.training
+            or p <= 0.0
+        ):
+            return pocket_tokens, pocket_mask
+
+        # 1. Initialize drop mask with per-graph Bernoulli sampling.
+        # Any 'True' means: for this graph, pretend we do not have pocket data.
+        batch_size = pocket_tokens.size(0)
+        device = pocket_tokens.device
+        drop = (torch.rand(batch_size, device=device) < p)
+
+        # 2. Replace pocket tokens with a learnable null for the dropped graphs.
+        pocket_tokens = pocket_tokens.clone()
+        pocket_mask = pocket_mask.clone()
+        # 2.1 Create a learnable null residue token.
+        null = self.cfg_null_pocket_token.to(
+            device=device, dtype=pocket_tokens.dtype
+        ).view(1, -1)
+        # 2.2 Clear the tensor's entire entries for the dropped graphs.
+        pocket_tokens[drop] = 0
+        pocket_mask[drop] = False
+        # 2.3 Install exactly one learnable null residue at slot 0 and mark it as valid according in the mask.
+        pocket_tokens[drop, 0, :] = null
+        pocket_mask[drop, 0] = True
 
         return pocket_tokens, pocket_mask
 
