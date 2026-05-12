@@ -139,6 +139,7 @@ class BidirectionalAttentionBlock(nn.Module):
         n_head: int,
         dropout: float,
         bias: bool,
+        enable_cross_attention: bool = False,
         pos_embedder: Optional[nn.Module] = None,
     ) -> None:
         super().__init__()
@@ -146,17 +147,27 @@ class BidirectionalAttentionBlock(nn.Module):
         self.attn = MaskedBidirectionalAttention(
             n_embd, n_head, dropout, bias, pos_embedder
         )
-        self.ln_2 = nn.LayerNorm(n_embd, bias=False)
+        if enable_cross_attention:
+            self.ln_2 = nn.LayerNorm(n_embd, bias=False)
+            self.attn_cross = MaskedCrossAttention(n_embd, n_head, dropout, bias)
+
+        self.ln_3 = nn.LayerNorm(n_embd, bias=False)
         self.mlp = MLP(n_embd, dropout, bias=False)
 
     def forward(
         self,
         x: torch.Tensor,
         attn_mask: torch.Tensor,
+        cross_attn_input: Optional[torch.Tensor] = None,
+        cross_attn_mask: Optional[torch.Tensor] = None,
         pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         x = x + self.attn(self.ln_1(x), attn_mask=attn_mask, pos=pos)
-        x = x + self.mlp(self.ln_2(x))
+        if cross_attn_input is not None and cross_attn_mask is not None:
+            x = x + self.attn_cross(
+                cross_attn_input, self.ln_2(x), attn_mask=cross_attn_mask
+            )
+        x = x + self.mlp(self.ln_3(x))
         return x
 
 
@@ -230,48 +241,3 @@ class MaskedCrossAttention(nn.Module):
 
         y = self.resid_dropout(self.c_proj(y))
         return y
-
-
-class CrossAttentionBlock(nn.Module):
-    """A transformer block performing cross-attention from a query stream to a
-    context stream, followed by a feed-forward MLP.
-
-    The query stream (ligand source tokens) is updated with information
-    from the context stream (pocket residue tokens) via masked
-    cross-attention. The context stream is read-only and not updated.
-
-    Args:
-        n_embd (int): Number of embedding dimensions.
-        n_head (int): Number of attention heads.
-        dropout (float): Dropout rate.
-        bias (bool): Whether to use bias in the layers.
-
-    Returns:
-        nn.Module: A cross-attention transformer block module.
-    """
-
-    def __init__(
-        self,
-        n_embd: int,
-        n_head: int,
-        dropout: float,
-        bias: bool,
-    ) -> None:
-        super().__init__()
-        self.ln_q = nn.LayerNorm(n_embd, bias=False)
-        self.ln_kv = nn.LayerNorm(n_embd, bias=False)
-        self.cross_attn = MaskedCrossAttention(n_embd, n_head, dropout, bias)
-        self.ln = nn.LayerNorm(n_embd, bias=False)
-        self.mlp = MLP(n_embd, dropout, bias=False)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        context: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        x = x + self.cross_attn(
-            self.ln_q(x), self.ln_kv(context), attn_mask=attn_mask
-        )
-        x = x + self.mlp(self.ln(x))
-        return x

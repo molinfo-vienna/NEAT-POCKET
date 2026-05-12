@@ -145,11 +145,13 @@ def source_target_split_batch_transform(
         and batch.pocket_pos.numel() > 0
         and hasattr(batch, "pocket_pos_batch")
     ):
-        batch.pos, batch.pocket_pos = rotation_augmentation.rotate_ligand_and_pocket_randomly(
-            batch.pos,
-            batch.batch,
-            batch.pocket_pos,
-            batch.pocket_pos_batch,
+        batch.pos, batch.pocket_pos = (
+            rotation_augmentation.rotate_ligand_and_pocket_randomly(
+                batch.pos,
+                batch.batch,
+                batch.pocket_pos,
+                batch.pocket_pos_batch,
+            )
         )
     else:
         batch.pos = rotation_augmentation.rotate_molecule_randomly(
