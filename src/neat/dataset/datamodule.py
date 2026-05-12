@@ -137,9 +137,24 @@ def source_target_split_batch_transform(
     Returns:
         Batch: Transformed batch of graphs.
     """
-    # (1) Apply random rotation augmentation
+    # (1) Apply random rotation augmentation (ligand + pocket share one rigid transform)
     rotation_augmentation = RandomRotationAugmentation()
-    batch.pos = rotation_augmentation.rotate_graphs_randomly(batch.pos, batch.batch)
+    if (
+        hasattr(batch, "pocket_pos")
+        and batch.pocket_pos is not None
+        and batch.pocket_pos.numel() > 0
+        and hasattr(batch, "pocket_pos_batch")
+    ):
+        batch.pos, batch.pocket_pos = rotation_augmentation.rotate_ligand_and_pocket_randomly(
+            batch.pos,
+            batch.batch,
+            batch.pocket_pos,
+            batch.pocket_pos_batch,
+        )
+    else:
+        batch.pos = rotation_augmentation.rotate_molecule_randomly(
+            batch.pos, batch.batch
+        )
 
     # (2) Create source-target split
     splitter = SourceTargetSplitter(splitting_mode=source_target_split)
@@ -162,6 +177,13 @@ def source_target_split_batch_transform(
         batch.pos[batch.source_ptr], batch.batch[batch.source_ptr]
     )
     batch.pos = batch.pos - mean_pos[batch.batch]
+    if (
+        hasattr(batch, "pocket_pos")
+        and batch.pocket_pos is not None
+        and batch.pocket_pos.numel() > 0
+        and hasattr(batch, "pocket_pos_batch")
+    ):
+        batch.pocket_pos = batch.pocket_pos - mean_pos[batch.pocket_pos_batch]
 
     # (4) Determine source sets with empty target sets, these have stop tokens
     target_set_mask = torch.zeros_like(
@@ -196,8 +218,13 @@ def source_target_split_collate_fn(
     noise_std: float,
     source_set_perturbation: float,
     perturbation_factor: float,
+    follow_batch: list[str] | None = None,
 ) -> Batch:
-    batch = Batch.from_data_list(batch)
+    fb = follow_batch or []
+    if fb:
+        batch = Batch.from_data_list(batch, follow_batch=fb)
+    else:
+        batch = Batch.from_data_list(batch)
     return source_target_split_batch_transform(
         batch,
         source_target_split,
@@ -276,6 +303,9 @@ class DataModule(LightningDataModule):
                 noise_std=self.flow_matching_noise_std,
                 source_set_perturbation=self.source_set_perturbation_std,
                 perturbation_factor=self.source_set_perturbation_fraction,
+                follow_batch=(
+                    ["pocket_pos"] if self.data_set == "CROSSDOCKED" else None
+                ),
             )
 
         elif self.task == "bond_prediction":

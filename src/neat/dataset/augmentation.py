@@ -11,7 +11,11 @@ class RandomRotationAugmentation:
     def __init__(self):
         pass
 
-    def rotate_graphs_randomly(self, positions: torch.Tensor, batch_idx: torch.Tensor):
+    def rotate_molecule_randomly(
+        self, 
+        positions: torch.Tensor, 
+        batch_idx: torch.Tensor
+    ) -> torch.Tensor:
         """Rotate and translate the positions of nodes in a batch of PyG graphs w.r.t. their centers.
 
         Args:
@@ -55,6 +59,34 @@ class RandomRotationAugmentation:
         )  # Shape: (num_nodes, 3)
 
         return recentered_positions
+
+    def rotate_ligand_and_pocket_randomly(
+        self,
+        ligand_pos: torch.Tensor,
+        ligand_batch: torch.Tensor,
+        pocket_pos: torch.Tensor,
+        pocket_batch: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply the same rigid transform as :meth:`rotate_graphs_randomly` to ligand and pocket.
+
+        Rotation axes and angles are sampled per graph from ``ligand_batch``. Centers are
+        the mean ligand position per graph so the pocket follows the ligand frame.
+        """
+        batch_size = int(ligand_batch.max().item()) + 1
+        device = ligand_pos.device
+        quaternions = self._draw_random_quaternions(batch_size, device)
+        rot_operator = self._quaternions_to_rotation_matrices(quaternions.clone())
+        graph_centers = self._compute_graph_centers(ligand_pos, ligand_batch)
+
+        def _apply(pos: torch.Tensor, batch_idx: torch.Tensor) -> torch.Tensor:
+            centered = pos - graph_centers[batch_idx]
+            node_rotation_matrices = rot_operator[batch_idx]
+            rotated = torch.bmm(
+                node_rotation_matrices, centered.unsqueeze(-1)
+            ).squeeze(-1)
+            return rotated + graph_centers[batch_idx]
+
+        return _apply(ligand_pos, ligand_batch), _apply(pocket_pos, pocket_batch)
 
     def _quaternions_to_rotation_matrices(self, quaternions: torch.Tensor):
         """Convert a batch of quaternions to a batch of 3x3 rotation matrices.

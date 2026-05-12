@@ -1,20 +1,116 @@
+
+
+from __future__ import annotations
+
 import logging
 import os
-import gdown
-from pathlib import Path
 import tarfile
-from collections import defaultdict
-from time import time
+from pathlib import Path
 
+import gdown
 import networkx as nx
-from Bio.PDB import PDBParser
-from numpy import random
+import numpy as np
 import torch
+import random
+from Bio.PDB import PDBParser
+from Bio.PDB.Polypeptide import is_aa
 from rdkit import Chem, RDLogger
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
 
 RDLogger.DisableLog("rdApp.*")
+
+SEED = 0
+
+RDKIT_BOND_TO_ID = {
+    Chem.rdchem.BondType.SINGLE: 1,
+    Chem.rdchem.BondType.DOUBLE: 2,
+    Chem.rdchem.BondType.TRIPLE: 3,
+    Chem.rdchem.BondType.AROMATIC: 4,
+}
+
+LIGAND_VOCABULARY = {
+    1: 1,
+    5: 2,
+    6: 3,
+    7: 4,
+    8: 5,
+    9: 6,
+    13: 7,
+    14: 8,
+    15: 9,
+    16: 10,
+    17: 11,
+    33: 12,
+    35: 13,
+    53: 14,
+    80: 15,
+    83: 16,
+}
+
+# Standard 20 amino acids + unknown
+AA_3_TO_IDX = {
+    "ALA": 0,
+    "ARG": 1,
+    "ASN": 2,
+    "ASP": 3,
+    "CYS": 4,
+    "GLN": 5,
+    "GLU": 6,
+    "GLY": 7,
+    "HIS": 8,
+    "ILE": 9,
+    "LEU": 10,
+    "LYS": 11,
+    "MET": 12,
+    "PHE": 13,
+    "PRO": 14,
+    "SER": 15,
+    "THR": 16,
+    "TRP": 17,
+    "TYR": 18,
+    "VAL": 19,
+}
+AA_UNK_IDX = 20
+
+
+def _largest_fragment(mol: Chem.Mol) -> Chem.Mol | None:
+    frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=True)
+    if not frags:
+        return None
+    return max(frags, key=lambda m: m.GetNumHeavyAtoms())
+
+
+def _pdb_heavy_element_symbol(atom) -> str | None:
+    e = (getattr(atom, "element", None) or "").strip().upper()
+    if e:
+        if len(e) > 1:
+            return e
+        return e
+    name = atom.get_name().strip()
+    if not name:
+        return None
+    if len(name) >= 2 and name[:2].upper() in ("FE", "ZN", "MG", "CA", "MN", "CO"):
+        return name[:2].upper()
+    c0 = name[0].upper()
+    if c0 in "CNOSHP":
+        return c0
+    return None
+
+
+def _encode_pocket_atom(symbol: str | None, vocabulary: dict[int, int]) -> int:
+    if symbol is None or symbol.upper() == "H":
+        return 0
+    sym = symbol.strip()
+    pt = Chem.GetPeriodicTable()
+    try:
+        if len(sym) == 1:
+            n = pt.GetAtomicNumber(sym.upper())
+        else:
+            n = pt.GetAtomicNumber(sym[:1].upper() + sym[1:].lower())
+    except Exception:
+        return 0
+    return int(vocabulary.get(n, 0))
 
 
 class CrossDockedDataSet(InMemoryDataset):
@@ -34,7 +130,9 @@ class CrossDockedDataSet(InMemoryDataset):
             an torch_geometric.data.Data object and returns a boolean value,
             indicating whether the data object should be included in the final
             dataset. (default: :obj:`None`)
-        split (str): One of 'train', 'val', or 'test' to specify the dataset split.
+        split (str): One of 'train', or 'test' to specify the dataset split.
+        pocket_dist_cutoff: Include a standard residue if any of its heavy atoms are
+            within this distance (Å) of any ligand heavy atom.
     """
 
     CROSS_DOCKED_ID = "10KGuj15mxOJ2FBsduun2Lggzx0yPreEU"
@@ -47,9 +145,12 @@ class CrossDockedDataSet(InMemoryDataset):
         pre_transform=None,
         pre_filter=None,
         split: str = "train",
+        pocket_dist_cutoff: float = 6.0,
     ):
         self.split = split
+        self.pocket_dist_cutoff = pocket_dist_cutoff
         super().__init__(root, transform, pre_transform, pre_filter)
+        split = split.lower()
         if split == "train":
             self.load(self.processed_paths[0])
         elif split == "val":
@@ -59,13 +160,12 @@ class CrossDockedDataSet(InMemoryDataset):
         else:
             raise ValueError(f"Unknown split: {split}")
 
-    def download(self):
-        """Download the CrossDocked dataset."""
+    def download(self) -> None:
         raw_path = os.path.join(self.root, "raw")
         os.makedirs(raw_path, exist_ok=True)
-        data_file_path = os.path.join(raw_path, self.raw_paths[0])
-        split_file_path = os.path.join(raw_path, self.raw_paths[1])
-        data_extracted_path = os.path.join(raw_path, self.raw_paths[2])
+        data_file_path = os.path.join(raw_path, self.raw_file_names[0])
+        split_file_path = os.path.join(raw_path, self.raw_file_names[1])
+        data_extracted_path = os.path.join(raw_path, self.raw_file_names[2])
 
         if not os.path.exists(data_file_path):
             gdown.download(
@@ -74,8 +174,9 @@ class CrossDockedDataSet(InMemoryDataset):
                 quiet=False,
             )
             print("Downloaded CrossDocked dataset.")
-            
+
         if not os.path.exists(data_extracted_path):
+            os.makedirs(data_extracted_path, exist_ok=True)
             with tarfile.open(data_file_path, "r:gz") as tar:
                 tar.extractall(path=data_extracted_path)
             print("Extraction complete.")
@@ -100,453 +201,223 @@ class CrossDockedDataSet(InMemoryDataset):
     def processed_file_names(self):
         return ["train_data.pt", "val_data.pt", "test_data.pt"]
 
-    def process(self):
-        data_split = torch.load(self.raw_paths[1])
-        datadir = Path(self.root, "raw", "crossdocked_pocket10")
+    def process(self) -> None:
+        split_path = self.raw_paths[1]
+        try:
+            data_split = torch.load(
+                split_path, map_location="cpu", weights_only=False
+            )
+        except TypeError:
+            data_split = torch.load(split_path, map_location="cpu")
 
-        # If there is no validation set, copy training examples (the validation set
-        # is not very important in this application)
-        if "val" not in data_split:
-            random.shuffle(data_split["train"])
-            data_split["val"] = data_split["train"][-self.val_size :]
-            data_split["train"] = data_split["train"][: -self.val_size]
+        # Take 5% of the training data for validation
+        train_data = data_split["train"]
+        random.shuffle(train_data)
+        val_data = train_data[:int(len(train_data) * 0.05)]
+        train_data = train_data[int(len(train_data) * 0.05):]
+        data_split["train"] = train_data
+        data_split["val"] = val_data
 
-        failed = {}
-        train_smiles = []
+        datadir = Path(self.root, "raw", self.raw_file_names[2])
 
-        n_samples_after = {}
-        for split in data_split.keys():
+        split_to_path_idx = {"train": 0, "val": 1, "test": 2}
+        for split_name, path_idx in split_to_path_idx.items():
+            pairs = data_split.get(split_name)
+            if pairs is None:
+                logging.warning(
+                    "Split %r not found in split file; writing empty processed split.",
+                    split_name,
+                )
+                data_list: list[Data] = []
+            else:
+                data_list = self._process_split(pairs, datadir)
 
-            print(f"Processing {split} dataset...")
+                if self.pre_filter is not None:
+                    data_list = [d for d in data_list if self.pre_filter(d)]
+                if self.pre_transform is not None:
+                    data_list = [self.pre_transform(d) for d in data_list]
+                
+                self.save(data_list, self.processed_paths[path_idx])
+                print(f"Saved {len(data_list)} graphs to {self.processed_paths[path_idx]}")
 
-            ligands = defaultdict(list)
-            pockets = defaultdict(list)
+    def _process_split(self, pairs, datadir: Path) -> list[Data]:
+        data_list: list[Data] = []
+        failed: int = 0
+        pbar = tqdm(pairs)
+        for pocket_fn, ligand_fn in pbar:
+            pocket_path = datadir / pocket_fn
+            ligand_path = datadir / ligand_fn
+            try:
+                data = self._process_pair(pocket_path, ligand_path)
+                if data is not None:
+                    data_list.append(data)
+                else:
+                    failed += 1
+            except Exception as e:
+                failed += 1
+                logging.debug("Skip pair %s %s: %s", pocket_fn, ligand_fn, e)
+            pbar.set_postfix(failed=failed)
+        if failed:
+            logging.warning("Dropped %d pairs in this split.", failed)
+        return data_list
 
-            tic = time()
-            pbar = tqdm(data_split[split])
-            for pocket_fn, ligand_fn in pbar:
+    def _process_pair(self, pocket_path: Path, ligand_path: Path) -> Data | None:
+        if not pocket_path.is_file() or not ligand_path.is_file():
+            return None
 
-                pbar.set_description(f"#failed: {len(failed)}")
+        suppl = Chem.SDMolSupplier(str(ligand_path), sanitize=True, removeHs=False)
+        if suppl is None or len(suppl) == 0:
+            return None
+        rdmol = suppl[0]
+        if rdmol is None:
+            return None
 
-                sdffile = os.path.join(datadir, ligand_fn)
-                pdbfile = os.path.join(datadir, pocket_fn)
+        rdmol = _largest_fragment(rdmol)
+        if rdmol is None:
+            return None
 
-                try:
-                    pdb_model = PDBParser(QUIET=True).get_structure("", pdbfile)[0]
-                    rdmol = Chem.SDMolSupplier(str(sdffile))[0]
+        if rdmol.GetNumAtoms() < 1:
+            return None
 
-                    ligand, pocket = self.process_raw_pair(
-                        pdb_model,
-                        rdmol,
-                        pocket_representation=args.pocket,
-                        compute_nerf_params=args.flex,
-                        compute_bb_frames=args.flex,
-                        nma_input=pdbfile if args.normal_modes else None,
-                    )
+        for atom in rdmol.GetAtoms():
+            z = atom.GetAtomicNum()
+            if z not in LIGAND_VOCABULARY:
+                return None
 
-                except (
-                    KeyError,
-                    AssertionError,
-                    FileNotFoundError,
-                    IndexError,
-                    ValueError,
-                    AttributeError,
-                ) as e:
-                    failed[(split, sdffile, pdbfile)] = (type(e).__name__, str(e))
+        pdb_model = PDBParser(QUIET=True).get_structure("", str(pocket_path))[0]
+
+        lig_x, lig_pos = self._ligand_features(rdmol)
+        edge_index, edge_labels = self._ligand_edges(rdmol)
+        if edge_index.numel() == 0:
+            G = nx.Graph()
+            G.add_nodes_from(range(rdmol.GetNumAtoms()))
+        else:
+            G = nx.Graph()
+            for i, j in edge_index.t().tolist():
+                G.add_edge(i, j)
+        eccentricity = torch.tensor(
+            [nx.eccentricity(G, n) for n in range(rdmol.GetNumAtoms())],
+            dtype=torch.long,
+        )
+
+        pocket_x, pocket_pos, pocket_res_idx, pocket_res_type = self._pocket_features(
+            pdb_model, lig_pos
+        )
+        if pocket_pos.shape[0] == 0:
+            return None
+
+        com = lig_pos.mean(dim=0, keepdim=True)
+        lig_pos = lig_pos - com
+        pocket_pos = pocket_pos - com
+
+        smiles = Chem.MolToSmiles(rdmol, canonical=True)
+        name = f"{pocket_path.stem}__{ligand_path.name}"
+
+        return Data(
+            x=lig_x,
+            pos=lig_pos,
+            edge_index=edge_index,
+            edge_labels=edge_labels,
+            eccentricity=eccentricity,
+            smiles=smiles,
+            name=name,
+            pocket_x=pocket_x,
+            pocket_pos=pocket_pos,
+            pocket_residue_index=pocket_res_idx,
+            pocket_residue_type=pocket_res_type,
+        )
+
+    def _ligand_features(self, mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
+        n = mol.GetNumAtoms()
+        x = torch.tensor(
+            [LIGAND_VOCABULARY[a.GetAtomicNum()] for a in mol.GetAtoms()],
+            dtype=torch.long,
+        )
+        conf = mol.GetConformer()
+        pos = torch.zeros((n, 3), dtype=torch.float32)
+        for i in range(n):
+            p = conf.GetAtomPosition(i)
+            pos[i, 0] = p.x
+            pos[i, 1] = p.y
+            pos[i, 2] = p.z
+        return x, pos
+
+    def _ligand_edges(self, mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
+        edge_index: list[tuple[int, int]] = []
+        edge_labels: list[int] = []
+        for bond in mol.GetBonds():
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+            edge_index.append((i, j))
+            edge_index.append((j, i))
+            bt = RDKIT_BOND_TO_ID.get(bond.GetBondType(), 0)
+            edge_labels.append(bt)
+            edge_labels.append(bt)
+        if not edge_index:
+            return (
+                torch.empty(2, 0, dtype=torch.long),
+                torch.empty(0, dtype=torch.long),
+            )
+        edge_index_t = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+        edge_labels_t = torch.tensor(edge_labels, dtype=torch.long)
+        return edge_index_t, edge_labels_t
+
+    def _pocket_features(
+        self, 
+        pdb_model, 
+        lig_pos: torch.Tensor, 
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        cutoff = self.pocket_dist_cutoff
+        lig = lig_pos.numpy()
+
+        # (coords, atom_type_idx, aa_type_idx, residue_index)
+        selected: list[tuple[np.ndarray, int, int, int]] = []
+        residue_index = 0
+
+        for chain in pdb_model.get_chains():
+            for residue in chain.get_residues():
+                if not is_aa(residue.get_resname(), standard=True):
+                    continue
+                resname = residue.get_resname().strip().upper()
+                aa_idx = AA_3_TO_IDX.get(resname, AA_UNK_IDX)
+
+                heavy = [
+                    a
+                    for a in residue.get_atoms()
+                    if _pdb_heavy_element_symbol(a) not in (None, "H")
+                ]
+                if not heavy:
+                    continue
+                res_xyz = np.stack(
+                    [np.asarray(a.get_coord(), dtype=np.float64) for a in heavy],
+                    axis=0,
+                )
+                if (
+                    np.linalg.norm(
+                        res_xyz[:, None, :] - lig[None, :, :], axis=-1
+                    ).min()
+                    >= cutoff
+                ):
                     continue
 
-                nerf_keys = [
-                    "fixed_coord",
-                    "atom_mask",
-                    "nerf_indices",
-                    "length",
-                    "theta",
-                    "chi",
-                    "ddihedral",
-                    "chi_indices",
-                ]
-                for k in (
-                    ["x", "one_hot", "bonds", "bond_one_hot", "v", "nma_vec"]
-                    + nerf_keys
-                    + ["axis_angle"]
-                ):
-                    if k in ligand:
-                        ligands[k].append(ligand[k])
-                    if k in pocket:
-                        pockets[k].append(pocket[k])
+                for atom in heavy:
+                    xyz = np.asarray(atom.get_coord(), dtype=np.float32)
+                    sym = _pdb_heavy_element_symbol(atom)
+                    enc = _encode_pocket_atom(sym, LIGAND_VOCABULARY)
+                    selected.append((xyz, enc, aa_idx, residue_index))
+                residue_index += 1
 
-                pocket_file = pdbfile.name.replace("_", "-")
-                ligand_file = (
-                    Path(pocket_file).stem + "_" + Path(sdffile).name.replace("_", "-")
-                )
-                ligands["name"].append(ligand_file)
-                pockets["name"].append(pocket_file)
-                train_smiles.append(rdmol_to_smiles(rdmol))
-
-                if split in {"val", "test"}:
-                    pdb_sdf_dir = processed_dir / split
-                    pdb_sdf_dir.mkdir(exist_ok=True)
-
-                    # Copy PDB file
-                    pdb_file_out = Path(pdb_sdf_dir, pocket_file)
-                    shutil.copy(pdbfile, pdb_file_out)
-
-                    # Copy SDF file
-                    sdf_file_out = Path(pdb_sdf_dir, ligand_file)
-                    shutil.copy(sdffile, sdf_file_out)
-
-            data = {"ligands": ligands, "pockets": pockets}
-            torch.save(data, Path(processed_dir, f"{split}.pt"))
-
-            if split == "train":
-                np.save(Path(processed_dir, "train_smiles.npy"), train_smiles)
-
-            print(f"Processing {split} set took {(time() - tic) / 60.0:.2f} minutes")
-
-        # --------------------------------------------------------------------------
-        # Compute statistics & additional information
-        # --------------------------------------------------------------------------
-        train_data = torch.load(Path(processed_dir, f"train.pt"))
-
-        # Maximum molecule size
-        max_ligand_size = max([len(x) for x in train_data["ligands"]["x"]])
-
-        # Joint histogram of number of ligand and pocket nodes
-        pocket_coords = train_data["pockets"]["x"]
-        ligand_coords = train_data["ligands"]["x"]
-        n_nodes = get_n_nodes(ligand_coords, pocket_coords)
-        np.save(Path(processed_dir, "size_distribution.npy"), n_nodes)
-
-        # Get histograms of ligand node types
-        lig_one_hot = [x.numpy() for x in train_data["ligands"]["one_hot"]]
-        ligand_hist = get_type_histogram(lig_one_hot, atom_encoder)
-        np.save(Path(processed_dir, "ligand_type_histogram.npy"), ligand_hist)
-
-        # Get histograms of ligand edge types
-        lig_bond_one_hot = [x.numpy() for x in train_data["ligands"]["bond_one_hot"]]
-        ligand_bond_hist = get_type_histogram(lig_bond_one_hot, bond_encoder)
-        np.save(Path(processed_dir, "ligand_bond_type_histogram.npy"), ligand_bond_hist)
-
-        # Write error report
-        error_str = ""
-        for k, v in failed.items():
-            error_str += f"{'Split':<15}:  {k[0]}\n"
-            error_str += f"{'Ligand':<15}:  {k[1]}\n"
-            error_str += f"{'Pocket':<15}:  {k[2]}\n"
-            error_str += f"{'Error type':<15}:  {v[0]}\n"
-            error_str += f"{'Error msg':<15}:  {v[1]}\n\n"
-
-        with open(Path(processed_dir, "errors.txt"), "w") as f:
-            f.write(error_str)
-
-        metadata = {"max_ligand_size": max_ligand_size}
-        with open(Path(processed_dir, "metadata.yml"), "w") as f:
-            yaml.dump(metadata, f, default_flow_style=False)
-
-    def process_raw_pair(
-        self,
-        biopython_model,
-        rdmol,
-        dist_cutoff=None,
-        pocket_representation="side_chain_bead",
-        compute_nerf_params=False,
-        compute_bb_frames=False,
-        nma_input=None,
-        return_pocket_pdb=False,
-    ):
-
-        # Process ligand
-        ligand = self.prepare_ligand(rdmol, self.atom_encoder, self.bond_encoder)
-
-        # Find interacting pocket residues based on distance cutoff
-        pocket_residues = []
-        for residue in biopython_model.get_residues():
-
-            # Remove non-standard amino acids and HETATMs
-            if not is_aa(residue.get_resname(), standard=True):
-                continue
-
-            res_coords = torch.from_numpy(
-                np.array([a.get_coord() for a in residue.get_atoms()])
-            )
-            if (
-                dist_cutoff is None
-                or (
-                    ((res_coords[:, None, :] - ligand["x"][None, :, :]) ** 2).sum(-1)
-                    ** 0.5
-                ).min()
-                < dist_cutoff
-            ):
-                pocket_residues.append(residue)
-
-        pocket, pocket_residues = self.prepare_pocket(
-            pocket_residues,
-            self.aa_encoder,
-            self.residue_encoder,
-            self.residue_bond_encoder,
-            self.pocket_representation,
-            self.compute_nerf_params,
-            self.compute_bb_frames,
-            self.nma_input,
-        )
-
-        if return_pocket_pdb:
-            builder = StructureBuilder.StructureBuilder()
-            builder.init_structure("")
-            builder.init_model(0)
-            pocket_struct = builder.get_structure()
-            for residue in pocket_residues:
-                chain = residue.get_parent().get_id()
-
-                # init chain if necessary
-                if not pocket_struct[0].has_id(chain):
-                    builder.init_chain(chain)
-
-                # add residue
-                pocket_struct[0][chain].add(residue)
-
-            pocket["pocket_pdb"] = pocket_struct
-        # if return_pocket_pdb:
-        #     pocket['residues'] = [prepare_internal_coord(res) for res in pocket_residues]
-
-        return ligand, pocket
-
-    def prepare_ligand(self, rdmol, atom_encoder, bond_encoder):
-
-        # remove H atoms if not in atom_encoder
-        if "H" not in atom_encoder:
-            rdmol = Chem.RemoveAllHs(rdmol, sanitize=False)
-
-        # Coordinates
-        ligand_coord = rdmol.GetConformer().GetPositions()
-        ligand_coord = torch.from_numpy(ligand_coord)
-
-        # Features
-        ligand_onehot = F.one_hot(
-            torch.tensor([encode_atom(a, atom_encoder) for a in rdmol.GetAtoms()]),
-            num_classes=len(atom_encoder),
-        )
-
-        # Bonds
-        adj = (
-            np.ones((rdmol.GetNumAtoms(), rdmol.GetNumAtoms())) * bond_encoder["NOBOND"]
-        )
-        for b in rdmol.GetBonds():
-            i = b.GetBeginAtomIdx()
-            j = b.GetEndAtomIdx()
-            adj[i, j] = bond_encoder[str(b.GetBondType())]
-            adj[j, i] = adj[i, j]  # undirected graph
-
-        # molecular graph is undirected -> don't save redundant information
-        bonds = np.stack(np.triu_indices(len(ligand_coord), k=1), axis=0)
-        # bonds = np.stack(np.ones_like(adj).nonzero(), axis=0)
-        bond_types = adj[bonds[0], bonds[1]].astype("int64")
-        bonds = torch.from_numpy(bonds)
-        bond_types = F.one_hot(
-            torch.from_numpy(bond_types), num_classes=len(bond_encoder)
-        )
-
-        ligand = {
-            "x": ligand_coord.to(dtype=FLOAT_TYPE),
-            "one_hot": ligand_onehot.to(dtype=FLOAT_TYPE),
-            "mask": torch.zeros(len(ligand_coord), dtype=INT_TYPE),
-            "bonds": bonds.to(INT_TYPE),
-            "bond_one_hot": bond_types.to(FLOAT_TYPE),
-            "bond_mask": torch.zeros(bonds.size(1), dtype=INT_TYPE),
-            "size": torch.tensor([len(ligand_coord)], dtype=INT_TYPE),
-            "n_bonds": torch.tensor([len(bond_types)], dtype=INT_TYPE),
-        }
-
-        return ligand
-
-    def prepare_pocket(
-        biopython_residues,
-        amino_acid_encoder,
-        residue_encoder,
-        residue_bond_encoder,
-        pocket_representation="side_chain_bead",
-        compute_nerf_params=False,
-        compute_bb_frames=False,
-        nma_input=None,
-    ):
-
-        assert (
-            nma_input is None or pocket_representation == "CA+"
-        ), "vector features are only supported for CA+ pockets"
-
-        # sort residues
-        biopython_residues = sorted(
-            biopython_residues, key=lambda x: (x.parent.id, x.id[1])
-        )
-
-        if nma_input is not None:
-            # preprocessed normal mode eigenvectors
-            if isinstance(nma_input, dict):
-                nma_dict = nma_input
-
-            # PDB file
-            else:
-                nma_dict = pdb_to_normal_modes(str(nma_input))
-
-        if pocket_representation == "side_chain_bead":
-            ca_coords = np.zeros((len(biopython_residues), 3))
-            ca_types = np.zeros(len(biopython_residues), dtype="int64")
-            side_chain_coords = []
-            side_chain_aa_types = []
-            edges = []  # CA-CA and CA-side_chain
-            edge_types = []
-            last_res_id = None
-            for i, res in enumerate(biopython_residues):
-                aa = amino_acid_encoder[protein_letters_3to1[res.get_resname()]]
-                ca_coords[i, :] = res["CA"].get_coord()
-                ca_types[i] = aa
-                side_chain_coord = get_side_chain_bead_coord(res)
-                if side_chain_coord is not None:
-                    side_chain_coords.append(side_chain_coord)
-                    side_chain_aa_types.append(aa)
-                    edges.append((i, len(ca_coords) + len(side_chain_coords) - 1))
-                    edge_types.append(residue_bond_encoder["CA-SS"])
-
-                # add edges between contiguous CA atoms
-                if i > 0 and res.id[1] == last_res_id + 1:
-                    edges.append((i - 1, i))
-                    edge_types.append(residue_bond_encoder["CA-CA"])
-
-                last_res_id = res.id[1]
-
-            # Coordinates
-            side_chain_coords = np.stack(side_chain_coords)
-            pocket_coords = np.concatenate([ca_coords, side_chain_coords], axis=0)
-            pocket_coords = torch.from_numpy(pocket_coords)
-
-            # Features
-            amino_acid_onehot = F.one_hot(
-                torch.cat(
-                    [
-                        torch.from_numpy(ca_types),
-                        torch.tensor(side_chain_aa_types, dtype=torch.int64),
-                    ],
-                    dim=0,
-                ),
-                num_classes=len(amino_acid_encoder),
-            )
-            side_chain_onehot = np.concatenate(
-                [
-                    np.tile(
-                        np.eye(1, len(residue_encoder), residue_encoder["CA"]),
-                        [len(ca_coords), 1],
-                    ),
-                    np.tile(
-                        np.eye(1, len(residue_encoder), residue_encoder["SS"]),
-                        [len(side_chain_coords), 1],
-                    ),
-                ],
-                axis=0,
-            )
-            side_chain_onehot = torch.from_numpy(side_chain_onehot)
-            pocket_onehot = torch.cat([amino_acid_onehot, side_chain_onehot], dim=1)
-
-            vector_features = None
-            nma_features = None
-
-            # Bonds
-            edges = torch.tensor(edges).T
-            edge_types = F.one_hot(
-                torch.tensor(edge_types), num_classes=len(residue_bond_encoder)
+        if not selected:
+            return (
+                torch.empty(0, dtype=torch.long),
+                torch.zeros(0, 3, dtype=torch.float32),
+                torch.empty(0, dtype=torch.long),
+                torch.empty(0, dtype=torch.long),
             )
 
-        elif pocket_representation == "CA+":
-            ca_coords = np.zeros((len(biopython_residues), 3))
-            ca_types = np.zeros(len(biopython_residues), dtype="int64")
+        pocket_pos = torch.from_numpy(np.stack([t[0] for t in selected], axis=0))
+        pocket_x = torch.tensor([t[1] for t in selected], dtype=torch.long)
+        pocket_residue_type = torch.tensor([t[2] for t in selected], dtype=torch.long)
+        pocket_residue_index = torch.tensor([t[3] for t in selected], dtype=torch.long)
 
-            v_dim = max([x for aa in aa_atom_index.values() for x in aa.values()]) + 1
-            vec_feats = np.zeros((len(biopython_residues), v_dim, 3), dtype="float32")
-            nf_nma = 5
-            nma_feats = np.zeros((len(biopython_residues), nf_nma, 3), dtype="float32")
-
-            edges = []  # CA-CA and CA-side_chain
-            edge_types = []
-            last_res_id = None
-            for i, res in enumerate(biopython_residues):
-                aa = amino_acid_encoder[protein_letters_3to1[res.get_resname()]]
-                ca_coords[i, :] = res["CA"].get_coord()
-                ca_types[i] = aa
-
-                vec_feats[i] = get_side_chain_vectors(res, aa_atom_index, v_dim)
-                if nma_input is not None:
-                    nma_feats[i] = get_normal_modes(res, nma_dict)
-
-                # add edges between contiguous CA atoms
-                if i > 0 and res.id[1] == last_res_id + 1:
-                    edges.append((i - 1, i))
-                    edge_types.append(residue_bond_encoder["CA-CA"])
-
-                last_res_id = res.id[1]
-
-            # Coordinates
-            pocket_coords = torch.from_numpy(ca_coords)
-
-            # Features
-            pocket_onehot = F.one_hot(
-                torch.from_numpy(ca_types), num_classes=len(amino_acid_encoder)
-            )
-
-            vector_features = torch.from_numpy(vec_feats)
-            nma_features = torch.from_numpy(nma_feats)
-
-            # Bonds
-            if len(edges) < 1:
-                edges = torch.empty(2, 0)
-                edge_types = torch.empty(0, len(residue_bond_encoder))
-            else:
-                edges = torch.tensor(edges).T
-                edge_types = F.one_hot(
-                    torch.tensor(edge_types), num_classes=len(residue_bond_encoder)
-                )
-
-        else:
-            raise NotImplementedError(
-                f"Pocket representation '{pocket_representation}' not implemented"
-            )
-
-        # pocket_ids = [f'{res.parent.id}:{res.id[1]}' for res in biopython_residues]
-
-        pocket = {
-            "x": pocket_coords.to(dtype=FLOAT_TYPE),
-            "one_hot": pocket_onehot.to(dtype=FLOAT_TYPE),
-            # 'ids': pocket_ids,
-            "size": torch.tensor([len(pocket_coords)], dtype=INT_TYPE),
-            "mask": torch.zeros(len(pocket_coords), dtype=INT_TYPE),
-            "bonds": edges.to(INT_TYPE),
-            "bond_one_hot": edge_types.to(FLOAT_TYPE),
-            "bond_mask": torch.zeros(edges.size(1), dtype=INT_TYPE),
-            "n_bonds": torch.tensor([len(edge_types)], dtype=INT_TYPE),
-        }
-
-        if vector_features is not None:
-            pocket["v"] = vector_features.to(dtype=FLOAT_TYPE)
-
-        if nma_input is not None:
-            pocket["nma_vec"] = nma_features.to(dtype=FLOAT_TYPE)
-
-        if compute_nerf_params:
-            nerf_params = [get_nerf_params(r) for r in biopython_residues]
-            nerf_params = {
-                k: torch.stack([x[k] for x in nerf_params], dim=0)
-                for k in nerf_params[0].keys()
-            }
-            pocket.update(nerf_params)
-
-        if compute_bb_frames:
-            n_xyz = torch.from_numpy(
-                np.stack([r["N"].get_coord() for r in biopython_residues])
-            )
-            ca_xyz = torch.from_numpy(
-                np.stack([r["CA"].get_coord() for r in biopython_residues])
-            )
-            c_xyz = torch.from_numpy(
-                np.stack([r["C"].get_coord() for r in biopython_residues])
-            )
-            pocket["axis_angle"], _ = get_bb_transform(n_xyz, ca_xyz, c_xyz)
-
-        return pocket, biopython_residues
+        return pocket_x, pocket_pos, pocket_residue_index, pocket_residue_type

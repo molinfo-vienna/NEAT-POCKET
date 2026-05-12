@@ -686,7 +686,7 @@ class NEAT(LightningModule):
             ).to(device)
 
             rotation_augmentation = RandomRotationAugmentation()
-            pos = rotation_augmentation.rotate_graphs_randomly(pos, batch_source)
+            pos = rotation_augmentation.rotate_molecule_randomly(pos, batch_source)
             # trans = torch.randn(batch_size, 3, device=device)
             # pos += trans[batch_source]
         else:
