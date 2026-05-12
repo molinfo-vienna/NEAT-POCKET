@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 import logging
@@ -176,9 +174,8 @@ class CrossDockedDataSet(InMemoryDataset):
             print("Downloaded CrossDocked dataset.")
 
         if not os.path.exists(data_extracted_path):
-            os.makedirs(data_extracted_path, exist_ok=True)
             with tarfile.open(data_file_path, "r:gz") as tar:
-                tar.extractall(path=data_extracted_path)
+                tar.extractall(path=raw_path)
             print("Extraction complete.")
 
         if not os.path.exists(split_file_path):
@@ -204,17 +201,15 @@ class CrossDockedDataSet(InMemoryDataset):
     def process(self) -> None:
         split_path = self.raw_paths[1]
         try:
-            data_split = torch.load(
-                split_path, map_location="cpu", weights_only=False
-            )
+            data_split = torch.load(split_path, map_location="cpu", weights_only=False)
         except TypeError:
             data_split = torch.load(split_path, map_location="cpu")
 
         # Take 5% of the training data for validation
         train_data = data_split["train"]
         random.shuffle(train_data)
-        val_data = train_data[:int(len(train_data) * 0.05)]
-        train_data = train_data[int(len(train_data) * 0.05):]
+        val_data = train_data[: int(len(train_data) * 0.05)]
+        train_data = train_data[int(len(train_data) * 0.05) :]
         data_split["train"] = train_data
         data_split["val"] = val_data
 
@@ -236,9 +231,11 @@ class CrossDockedDataSet(InMemoryDataset):
                     data_list = [d for d in data_list if self.pre_filter(d)]
                 if self.pre_transform is not None:
                     data_list = [self.pre_transform(d) for d in data_list]
-                
+
                 self.save(data_list, self.processed_paths[path_idx])
-                print(f"Saved {len(data_list)} graphs to {self.processed_paths[path_idx]}")
+                print(
+                    f"Saved {len(data_list)} graphs to {self.processed_paths[path_idx]}"
+                )
 
     def _process_split(self, pairs, datadir: Path) -> list[Data]:
         data_list: list[Data] = []
@@ -363,9 +360,9 @@ class CrossDockedDataSet(InMemoryDataset):
         return edge_index_t, edge_labels_t
 
     def _pocket_features(
-        self, 
-        pdb_model, 
-        lig_pos: torch.Tensor, 
+        self,
+        pdb_model,
+        lig_pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         cutoff = self.pocket_dist_cutoff
         lig = lig_pos.numpy()
@@ -393,9 +390,7 @@ class CrossDockedDataSet(InMemoryDataset):
                     axis=0,
                 )
                 if (
-                    np.linalg.norm(
-                        res_xyz[:, None, :] - lig[None, :, :], axis=-1
-                    ).min()
+                    np.linalg.norm(res_xyz[:, None, :] - lig[None, :, :], axis=-1).min()
                     >= cutoff
                 ):
                     continue
