@@ -12,7 +12,7 @@ class GenerationMonitor(Callback):
     Args:
         num_samples: Number of molecules to generate for evaluation.
         every_n_epochs: Frequency (in epochs) to perform generation and evaluation.
-        dataset: Dataset name, either "QM9" or "GEOM".
+        dataset: Dataset name, either "QM9" or "GEOM" or "CrossDocked".
     """
 
     def __init__(
@@ -63,22 +63,10 @@ class GenerationMonitor(Callback):
                 batch_size=self.num_samples, integration_method="euler"
             )
 
-        elif self.dataset == "GEOM":
+        elif self.dataset == "GEOM" or self.dataset == "CrossDocked":
             generated_mols = pl_module.generate(
                 batch_size=self.num_samples, integration_method="euler_maruyama"
             )
-            # (
-            #     _,
-            #     _,
-            #     frac_valid,
-            #     frac_unique,
-            #     _,
-            # ) = edm_metrics(
-            #     generated_mols.x.cpu(),
-            #     generated_mols.pos.cpu(),
-            #     generated_mols.batch.cpu(),
-            #     self.dataset,
-            # )
         else:
             raise ValueError(f"Unknown dataset: {self.dataset}")
 

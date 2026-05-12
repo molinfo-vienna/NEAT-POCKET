@@ -15,7 +15,7 @@ from torch_geometric.nn.pool import global_mean_pool
 from tqdm import tqdm
 
 from ..dataset.augmentation import RandomRotationAugmentation
-from .attention import Block
+from .attention import BidirectionalAttentionBlock, CrossAttentionBlock
 from .positional_encoding import (AxialRotaryPositionEncoding,
                                   FourierPositionEncoding)
 from .simple_mlp import SimpleMLPAdaLN
@@ -30,8 +30,21 @@ class NEAT(LightningModule):
         self.save_hyperparameters()
 
         # Atom type embedding layer
-        self.atom_type_embedding = nn.Embedding(
-            num_embeddings=self.hparams.vocab_size, embedding_dim=self.hparams.n_embd
+        self.atom_type_embedding_layer = nn.Embedding(
+            num_embeddings=self.hparams.vocab_size, 
+            embedding_dim=self.hparams.n_embd, 
+        )
+        
+        # Pocket residue type embedding layer
+        self.hparams.setdefault("pocket_residue_vocab_size", 21)
+        self.pocket_residue_type_embedding_layer = nn.Embedding(
+            num_embeddings=self.hparams.pocket_residue_vocab_size,
+            embedding_dim=self.hparams.n_embd,
+        )
+        self.pocket_atom_to_residue_attention_layer = nn.Sequential(
+            nn.Linear(self.hparams.n_embd, self.hparams.n_embd,),
+            nn.GELU(),
+            nn.Linear(self.hparams.n_embd, 1),
         )
 
         # Fourier features for embedding of Cartesian coordinates
@@ -42,10 +55,11 @@ class NEAT(LightningModule):
         # Dropout layer
         self.dropout_layer = nn.Dropout(self.hparams.dropout)
 
-        # Transformer blocks
+        # Transformer blocks for the ligand stream
+        self.hparams.setdefault("ligand_n_layer", 12)
         self.transformer_blocks = nn.ModuleList(
             [
-                Block(
+                BidirectionalAttentionBlock(
                     self.hparams.n_embd,
                     self.hparams.n_head,
                     self.hparams.dropout,
@@ -59,12 +73,56 @@ class NEAT(LightningModule):
                         else None
                     ),
                 )
-                for _ in range(self.hparams.n_layer)
+                for _ in range(self.hparams.ligand_n_layer)
+            ]
+        )
+
+        # Transformer blocks for the pocket stream
+        self.hparams.setdefault("pocket_n_layer", self.hparams.n_layer)
+        self.pocket_transformer_blocks = nn.ModuleList(
+            [
+                BidirectionalAttentionBlock(
+                    self.hparams.n_embd,
+                    self.hparams.n_head,
+                    self.hparams.dropout,
+                    self.hparams.bias,
+                    (
+                        AxialRotaryPositionEncoding(
+                            embed_dim=self.hparams.n_embd,
+                            num_heads=self.hparams.n_head,
+                        )
+                        if self.hparams.rope
+                        else None
+                    ),
+                )
+                for _ in range(self.hparams.pocket_n_layer)
+            ]
+        )
+
+        # Cross-attention from ligand source tokens (queries) to pocket
+        # residue tokens (keys/values). A value of 0 disables cross-attention
+        # so the model falls back to the unconditioned baseline behavior.
+        self.hparams.setdefault("cross_attn_n_layer", self.hparams.n_layer)
+        self.cross_attention_blocks = nn.ModuleList(
+            [
+                CrossAttentionBlock(
+                    self.hparams.n_embd,
+                    self.hparams.n_head,
+                    self.hparams.dropout,
+                    self.hparams.bias,
+                )
+                for _ in range(self.hparams.cross_attn_n_layer)
             ]
         )
 
         # Layer normalization after the transformer blocks
         self.layer_norm_after_transformer = nn.LayerNorm(
+            self.hparams.n_embd, bias=False
+        )
+        self.layer_norm_after_pocket_transformer = nn.LayerNorm(
+            self.hparams.n_embd, bias=False
+        )
+        self.layer_norm_after_cross_attention = nn.LayerNorm(
             self.hparams.n_embd, bias=False
         )
 
@@ -140,6 +198,11 @@ class NEAT(LightningModule):
             data.pos[data.source_ptr],
             data.batch[data.source_ptr],
             device,
+            pocket_x=getattr(data, "pocket_x", None),
+            pocket_pos=getattr(data, "pocket_pos", None),
+            pocket_residue_index=getattr(data, "pocket_residue_index", None),
+            pocket_residue_type=getattr(data, "pocket_residue_type", None),
+            pocket_batch=getattr(data, "pocket_pos_batch", None),
         )  # [batch_size, n_embd]
 
         # (2) Compute the logits for the atom type prediction
@@ -178,6 +241,11 @@ class NEAT(LightningModule):
         pos_source: Tensor,
         batch_source: Tensor,
         device: torch.device,
+        pocket_x: Tensor | None = None,
+        pocket_pos: Tensor | None = None,
+        pocket_residue_index: Tensor | None = None,
+        pocket_residue_type: Tensor | None = None,
+        pocket_batch: Tensor | None = None,
     ) -> Tensor:
         """Compute the representation of the source atom sets.
 
@@ -193,6 +261,17 @@ class NEAT(LightningModule):
         x_source = x_source.to(device)
         pos_source = pos_source.to(device)
         batch_source = batch_source.to(device)
+        batch_size = int(batch_source.max().item()) + 1 if batch_source.numel() > 0 else 0
+
+        pocket_tokens, pocket_mask = self.encode_pocket(
+            batch_size=batch_size,
+            device=device,
+            pocket_x=pocket_x,
+            pocket_pos=pocket_pos,
+            pocket_residue_index=pocket_residue_index,
+            pocket_residue_type=pocket_residue_type,
+            pocket_batch=pocket_batch,
+        )
 
         # (1) Compute atom counts of the source sets
         atom_count_source = torch.bincount(batch_source)
@@ -219,7 +298,7 @@ class NEAT(LightningModule):
         )  # [batch_size, n_head, max_atom_count, max_atom_count]
 
         # (3) Embed the atom types and positions
-        atom_type_embedding = self.atom_type_embedding(
+        atom_type_embedding = self.atom_type_embedding_layer(
             x_source
         )  # [n_source_atoms, n_embd]
         positional_embedding = self.fourier_embedding_layer(
@@ -257,13 +336,151 @@ class NEAT(LightningModule):
         # (8) Apply the output layer normalization
         x = self.layer_norm_after_transformer(x)  # [batch_size, max_atom_count, n_embd]
 
-        # (9) Apply the atom mask to the input embedding (not really needed, could be removed)
+        # (9) Inject pocket residue tokens into the ligand stream via
+        # cross-attention. Cross-attention is skipped when no pocket tokens are
+        # available (e.g. unconditional generation or missing pocket data) so
+        # the model behaves like the unconditioned baseline.
+        if (
+            len(self.cross_attention_blocks) > 0
+            and pocket_tokens.size(1) > 0
+        ):
+            cross_attn_mask = atom_mask.unsqueeze(2) & pocket_mask.unsqueeze(
+                1
+            )  # [batch_size, max_atom_count, max_residues]
+            cross_attn_mask = cross_attn_mask.unsqueeze(1).expand(
+                -1, self.hparams.n_head, -1, -1
+            )  # [batch_size, n_head, max_atom_count, max_residues]
+            for block in self.cross_attention_blocks:
+                x = block(
+                    x, pocket_tokens, attn_mask=cross_attn_mask
+                )  # [batch_size, max_atom_count, n_embd]
+            x = self.layer_norm_after_cross_attention(x)
+
+        # (10) Apply the atom mask to the input embedding (not really needed, could be removed)
         x = x * atom_mask.unsqueeze(-1)  # [batch_size, max_atom_count, n_embd]
 
-        # (10) Pool the atom embeddings into a molecule embedding
+        # (11) Pool the atom embeddings into a molecule embedding
         source_set_representation = x.sum(dim=1)  # [batch_size, n_embd]
 
         return source_set_representation
+
+    def encode_pocket(
+        self,
+        batch_size: int,
+        device: torch.device,
+        pocket_x: Tensor | None = None,
+        pocket_pos: Tensor | None = None,
+        pocket_residue_index: Tensor | None = None,
+        pocket_residue_type: Tensor | None = None,
+        pocket_batch: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Encode pocket atoms into contextualized residue embeddings.
+
+        Returns padded tokens and token mask with shape [B, R_max, C] and [B, R_max].
+        """
+        if batch_size == 0:
+            return (
+                torch.zeros(0, 0, self.hparams.n_embd, device=device),
+                torch.zeros(0, 0, dtype=torch.bool, device=device),
+            )
+
+        if (
+            pocket_x is None
+            or pocket_pos is None
+            or pocket_residue_index is None
+            or pocket_residue_type is None
+            or pocket_batch is None
+            or pocket_x.numel() == 0
+        ):
+            return (
+                torch.zeros(batch_size, 0, self.hparams.n_embd, device=device),
+                torch.zeros(batch_size, 0, dtype=torch.bool, device=device),
+            )
+
+        pocket_x = pocket_x.to(device)
+        pocket_pos = pocket_pos.to(device)
+        pocket_residue_index = pocket_residue_index.to(device).long()
+        pocket_residue_type = pocket_residue_type.to(device).long()
+        pocket_batch = pocket_batch.to(device).long()
+
+        atom_embedding = self.atom_type_embedding_layer(pocket_x)
+        pos_embedding = self.fourier_embedding_layer(pocket_pos)
+        residue_type_embedding = self.pocket_residue_type_embedding_layer(pocket_residue_type)
+        atom_tokens = self.dropout_layer(atom_embedding + pos_embedding + residue_type_embedding)
+        # TODO: Not so sure about adding the residue_type_embedding. 
+        # This is not what we originally wanted, but maybe it helps. 
+        # Decide later.
+
+        max_residue_index = int(pocket_residue_index.max().item()) + 1
+        global_residue_index = pocket_batch * max_residue_index + pocket_residue_index
+        unique_global_residue_index, atom_to_residue = torch.unique(
+            global_residue_index, return_inverse=True, sorted=True
+        )
+        residue_count = unique_global_residue_index.numel()
+        if residue_count == 0:
+            return (
+                torch.zeros(batch_size, 0, self.hparams.n_embd, device=device),
+                torch.zeros(batch_size, 0, dtype=torch.bool, device=device),
+            )
+
+        pooled_tokens = self.pool_atoms_to_residues_with_attention(
+            atom_tokens=atom_tokens,
+            atom_to_residue=atom_to_residue,
+            residue_count=residue_count,
+        )
+
+        residue_batch = torch.div(
+            unique_global_residue_index, max_residue_index, rounding_mode="floor"
+        )
+        residue_count_per_graph = torch.bincount(residue_batch, minlength=batch_size)
+        max_residues = int(residue_count_per_graph.max().item())
+
+        pocket_mask = (
+            torch.arange(max_residues, device=device).unsqueeze(0)
+            < residue_count_per_graph.unsqueeze(1)
+        )
+        pocket_tokens = torch.zeros(
+            batch_size, max_residues, self.hparams.n_embd, device=device
+        )
+        pocket_tokens[pocket_mask] = pooled_tokens
+
+        pocket_attn_mask = pocket_mask.unsqueeze(1) * pocket_mask.unsqueeze(2)
+        pocket_attn_mask = pocket_attn_mask.unsqueeze(1).expand(
+            -1, self.hparams.n_head, -1, -1
+        )
+        for block in self.pocket_transformer_blocks:
+            pocket_tokens = block(pocket_tokens, attn_mask=pocket_attn_mask, pos=None)
+        pocket_tokens = self.layer_norm_after_pocket_transformer(pocket_tokens)
+        pocket_tokens = pocket_tokens * pocket_mask.unsqueeze(-1)
+
+        return pocket_tokens, pocket_mask
+
+    def pool_atoms_to_residues_with_attention(
+        self,
+        atom_tokens: Tensor,
+        atom_to_residue: Tensor,
+        residue_count: int,
+    ) -> Tensor:
+        """Pool atom-level tokens into residue-level tokens using attention."""
+        pooled_tokens = torch.zeros(
+            residue_count,
+            self.hparams.n_embd,
+            device=atom_tokens.device,
+            dtype=atom_tokens.dtype,
+        )
+        attention_logits = self.pocket_atom_to_residue_attention_layer(atom_tokens).squeeze(-1)
+
+        for residue_idx in range(residue_count):
+            residue_atom_mask = atom_to_residue == residue_idx
+            residue_atom_tokens = atom_tokens[residue_atom_mask]
+            residue_attention = F.softmax(
+                attention_logits[residue_atom_mask], dim=0
+            ).unsqueeze(-1)
+            pooled_tokens[residue_idx] = torch.sum(
+                residue_attention * residue_atom_tokens, dim=0
+            )
+
+        return pooled_tokens
 
     def compute_atom_type_loss(
         self,
@@ -476,7 +693,7 @@ class NEAT(LightningModule):
 
         # CFM paths are conditioned on the type of the respective target atoms,
         # so we need to include this information in the flow matching condition.
-        target_atom_type_embeddings = self.atom_type_embedding(
+        target_atom_type_embeddings = self.atom_type_embedding_layer(
             x
         )  # [n_target_atoms, n_embd]
 
