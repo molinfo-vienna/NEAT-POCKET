@@ -51,6 +51,9 @@ class NEAT(LightningModule):
 
         # Transformer blocks for the ligand stream
         self.hparams.setdefault("ligand_n_layer", 12)
+        self.enable_cross_attention = (
+            True if self.hparams.data_set == "CrossDocked" else False
+        )
         self.transformer_blocks = nn.ModuleList(
             [
                 BidirectionalAttentionBlock(
@@ -58,7 +61,7 @@ class NEAT(LightningModule):
                     self.hparams.n_head,
                     self.hparams.dropout,
                     self.hparams.bias,
-                    enable_cross_attention=True,
+                    enable_cross_attention=self.enable_cross_attention,
                 )
                 for _ in range(self.hparams.ligand_n_layer)
             ]
@@ -309,23 +312,27 @@ class NEAT(LightningModule):
         # (6) Apply the atom mask to the input embedding
         x[atom_mask] = input_embedding  # [batch_size, max_atom_count, n_embd]
 
-        # (7) Now we need to encode the residues with a lightweight transformer
-        x_residues, residue_mask = self.compute_residue_representations(
-            batch_size=batch_size,
-            device=device,
-            pocket_x=pocket_x,
-            pocket_pos=pocket_pos,
-            pocket_residue_id=pocket_residue_id,
-            pocket_residue_type=pocket_residue_type,
-            pocket_batch=pocket_batch,
-        )
-        # (8) We will also need a cross-attention mask
-        cross_attn_mask = residue_mask.unsqueeze(1) * atom_mask.unsqueeze(
-            2
-        )  # [batch_size, max_residue_count, max_atom_count]
-        cross_attn_mask = cross_attn_mask.unsqueeze(1).expand(
-            -1, self.hparams.n_head, -1, -1
-        )  # [batch_size, n_head, max_residue_count, max_atom_count]
+        if pocket_x is not None:
+            # (7) Now we need to encode the residues with a lightweight transformer
+            x_residues, residue_mask = self.compute_residue_representations(
+                batch_size=batch_size,
+                device=device,
+                pocket_x=pocket_x,
+                pocket_pos=pocket_pos,
+                pocket_residue_id=pocket_residue_id,
+                pocket_residue_type=pocket_residue_type,
+                pocket_batch=pocket_batch,
+            )
+            # (8) We will also need a cross-attention mask
+            cross_attn_mask = residue_mask.unsqueeze(1) * atom_mask.unsqueeze(
+                2
+            )  # [batch_size, max_residue_count, max_atom_count]
+            cross_attn_mask = cross_attn_mask.unsqueeze(1).expand(
+                -1, self.hparams.n_head, -1, -1
+            )  # [batch_size, n_head, max_residue_count, max_atom_count]
+        else:
+            x_residues = None
+            cross_attn_mask = None
 
         # (9) Pass through transformer blocks
         for block in self.transformer_blocks:
@@ -334,6 +341,7 @@ class NEAT(LightningModule):
                 attn_mask=attn_mask,
                 cross_attn_input=x_residues,
                 cross_attn_mask=cross_attn_mask,
+                cfg_dropout=0.2 if self.training else None,
             )  # [batch_size, max_atom_count, n_embd]
 
         x = self.layer_norm_after_transformer(x)  # [batch_size, max_atom_count, n_embd]
@@ -858,13 +866,15 @@ class NEAT(LightningModule):
     def generate(
         self,
         batch_size: int = 1,
-        max_atoms: int = 200,
+        max_atoms: int = 100,
         num_time_steps: int = 60,
         device: torch.device = torch.device("cuda"),
         prefix_x: Tensor = None,
         prefix_pos: Tensor = None,
         time_step_spacing: str = "linear",
         integration_method: str = "euler_maruyama",
+        cfg_factor: float = 1.5,
+        pocket_info: dict | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Generate a molecule using the flow matching network.
 
@@ -877,7 +887,7 @@ class NEAT(LightningModule):
             prefix_pos (Tensor): Optional prefix positions to condition the generation on.
             time_step_spacing (str): Spacing of the time steps. Options: 'linear', 'logarithmic', 'quadratic'.
             integration_method (str): Integration method to use. Options: 'euler', 'euler_maruyama'.
-
+            cfg_factor (float): Factor for conditional generation.
         Returns:
             tuple[Tensor, Tensor, Tensor]: The atom types, their positions, and the batch indices of the generated molecules.
         """
@@ -904,7 +914,10 @@ class NEAT(LightningModule):
                 x = torch.multinomial(
                     dist, batch_size, replacement=True
                 )  # [batch_size]
-            elif self.hparams.data_set == "GEOM" or self.hparams.data_set == "CrossDocked":
+            elif (
+                self.hparams.data_set == "GEOM"
+                or self.hparams.data_set == "CrossDocked"
+            ):
                 dist = torch.tensor(
                     [
                         0,
@@ -947,19 +960,49 @@ class NEAT(LightningModule):
             for i in pbar:
                 # (6.1) Compute source set representation
                 expanded_mask = torch.isin(batch_source, active_mol_idx)
+                expanded_mask_pocket = torch.isin(
+                    pocket_info["pocket_batch"], active_mol_idx
+                )
                 masked_x = x[expanded_mask]
                 masked_pos = pos[expanded_mask]
                 masked_batch_source = batch_source[expanded_mask]
                 _, batch_source_remapped = torch.unique(
                     masked_batch_source.clone(), return_inverse=True
                 )
-                source_set_representation = self.compute_source_set_representation(
-                    masked_x, masked_pos, batch_source_remapped, device
+                masked_pocket_x = pocket_info["pocket_x"][expanded_mask_pocket]
+                masked_pocket_pos = pocket_info["pocket_pos"][expanded_mask_pocket]
+                masked_pocket_residue_id = pocket_info["pocket_residue_id"][
+                    expanded_mask_pocket
+                ]
+                masked_pocket_residue_type = pocket_info["pocket_residue_type"][
+                    expanded_mask_pocket
+                ]
+                masked_pocket_batch = pocket_info["pocket_batch"][expanded_mask_pocket]
+                _, pocket_batch_remapped = torch.unique(
+                    masked_pocket_batch.clone(), return_inverse=True
+                )
+                source_set_representation_conditioned = (
+                    self.compute_source_set_representation(
+                        masked_x,
+                        masked_pos,
+                        batch_source_remapped,
+                        device,
+                        pocket_x=masked_pocket_x,
+                        pocket_pos=masked_pocket_pos,
+                        pocket_residue_id=masked_pocket_residue_id,
+                        pocket_residue_type=masked_pocket_residue_type,
+                        pocket_batch=pocket_batch_remapped,
+                    )
+                )  # [active_mol_count, n_embd]
+                source_set_representation_unconditioned = (
+                    self.compute_source_set_representation(
+                        masked_x, masked_pos, batch_source_remapped, device
+                    )
                 )  # [active_mol_count, n_embd]
 
                 # (6.2) Compute logits
                 logits = self.atom_type_prediction_head(
-                    source_set_representation
+                    source_set_representation_conditioned
                 )  # [active_mol_count, vocab_size]
 
                 # (6.3) Compute probabilities
@@ -997,15 +1040,22 @@ class NEAT(LightningModule):
 
                 # (6.8) Select only the source set representations for the active molecules
                 x_next = x_next[~x_next_mask]
-                source_set_representation = source_set_representation[~x_next_mask]
+                source_set_representation_conditioned = (
+                    source_set_representation_conditioned[~x_next_mask]
+                )
+                source_set_representation_unconditioned = (
+                    source_set_representation_unconditioned[~x_next_mask]
+                )
                 # (6.9) Calculate the positions of the newly predicted atoms with flow matching
                 pos_next = self.calculate_positions(
                     x_next,
-                    source_set_representation,
+                    source_set_representation_unconditioned,
+                    source_set_representation_conditioned,
                     num_time_steps,
                     device,
                     time_step_spacing,
                     integration_method,
+                    cfg_factor,
                 )
 
                 # (6.10) Update the x, pos, and batch source tensors
@@ -1055,17 +1105,20 @@ class NEAT(LightningModule):
     def calculate_positions(
         self,
         x_next: Tensor,
-        source_set_representation: Tensor,
+        source_set_representation_unconditioned: Tensor,
+        source_set_representation_conditioned: Tensor,
         num_time_steps: int,
         device: torch.device,
         time_step_spacing: str = "linear",
         integration_method: str = "euler_maruyama",
+        cfg_factor: float = None,
     ) -> Tensor:
         """Calculate the positions of the newly predicted atoms with flow matching.
 
         Args:
             x_next (Tensor): Atom types of the newly predicted atoms. shape: [n_atoms, 1]
-            source_set_representation (Tensor):Representation of the source sets. shape: [n_atoms, n_embd]
+            source_set_representation_unconditioned (Tensor): Representation of the unconditioned source sets. shape: [n_atoms, n_embd]
+            source_set_representation_conditioned (Tensor): Representation of the conditioned source sets. shape: [n_atoms, n_embd]
             num_time_steps (int): Number of time steps to use for the flow matching.
             device (torch.device): Device to use for computations.
             time_step_spacing (str): Spacing of the time steps. Options: 'linear', 'logarithmic', 'quadratic'.
@@ -1115,24 +1168,45 @@ class NEAT(LightningModule):
             for dt, time_step in zip(dts, time_steps[:-1]):
                 # for time_step in torch.linspace(0, 1, num_time_steps, device=device)[:-1]:
                 time_step = time_step.expand(x_next.shape[0])
-                velocity = self.compute_vector_field(
+                velocity_unconditioned = self.compute_vector_field(
                     x_next,
                     pos_next,
                     time_step,
-                    source_set_representation,
+                    source_set_representation_unconditioned,
                     device=device,
                 )
-                delta_pos = dt * velocity
+                velocity_conditioned = self.compute_vector_field(
+                    x_next,
+                    pos_next,
+                    time_step,
+                    source_set_representation_conditioned,
+                    device=device,
+                )
+                velocity = (
+                    1 + cfg_factor
+                ) * velocity_conditioned - cfg_factor * velocity_unconditioned
+                delta_pos = dt * velocity_unconditioned
                 pos_next += delta_pos
         elif integration_method == "euler_maruyama":
             # Following: https://github.com/apple/ml-simplefold/blob/0f44c59b1664e58acf2c72145b3f88c9c16dd6c4/src/simplefold/model/torch/sampler.py
             for dt, time_step in zip(dts, time_steps[:-1]):
-                velocity = self.compute_vector_field(
+                velocity_unconditioned = self.compute_vector_field(
                     x_next,
                     pos_next,
                     time_step.expand(x_next.shape[0]),
-                    source_set_representation,
+                    source_set_representation_unconditioned,
                     device=device,
+                )
+                velocity_conditioned = self.compute_vector_field(
+                    x_next,
+                    pos_next,
+                    time_step.expand(x_next.shape[0]),
+                    source_set_representation_conditioned,
+                    device=device,
+                )
+                velocity = (
+                    cfg_factor * velocity_conditioned
+                    + (1 - cfg_factor) * velocity_unconditioned
                 )
                 delta_pos = self.compute_euler_maruyama_step(
                     pos_next, velocity, time_step, dt
