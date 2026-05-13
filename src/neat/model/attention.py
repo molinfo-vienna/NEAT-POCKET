@@ -165,7 +165,7 @@ class BidirectionalAttentionBlock(nn.Module):
         x = x + self.attn(self.ln_1(x), attn_mask=attn_mask, pos=pos)
         if cross_attn_input is not None and cross_attn_mask is not None:
             x = x + self.attn_cross(
-                cross_attn_input, self.ln_2(x), attn_mask=cross_attn_mask
+                self.ln_2(x), cross_attn_input, attn_mask=cross_attn_mask
             )
         x = x + self.mlp(self.ln_3(x))
         return x
@@ -209,15 +209,15 @@ class MaskedCrossAttention(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        context: torch.Tensor,
+        query_input: torch.Tensor,
+        kv_input: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        B, T_q, C = x.size()
-        _, T_k, _ = context.size()
+        B, T_q, C = query_input.size()
+        _, T_k, _ = kv_input.size()
 
-        q = self.q_proj(x)
-        k, v = self.kv_proj(context).split(self.n_embd, dim=2)
+        q = self.q_proj(query_input)
+        k, v = self.kv_proj(kv_input).split(self.n_embd, dim=2)
 
         q = q.view(B, T_q, self.n_head, C // self.n_head).transpose(
             1, 2

@@ -236,7 +236,9 @@ class NEAT(LightningModule):
         x_source = x_source.to(device).long()
         pos_source = pos_source.to(device).float()
         batch_source = batch_source.to(device).long()
-        batch_size = (int(batch_source.max().item()) + 1 if batch_source.numel() > 0 else 0)
+        batch_size = (
+            int(batch_source.max().item()) + 1 if batch_source.numel() > 0 else 0
+        )
 
         if pocket_x is not None:
             pocket_x = pocket_x.to(device).long()
@@ -247,9 +249,7 @@ class NEAT(LightningModule):
 
             # Make the pocket_residue_id continuous across the batch
             # e.g. [0,0,0,1,1,2,2,2,0,0,1,1] -> [0,0,0,1,1,2,2,2,3,3,4,4]
-            num_res_per_graph = torch.zeros(
-                batch_size, device=device, dtype=torch.long
-            )
+            num_res_per_graph = torch.zeros(batch_size, device=device, dtype=torch.long)
             for graph_idx in range(batch_size):
                 mask_g = pocket_batch == graph_idx
                 if mask_g.any():
@@ -332,8 +332,8 @@ class NEAT(LightningModule):
             x = block(
                 x,
                 attn_mask=attn_mask,
-                x_cross=x_residues,
-                attn_mask_cross=cross_attn_mask,
+                cross_attn_input=x_residues,
+                cross_attn_mask=cross_attn_mask,
             )  # [batch_size, max_atom_count, n_embd]
 
         x = self.layer_norm_after_transformer(x)  # [batch_size, max_atom_count, n_embd]
