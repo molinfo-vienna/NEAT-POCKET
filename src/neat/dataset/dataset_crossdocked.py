@@ -15,6 +15,7 @@ import random
 from Bio.PDB import PDBParser
 from Bio.PDB.Polypeptide import is_aa
 from rdkit import Chem, RDLogger
+from rdkit.Chem import AllChem
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
 
@@ -111,6 +112,12 @@ def _encode_pocket_atom(symbol: str | None, vocabulary: dict[int, int]) -> int:
     except Exception:
         return 0
     return int(vocabulary.get(n, 0))
+
+
+def _add_hydrogens(mol: Chem.Mol, max_attempts: int = 50) -> Chem.Mol:
+    mol_h = Chem.AddHs(mol)
+    AllChem.ConstrainedEmbed(mol_h, mol, maxAttempts=max_attempts)
+    return mol_h
 
 
 class CrossDockedDataSet(InMemoryDataset):
@@ -283,6 +290,8 @@ class CrossDockedDataSet(InMemoryDataset):
             z = atom.GetAtomicNum()
             if z not in LIGAND_VOCABULARY:
                 return None
+
+        rdmol = _add_hydrogens(rdmol)
 
         pdb_model = PDBParser(QUIET=True).get_structure("", str(pocket_path))[0]
 
