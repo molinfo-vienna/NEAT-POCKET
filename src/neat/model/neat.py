@@ -904,7 +904,7 @@ class NEAT(LightningModule):
                 x = torch.multinomial(
                     dist, batch_size, replacement=True
                 )  # [batch_size]
-            elif self.hparams.data_set == "GEOM":
+            elif self.hparams.data_set == "GEOM" or self.hparams.data_set == "CrossDocked":
                 dist = torch.tensor(
                     [
                         0,

@@ -38,7 +38,7 @@ class MoleculeBuilder:
                 4: "O",
                 5: "F",
             }
-        elif vocab == "GEOM":
+        elif vocab == "GEOM" or vocab == "CrossDocked":
             self.atom_type_to_element = {
                 1: "H",
                 2: "B",
