@@ -344,14 +344,19 @@ class NEAT(LightningModule):
             cross_attn_mask = None
 
         # (9) Pass through the transformer blocks
-        cfg_dropout = 0.2 if self.training and self.enable_cross_attention else None
+        if self.training and pocket_info is not None:
+            cfg_dropout = 0.2
+            cfg_mask = torch.rand(x.shape[0]) > cfg_dropout
+        else:
+            cfg_mask = None
+
         for block in self.transformer_blocks:
             x = block(
                 x,
                 attn_mask=attn_mask,
                 cross_attn_input=x_residues,
                 cross_attn_mask=cross_attn_mask,
-                cfg_dropout=cfg_dropout,
+                cfg_mask=cfg_mask,
             )  # [batch_size, max_atom_count, n_embd]
 
         x = self.layer_norm_after_transformer_blocks(
