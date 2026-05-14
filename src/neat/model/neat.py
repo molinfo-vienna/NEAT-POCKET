@@ -121,10 +121,12 @@ class NEAT(LightningModule):
         # Apply special scaled initialization to the residual projections
         # (taken from the nanoGPT repository)
         for pn, p in self.named_parameters():
-            if pn.endswith("c_proj.weight"):
+            if pn.endswith("attn.c_proj.weight"):
                 nn.init.normal_(
                     p, mean=0.0, std=0.02 / math.sqrt(2 * self.hparams.n_layer)
                 )
+            if pn.endswith("attn_cross.c_proj.weight"):
+                nn.init.constant_(p, 0)
 
         # This is the Diffusion MLP with AdaLN conditioning.s
         # It was used in the original diffusion loss paper, and QUETZAL also uses it.
