@@ -3,6 +3,7 @@ https://github.com/karpathy/nanoGPT/blob/master/model.py
 """
 
 import math
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -105,8 +106,8 @@ class NEAT(LightningModule):
             self.layer_norm_after_atom_level_pocket_transformer_blocks = nn.LayerNorm(
                 self.hparams.n_embd, bias=False
             )
-            self.layer_norm_after_residue_level_pocket_transformer_blocks = nn.LayerNorm(
-                self.hparams.n_embd, bias=False
+            self.layer_norm_after_residue_level_pocket_transformer_blocks = (
+                nn.LayerNorm(self.hparams.n_embd, bias=False)
             )
 
         # Linear prediction head for atom type prediction
@@ -176,29 +177,21 @@ class NEAT(LightningModule):
         # The stop tokens mask indicates which molecules have empty target sets.
 
         # (1) Compute the representation of the source atom sets with the transformer
-        if _dataset_is_crossdocked(self.hparams.data_set):
-            pocket_x = getattr(data, "pocket_x", None)
-            pocket_pos = getattr(data, "pocket_pos", None)
-            pocket_residue_id = getattr(data, "pocket_residue_id", None)
-            pocket_residue_type = getattr(data, "pocket_residue_type", None)
-            pocket_batch = getattr(data, "pocket_pos_batch", None)
-        else:
-            pocket_x = None
-            pocket_pos = None
-            pocket_residue_id = None
-            pocket_residue_type = None
-            pocket_batch = None
+        if self.enable_cross_attention:
+            pocket_info = {
+                "pocket_x": data.pocket_x,
+                "pocket_pos": data.pocket_pos,
+                "pocket_residue_id": data.pocket_residue_id,
+                "pocket_residue_type": data.pocket_residue_type,
+                "pocket_batch": data.pocket_pos_batch,
+            }
 
         source_set_representation = self.compute_source_set_representation(
             data.x[data.source_ptr],
             data.pos[data.source_ptr],
             data.batch[data.source_ptr],
             device,
-            pocket_x=pocket_x,
-            pocket_pos=pocket_pos,
-            pocket_residue_id=pocket_residue_id,
-            pocket_residue_type=pocket_residue_type,
-            pocket_batch=pocket_batch,
+            pocket_info if self.enable_cross_attention else None,
         )  # [batch_size, n_embd]
 
         # (2) Compute the logits for the atom type prediction
@@ -237,11 +230,7 @@ class NEAT(LightningModule):
         pos_source: Tensor,
         batch_source: Tensor,
         device: torch.device,
-        pocket_x: Tensor | None = None,
-        pocket_pos: Tensor | None = None,
-        pocket_residue_id: Tensor | None = None,
-        pocket_residue_type: Tensor | None = None,
-        pocket_batch: Tensor | None = None,
+        pocket_info: dict[str, Tensor] | None = None,
     ) -> Tensor:
         """Compute the representation of the source atom sets.
 
@@ -250,6 +239,7 @@ class NEAT(LightningModule):
             pos_source (Tensor): The positions of the source atoms. shape: [n_source_atoms, 3]
             batch_source (Tensor): The batch indices of the source atoms. shape: [n_source_atoms]
             device (torch.device): The device to use for computations.
+            pocket_info (dict[str, Tensor] | None): Information about the pocket atoms.
 
         Returns:
             Tensor: The representation of the source atom sets. shape: [batch_size, n_embd]
@@ -262,12 +252,12 @@ class NEAT(LightningModule):
         )
 
         # (0) Process the pocket data if it is provided
-        if pocket_x is not None:
-            pocket_x = pocket_x.to(device).long()
-            pocket_pos = pocket_pos.to(device).float()
-            pocket_residue_id = pocket_residue_id.to(device).long()
-            pocket_residue_type = pocket_residue_type.to(device).long()
-            pocket_batch = pocket_batch.to(device).long()
+        if pocket_info is not None:
+            pocket_x = pocket_info["pocket_x"].to(device).long()
+            pocket_pos = pocket_info["pocket_pos"].to(device).float()
+            pocket_residue_id = pocket_info["pocket_residue_id"].to(device).long()
+            pocket_residue_type = pocket_info["pocket_residue_type"].to(device).long()
+            pocket_batch = pocket_info["pocket_batch"].to(device).long()
 
             # Make the pocket_residue_id continuous across the batch
             # e.g. [0,0,0,1,1,2,2,2,0,0,1,1] -> [0,0,0,1,1,2,2,2,3,3,4,4]
@@ -331,7 +321,7 @@ class NEAT(LightningModule):
         # (6) Apply the atom mask to the input embedding
         x[atom_mask] = input_embedding  # [batch_size, max_atom_count, n_embd]
 
-        if pocket_x is not None:
+        if pocket_info is not None:
             # (7) Encode the pocket residues with a lightweight transformer
             x_residues, residue_mask = self.compute_residue_representations(
                 batch_size=batch_size,
@@ -354,11 +344,7 @@ class NEAT(LightningModule):
             cross_attn_mask = None
 
         # (9) Pass through the transformer blocks
-        cfg_dropout = (
-            0.2
-            if self.training and _dataset_is_crossdocked(self.hparams.data_set)
-            else None
-        )
+        cfg_dropout = 0.2 if self.training and self.enable_cross_attention else None
         for block in self.transformer_blocks:
             x = block(
                 x,
@@ -368,7 +354,9 @@ class NEAT(LightningModule):
                 cfg_dropout=cfg_dropout,
             )  # [batch_size, max_atom_count, n_embd]
 
-        x = self.layer_norm_after_transformer_blocks(x)  # [batch_size, max_atom_count, n_embd]
+        x = self.layer_norm_after_transformer_blocks(
+            x
+        )  # [batch_size, max_atom_count, n_embd]
 
         # (10) Apply the atom mask to the input embedding (not really needed, could be removed)
         x = x * atom_mask.unsqueeze(-1)  # [batch_size, max_atom_count, n_embd]
@@ -450,7 +438,7 @@ class NEAT(LightningModule):
             x = block(
                 x, attn_mask=attn_mask, pos=None
             )  # [num_residues, max_atom_count_per_residue, n_embd]
-        x = self.layer_norm_after_atom_level_transformer(
+        x = self.layer_norm_after_atom_level_pocket_transformer_blocks(
             x
         )  # [num_residues, max_atom_count_per_residue, n_embd]
         x = x * atom_mask.unsqueeze(
@@ -941,9 +929,8 @@ class NEAT(LightningModule):
                 x = torch.multinomial(
                     dist, batch_size, replacement=True
                 )  # [batch_size]
-            elif (
-                self.hparams.data_set == "GEOM"
-                or _dataset_is_crossdocked(self.hparams.data_set)
+            elif self.hparams.data_set == "GEOM" or _dataset_is_crossdocked(
+                self.hparams.data_set
             ):
                 dist = torch.tensor(
                     [
@@ -975,7 +962,7 @@ class NEAT(LightningModule):
 
             # (2) Initialize starting positions with random zeroes
             pos = torch.zeros(batch_size, 3, device=device)
-            
+
             # (3) Initialize the batch source tensor
             batch_source = torch.arange(batch_size, device=device)
 
@@ -984,16 +971,6 @@ class NEAT(LightningModule):
 
         # (5) Create a tensor of molecule indices that do not have a stop token
         active_mol_idx = torch.arange(batch_size, device=device)[~stop_token_mask]
-        use_pocket = _dataset_is_crossdocked(self.hparams.data_set)
-        if use_pocket:
-            if pocket_info is None:
-                raise ValueError(
-                    "CrossDocked generation requires pocket_info with keys "
-                    "pocket_x, pocket_pos, pocket_residue_id, pocket_residue_type, pocket_batch."
-                )
-            protein_pos = pocket_info["pocket_pos"]
-        else:
-            protein_pos = None
 
         # (6) Iterate over the maximum number of atoms to generate
         with tqdm(range(max_atoms)) as pbar:
@@ -1006,55 +983,41 @@ class NEAT(LightningModule):
                 _, batch_source_remapped = torch.unique(
                     masked_batch_source.clone(), return_inverse=True
                 )
-                if use_pocket:
+                if pocket_info is not None:
                     expanded_mask_pocket = torch.isin(
                         pocket_info["pocket_batch"], active_mol_idx
                     )
-                    masked_pocket_x = pocket_info["pocket_x"][expanded_mask_pocket]
-                    masked_pocket_pos = protein_pos[expanded_mask_pocket]
-                    masked_pocket_residue_id = pocket_info["pocket_residue_id"][
-                        expanded_mask_pocket
-                    ]
-                    masked_pocket_residue_type = pocket_info["pocket_residue_type"][
-                        expanded_mask_pocket
-                    ]
                     masked_pocket_batch = pocket_info["pocket_batch"][
                         expanded_mask_pocket
                     ]
                     _, pocket_batch_remapped = torch.unique(
                         masked_pocket_batch.clone(), return_inverse=True
                     )
-                    source_set_representation_conditioned = (
-                        self.compute_source_set_representation(
-                            masked_x,
-                            masked_pos,
-                            batch_source_remapped,
-                            device,
-                            pocket_x=masked_pocket_x,
-                            pocket_pos=masked_pocket_pos,
-                            pocket_residue_id=masked_pocket_residue_id,
-                            pocket_residue_type=masked_pocket_residue_type,
-                            pocket_batch=pocket_batch_remapped,
-                        )
-                    )  # [active_mol_count, n_embd]
-                    source_set_representation_unconditioned = (
-                        self.compute_source_set_representation(
-                            masked_x, masked_pos, batch_source_remapped, device
-                        )
-                    )  # [active_mol_count, n_embd]
+                    pocket_info_masked = {
+                        "pocket_x": pocket_info["pocket_x"][expanded_mask_pocket],
+                        "pocket_pos": pocket_info["pocket_pos"][expanded_mask_pocket],
+                        "pocket_residue_id": pocket_info["pocket_residue_id"][
+                            expanded_mask_pocket
+                        ],
+                        "pocket_residue_type": pocket_info["pocket_residue_type"][
+                            expanded_mask_pocket
+                        ],
+                        "pocket_batch": pocket_batch_remapped,
+                    }
                 else:
-                    source_set_representation_conditioned = (
-                        self.compute_source_set_representation(
-                            masked_x, masked_pos, batch_source_remapped, device
-                        )
-                    )
-                    source_set_representation_unconditioned = (
-                        source_set_representation_conditioned
-                    )
+                    pocket_info_masked = None
+
+                source_set_representation = self.compute_source_set_representation(
+                    masked_x,
+                    masked_pos,
+                    batch_source_remapped,
+                    device,
+                    pocket_info=pocket_info_masked,
+                )  # [active_mol_count, n_embd]
 
                 # (6.2) Compute logits
                 logits = self.atom_type_prediction_head(
-                    source_set_representation_conditioned
+                    source_set_representation
                 )  # [active_mol_count, vocab_size]
 
                 # (6.3) Compute probabilities
@@ -1092,82 +1055,118 @@ class NEAT(LightningModule):
 
                 # (6.8) Select only the source set representations for the active molecules
                 x_next = x_next[~x_next_mask]
-                source_set_representation_conditioned = (
-                    source_set_representation_conditioned[~x_next_mask]
-                )
-                source_set_representation_unconditioned = (
-                    source_set_representation_unconditioned[~x_next_mask]
-                )
-                # (6.9) Calculate the positions of the newly predicted atoms with flow matching
+                source_set_representation = source_set_representation[~x_next_mask]
+
+                # (6.9) If using pocket information, the source set representations are
+                # conditioned on the pocket. For CFG, we also need unconditioned source
+                # set representations. These are computed here.
+                if pocket_info is not None:
+                    source_set_representation_unconditioned_for_cfg = (
+                        self.compute_source_set_representation(
+                            masked_x, masked_pos, batch_source_remapped, device
+                        )[~x_next_mask]
+                    )  # [active_mol_count, n_embd]
+                else:
+                    source_set_representation_unconditioned_for_cfg = None
+
+                # (6.10) Calculate the positions of the newly predicted atoms with flow matching
                 pos_next = self.calculate_positions(
                     x_next,
-                    source_set_representation_unconditioned,
-                    source_set_representation_conditioned,
+                    source_set_representation,
                     num_time_steps,
                     device,
                     time_step_spacing,
                     integration_method,
                     cfg_factor,
-                    apply_classifier_free_guidance=use_pocket,
+                    source_set_representation_unconditioned_for_cfg,
                 )
 
-                # (6.10) Update the x, pos, and batch source tensors
-                updated_x = []
-                updated_pos = []
-                updated_batch = []
-                for idx in range(batch_size):
-                    if idx in active_mol_idx:
-                        active_idx = torch.where(active_mol_idx == idx)[0]
-                        updated_x.append(
-                            torch.cat(
-                                (x[batch_source == idx], x_next[active_idx].view(1)),
-                                dim=0,
-                            )
-                        )  # [num_atoms+1]
-                        updated_pos.append(
-                            torch.cat(
-                                (
-                                    pos[batch_source == idx],
-                                    pos_next[active_idx].view(1, 3),
-                                ),
-                                dim=0,
-                            )
-                        )  # [num_atoms+1, 3]
-                        updated_batch.append(
-                            torch.cat(
-                                (
-                                    batch_source[batch_source == idx],
-                                    torch.tensor(idx, device=device).view(1),
-                                ),
-                                dim=0,
-                            )
-                        )  # [num_atoms+1]
-                    else:
-                        updated_x.append(x[batch_source == idx])
-                        updated_pos.append(pos[batch_source == idx])
-                        updated_batch.append(batch_source[batch_source == idx])
+                # (6.11) Update the positions with the calculated new positions
+                x, pos, batch_source = self.update_batch_with_new_atoms(
+                    x,
+                    pos,
+                    batch_source,
+                    x_next,
+                    pos_next,
+                    active_mol_idx,
+                    batch_size,
+                    device,
+                )
 
-                x = torch.cat(updated_x, dim=0)  # [batch_size]
-                pos = torch.cat(updated_pos, dim=0)  # [batch_size, 3]
-                batch_source = torch.cat(updated_batch, dim=0)  # [batch_size]
+                # (6.12) Recenter the ligand (and pocket) w.r.t. the COM
                 mean_pos = global_mean_pool(pos, batch_source)
                 pos = pos - mean_pos[batch_source]
-                if use_pocket:
-                    protein_pos = protein_pos - mean_pos[pocket_info["pocket_batch"]]
+                if pocket_info is not None:
+                    pocket_info["pocket_pos"] = (
+                        pocket_info["pocket_pos"]
+                        - mean_pos[pocket_info["pocket_batch"]]
+                    )
 
         return Batch(x=x, pos=pos, batch=batch_source)
+
+    def update_batch_with_new_atoms(
+        self,
+        x: Tensor,
+        pos: Tensor,
+        batch_source: Tensor,
+        x_next: Tensor,
+        pos_next: Tensor,
+        active_mol_idx: Tensor,
+        batch_size: int,
+        device: torch.device,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        # (6.10) Update the x, pos, and batch source tensors
+        updated_x = []
+        updated_pos = []
+        updated_batch = []
+        for idx in range(batch_size):
+            if idx in active_mol_idx:
+                active_idx = torch.where(active_mol_idx == idx)[0]
+                updated_x.append(
+                    torch.cat(
+                        (x[batch_source == idx], x_next[active_idx].view(1)),
+                        dim=0,
+                    )
+                )  # [num_atoms+1]
+                updated_pos.append(
+                    torch.cat(
+                        (
+                            pos[batch_source == idx],
+                            pos_next[active_idx].view(1, 3),
+                        ),
+                        dim=0,
+                    )
+                )  # [num_atoms+1, 3]
+                updated_batch.append(
+                    torch.cat(
+                        (
+                            batch_source[batch_source == idx],
+                            torch.tensor(idx, device=device).view(1),
+                        ),
+                        dim=0,
+                    )
+                )  # [num_atoms+1]
+            else:
+                updated_x.append(x[batch_source == idx])
+                updated_pos.append(pos[batch_source == idx])
+                updated_batch.append(batch_source[batch_source == idx])
+
+        x = torch.cat(updated_x, dim=0)  # [batch_size]
+        pos = torch.cat(updated_pos, dim=0)  # [batch_size, 3]
+        batch_source = torch.cat(updated_batch, dim=0)  # [batch_size]
+
+        return x, pos, batch_source
 
     def calculate_positions(
         self,
         x_next: Tensor,
-        source_set_representation_unconditioned: Tensor,
-        source_set_representation_conditioned: Tensor,
+        source_set_representation: Tensor,
         num_time_steps: int,
         device: torch.device,
         time_step_spacing: str = "linear",
         integration_method: str = "euler_maruyama",
-        cfg_factor: float = None,
-        apply_classifier_free_guidance: bool = True,
+        cfg_factor: float = 1.5,
+        source_set_representation_unconditioned_for_cfg: Optional[Tensor] = None,
     ) -> Tensor:
         """Calculate the positions of the newly predicted atoms with flow matching.
 
@@ -1190,16 +1189,15 @@ class NEAT(LightningModule):
             x_next.shape[0], 3, device=device
         )
 
+        # (2) Pick a time step spacing strategy
         if time_step_spacing == "linear":
             time_steps = torch.linspace(0, 1, num_time_steps, device=device)
-
         elif time_step_spacing == "logarithmic":
             time_steps = 1.0 - torch.logspace(
                 -2, 0, num_time_steps + 1, device=device
             ).flip(0)
             time_steps = time_steps - torch.min(time_steps)
             time_steps = time_steps / torch.max(time_steps)
-
         elif time_step_spacing == "quadratic":
             dts = (
                 torch.arange(
@@ -1213,50 +1211,51 @@ class NEAT(LightningModule):
             dts = dts.float() / dts.sum()
             time_steps = torch.cumsum(dts, dim=0)
             time_steps = torch.cat([torch.tensor([0], device=device), time_steps])
-
         else:
             raise ValueError(
                 f"Invalid time_step_spacing: {time_step_spacing}. Must be 'linear', 'logarithmic', or 'quadratic'."
             )
-
         dts = time_steps[1:] - time_steps[:-1]
 
-        # (2) Find position of the atoms through integration of the time trajectory
+        # (3) Find position of the atoms through integration of the time trajectory
         for dt, time_step in zip(dts, time_steps[:-1]):
-            # for time_step in torch.linspace(0, 1, num_time_steps, device=device)[:-1]:
+            # (3.1) Compute the velocity at the current time step
             time_step = time_step.expand(x_next.shape[0])
-            velocity_conditioned = self.compute_vector_field(
+            velocity = self.compute_vector_field(
                 x_next,
                 pos_next,
                 time_step,
-                source_set_representation_conditioned,
+                source_set_representation,
                 device=device,
             )
-            if apply_classifier_free_guidance:
-                velocity_unconditioned = self.compute_vector_field(
+
+            # (3.2) IF CFG: Compute the velocity of the unconditioned model and apply classifier-free guidance
+            if source_set_representation_unconditioned_for_cfg is not None:
+                velocity_unconditioned_for_cfg = self.compute_vector_field(
                     x_next,
                     pos_next,
                     time_step,
-                    source_set_representation_unconditioned,
+                    source_set_representation_unconditioned_for_cfg,
                     device=device,
                 )
                 velocity = (
                     1 + cfg_factor
-                ) * velocity_conditioned - cfg_factor * velocity_unconditioned
-            else:
-                velocity = velocity_conditioned
+                ) * velocity - cfg_factor * velocity_unconditioned_for_cfg
+
+            # (3.3) Update the positions with the computed velocity using the specified integration method
             if integration_method == "euler":
                 delta_pos = dt * velocity
             elif integration_method == "euler_maruyama":
                 # Following: https://github.com/apple/ml-simplefold/blob/0f44c59b1664e58acf2c72145b3f88c9c16dd6c4/src/simplefold/model/torch/sampler.py
                 delta_pos = self.compute_euler_maruyama_step(
-                    pos_next, velocity, time_step, dt
+                    pos_next, velocity, time_step[0], dt
                 )
             else:
                 raise ValueError(
                     f"Invalid integration_method: {integration_method}. Must be 'euler' or 'euler_maruyama'."
                 )
             pos_next += delta_pos
+
         return pos_next
 
     def compute_euler_maruyama_step(
