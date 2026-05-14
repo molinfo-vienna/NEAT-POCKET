@@ -954,6 +954,7 @@ class NEAT(LightningModule):
         stop_token_mask = torch.zeros(batch_size, device=device, dtype=torch.bool)
         # (5) Create a tensor of molecule indices that do not have a stop token
         active_mol_idx = torch.arange(batch_size, device=device)[~stop_token_mask]
+        protein_pos = pocket_info["pocket_pos"]
 
         # (6) Iterate over the maximum number of atoms to generate
         with tqdm(range(max_atoms)) as pbar:
@@ -970,7 +971,7 @@ class NEAT(LightningModule):
                     masked_batch_source.clone(), return_inverse=True
                 )
                 masked_pocket_x = pocket_info["pocket_x"][expanded_mask_pocket]
-                masked_pocket_pos = pocket_info["pocket_pos"][expanded_mask_pocket]
+                masked_pocket_pos = protein_pos[expanded_mask_pocket]
                 masked_pocket_residue_id = pocket_info["pocket_residue_id"][
                     expanded_mask_pocket
                 ]
@@ -1099,6 +1100,7 @@ class NEAT(LightningModule):
                 batch_source = torch.cat(updated_batch, dim=0)  # [batch_size]
                 mean_pos = global_mean_pool(pos, batch_source)
                 pos = pos - mean_pos[batch_source]
+                protein_pos = protein_pos - mean_pos[pocket_info["pocket_batch"]]
 
         return Batch(x=x, pos=pos, batch=batch_source)
 
