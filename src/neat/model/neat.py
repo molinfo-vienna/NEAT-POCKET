@@ -55,7 +55,6 @@ class NEAT(LightningModule):
         self.dropout_layer = nn.Dropout(self.hparams.dropout)
 
         # Transformer blocks for the ligand stream
-        self.hparams.setdefault("ligand_n_layer", 12)
         self.enable_cross_attention = _dataset_is_crossdocked(self.hparams.data_set)
         self.transformer_blocks = nn.ModuleList(
             [
@@ -66,7 +65,7 @@ class NEAT(LightningModule):
                     self.hparams.bias,
                     enable_cross_attention=self.enable_cross_attention,
                 )
-                for _ in range(self.hparams.ligand_n_layer)
+                for _ in range(self.hparams.n_layer)
             ]
         )
 
