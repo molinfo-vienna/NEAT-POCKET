@@ -1,5 +1,5 @@
 accumulate_grad_batches: 1
-batch_size: 512
+batch_size: 128
 bias: true
 data_set: CrossDocked
 dropout: 0.1

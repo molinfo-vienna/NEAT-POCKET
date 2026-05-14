@@ -1,6 +1,7 @@
 import torch
 from lightning import Callback, LightningModule, Trainer
 from rdkit import Chem
+from torch_geometric.nn import global_mean_pool
 
 from neat.model.molecule_builder import MoleculeBuilder
 from neat.utils.edm_metrics import edm_metrics
@@ -12,7 +13,7 @@ class GenerationMonitor(Callback):
     Args:
         num_samples: Number of molecules to generate for evaluation.
         every_n_epochs: Frequency (in epochs) to perform generation and evaluation.
-        dataset: Dataset name, either "QM9" or "GEOM".
+        dataset: Dataset name, either "QM9" or "GEOM" or "CrossDocked".
     """
 
     def __init__(
@@ -58,31 +59,43 @@ class GenerationMonitor(Callback):
             return
 
         generated_mols = None
-        if self.dataset == "QM9":
+        if str(self.dataset).upper() == "QM9":
             generated_mols = pl_module.generate(
                 batch_size=self.num_samples, integration_method="euler"
             )
 
-        elif self.dataset == "GEOM":
+        elif str(self.dataset).upper() == "GEOM":
             generated_mols = pl_module.generate(
                 batch_size=self.num_samples, integration_method="euler_maruyama"
             )
-            # (
-            #     _,
-            #     _,
-            #     frac_valid,
-            #     frac_unique,
-            #     _,
-            # ) = edm_metrics(
-            #     generated_mols.x.cpu(),
-            #     generated_mols.pos.cpu(),
-            #     generated_mols.batch.cpu(),
-            #     self.dataset,
-            # )
+        elif str(self.dataset).upper() == "CROSSDOCKED":
+            val_data = trainer.val_dataloaders.dataset
+            res_id = val_data.pocket_residue_id
+            resets = torch.cat([torch.tensor([False]), res_id[1:] < res_id[:-1]])
+            graph_ids = resets.long().cumsum(dim=0)
+            mean_pos = global_mean_pool(val_data.pocket_pos, graph_ids)
+            pos = val_data.pocket_pos - mean_pos[graph_ids]
+            mask = graph_ids < self.num_samples
+            pocket_info = {
+                "pocket_x": val_data.pocket_x[mask].to(pl_module.device),
+                "pocket_pos": pos[mask].to(pl_module.device),
+                "pocket_residue_id": val_data.pocket_residue_id[mask].to(
+                    pl_module.device
+                ),
+                "pocket_residue_type": val_data.pocket_residue_type[mask].to(
+                    pl_module.device
+                ),
+                "pocket_batch": graph_ids[mask].to(pl_module.device),
+            }
+            generated_mols = pl_module.generate(
+                batch_size=self.num_samples,
+                integration_method="euler_maruyama",
+                pocket_info=pocket_info,
+            )
         else:
             raise ValueError(f"Unknown dataset: {self.dataset}")
 
-        builder = MoleculeBuilder(vocab=pl_module.hparams.data_set)
+        builder = MoleculeBuilder(vocab=str(pl_module.hparams.data_set).upper())
         mols = builder.generate_rdkit_molecules_via_xyz2mol(
             generated_mols.x, generated_mols.pos, generated_mols.batch
         )

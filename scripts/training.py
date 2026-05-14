@@ -75,7 +75,7 @@ def train(args: argparse.Namespace) -> None:
         every_n_epochs=10,
     )
 
-    generate_every_n_epochs = 20
+    generate_every_n_epochs = 10
     checkpoint_validity = ModelCheckpoint(
         monitor="val/validity",
         mode="max",
@@ -100,7 +100,7 @@ def train(args: argparse.Namespace) -> None:
         max_epochs=params["max_epochs"],
         accelerator="gpu",
         logger=tb_logger,
-        log_every_n_steps=8,
+        log_every_n_steps=10,
         callbacks=callbacks,
         accumulate_grad_batches=accumulate_grad_batches,
         gradient_clip_val=1.0,

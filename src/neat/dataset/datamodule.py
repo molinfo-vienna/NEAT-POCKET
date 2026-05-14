@@ -145,11 +145,13 @@ def source_target_split_batch_transform(
         and batch.pocket_pos.numel() > 0
         and hasattr(batch, "pocket_pos_batch")
     ):
-        batch.pos, batch.pocket_pos = rotation_augmentation.rotate_ligand_and_pocket_randomly(
-            batch.pos,
-            batch.batch,
-            batch.pocket_pos,
-            batch.pocket_pos_batch,
+        batch.pos, batch.pocket_pos = (
+            rotation_augmentation.rotate_ligand_and_pocket_randomly(
+                batch.pos,
+                batch.batch,
+                batch.pocket_pos,
+                batch.pocket_pos_batch,
+            )
         )
     else:
         batch.pos = rotation_augmentation.rotate_molecule_randomly(
@@ -322,7 +324,7 @@ class DataModule(LightningDataModule):
 
     def setup(self, stage: str = "fit") -> None:
         if stage == "fit":
-            if self.data_set == "QM9":
+            if str(self.data_set).upper() == "QM9":
                 print("Using QM9 dataset.")
                 self.full_data = QM9DataSet(self.data_path)
                 splits = self.full_data.get_splits()
@@ -333,7 +335,7 @@ class DataModule(LightningDataModule):
                 print(f"Number of validation graphs: {len(self.validation_data)}")
                 print(f"Number of test graphs: {len(self.test_data)}")
 
-            elif self.data_set == "GEOM":
+            elif str(self.data_set).upper() == "GEOM":
                 print("Using GEOM dataset.")
                 self.training_data = GEOMDataSet(self.data_path, split="train")
                 self.validation_data = GEOMDataSet(self.data_path, split="val")
@@ -342,7 +344,7 @@ class DataModule(LightningDataModule):
                 print(f"Number of validation graphs: {len(self.validation_data)}")
                 print(f"Number of test graphs: {len(self.test_data)}")
 
-            elif self.data_set == "CROSSDOCKED":
+            elif str(self.data_set).upper() == "CROSSDOCKED":
                 print("Using CrossDocked dataset.")
                 self.training_data = CrossDockedDataSet(self.data_path, split="train")
                 self.validation_data = CrossDockedDataSet(self.data_path, split="val")

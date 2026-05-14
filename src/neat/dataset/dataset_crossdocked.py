@@ -13,6 +13,7 @@ import random
 from Bio.PDB import PDBParser
 from Bio.PDB.Polypeptide import is_aa
 from rdkit import Chem, RDLogger
+from rdkit.Chem import AllChem
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
 
@@ -109,6 +110,12 @@ def _encode_pocket_atom(symbol: str | None, vocabulary: dict[int, int]) -> int:
     except Exception:
         return 0
     return int(vocabulary.get(n, 0))
+
+
+def _add_hydrogens(mol: Chem.Mol, max_attempts: int = 50) -> Chem.Mol:
+    mol_h = Chem.AddHs(mol)
+    AllChem.ConstrainedEmbed(mol_h, mol, maxAttempts=max_attempts)
+    return mol_h
 
 
 class CrossDockedDataSet(InMemoryDataset):
@@ -281,6 +288,8 @@ class CrossDockedDataSet(InMemoryDataset):
             if z not in LIGAND_VOCABULARY:
                 return None
 
+        rdmol = _add_hydrogens(rdmol)
+
         pdb_model = PDBParser(QUIET=True).get_structure("", str(pocket_path))[0]
 
         lig_x, lig_pos = self._ligand_features(rdmol)
@@ -297,7 +306,7 @@ class CrossDockedDataSet(InMemoryDataset):
             dtype=torch.long,
         )
 
-        pocket_x, pocket_pos, pocket_res_idx, pocket_res_type = self._pocket_features(
+        pocket_x, pocket_pos, pocket_residue_id, pocket_residue_type = self._pocket_features(
             pdb_model, lig_pos
         )
         if pocket_pos.shape[0] == 0:
@@ -320,8 +329,8 @@ class CrossDockedDataSet(InMemoryDataset):
             name=name,
             pocket_x=pocket_x,
             pocket_pos=pocket_pos,
-            pocket_residue_index=pocket_res_idx,
-            pocket_residue_type=pocket_res_type,
+            pocket_residue_id=pocket_residue_id,
+            pocket_residue_type=pocket_residue_type,
         )
 
     def _ligand_features(self, mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
@@ -367,9 +376,9 @@ class CrossDockedDataSet(InMemoryDataset):
         cutoff = self.pocket_dist_cutoff
         lig = lig_pos.numpy()
 
-        # (coords, atom_type_idx, aa_type_idx, residue_index)
+        # (coords, atom_type_idx, aa_type_idx, residue_id)
         selected: list[tuple[np.ndarray, int, int, int]] = []
-        residue_index = 0
+        residue_id = 0
 
         for chain in pdb_model.get_chains():
             for residue in chain.get_residues():
@@ -399,8 +408,8 @@ class CrossDockedDataSet(InMemoryDataset):
                     xyz = np.asarray(atom.get_coord(), dtype=np.float32)
                     sym = _pdb_heavy_element_symbol(atom)
                     enc = _encode_pocket_atom(sym, LIGAND_VOCABULARY)
-                    selected.append((xyz, enc, aa_idx, residue_index))
-                residue_index += 1
+                    selected.append((xyz, enc, aa_idx, residue_id))
+                residue_id += 1
 
         if not selected:
             return (
@@ -413,6 +422,6 @@ class CrossDockedDataSet(InMemoryDataset):
         pocket_pos = torch.from_numpy(np.stack([t[0] for t in selected], axis=0))
         pocket_x = torch.tensor([t[1] for t in selected], dtype=torch.long)
         pocket_residue_type = torch.tensor([t[2] for t in selected], dtype=torch.long)
-        pocket_residue_index = torch.tensor([t[3] for t in selected], dtype=torch.long)
+        pocket_residue_id = torch.tensor([t[3] for t in selected], dtype=torch.long)
 
-        return pocket_x, pocket_pos, pocket_residue_index, pocket_residue_type
+        return pocket_x, pocket_pos, pocket_residue_id, pocket_residue_type

@@ -51,7 +51,7 @@ def train(args: argparse.Namespace) -> None:
         Loader=yaml.FullLoader,
     )
 
-    dataset_name = params.get("data_set", "QM9")
+    dataset_name = str(params.get("data_set")).upper()
     data_dir = os.path.join(ROOT, "data")
     print(f"Loading {dataset_name}...")
 
