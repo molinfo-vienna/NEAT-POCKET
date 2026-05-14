@@ -27,10 +27,10 @@ class MoleculeBuilder:
         vocab (str): The vocabulary to use. Options are "QM9" and "GEOM".
     """
 
-    def __init__(self, vocab="QM9") -> None:
+    def __init__(self, vocab: str = "QM9") -> None:
         super().__init__()
         self.vocab = vocab
-        if vocab == "QM9":
+        if str(vocab).upper() == "QM9":
             self.atom_type_to_element = {
                 1: "H",
                 2: "C",
@@ -38,7 +38,7 @@ class MoleculeBuilder:
                 4: "O",
                 5: "F",
             }
-        elif vocab == "GEOM" or vocab == "CrossDocked":
+        elif str(vocab).upper() == "GEOM" or str(vocab).upper() == "CROSSDOCKED":
             self.atom_type_to_element = {
                 1: "H",
                 2: "B",

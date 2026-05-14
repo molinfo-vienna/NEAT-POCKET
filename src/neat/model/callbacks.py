@@ -59,16 +59,16 @@ class GenerationMonitor(Callback):
             return
 
         generated_mols = None
-        if self.dataset == "QM9":
+        if str(self.dataset).upper() == "QM9":
             generated_mols = pl_module.generate(
                 batch_size=self.num_samples, integration_method="euler"
             )
 
-        elif self.dataset == "GEOM":
+        elif str(self.dataset).upper() == "GEOM":
             generated_mols = pl_module.generate(
                 batch_size=self.num_samples, integration_method="euler_maruyama"
             )
-        elif self.dataset == "CrossDocked":
+        elif str(self.dataset).upper() == "CROSSDOCKED":
             val_data = trainer.val_dataloaders.dataset
             res_id = val_data.pocket_residue_id
             resets = torch.cat([torch.tensor([False]), res_id[1:] < res_id[:-1]])
@@ -95,7 +95,7 @@ class GenerationMonitor(Callback):
         else:
             raise ValueError(f"Unknown dataset: {self.dataset}")
 
-        builder = MoleculeBuilder(vocab=pl_module.hparams.data_set)
+        builder = MoleculeBuilder(vocab=str(pl_module.hparams.data_set).upper())
         mols = builder.generate_rdkit_molecules_via_xyz2mol(
             generated_mols.x, generated_mols.pos, generated_mols.batch
         )
