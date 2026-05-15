@@ -223,6 +223,7 @@ class NEAT(LightningModule):
             data.pos_random,
             data.batch[data.target_ptr],
             source_set_representation,
+            data.start_token_mask,
             device,
         )
 
@@ -584,6 +585,7 @@ class NEAT(LightningModule):
         pos_random: Tensor,
         batch_target: Tensor,
         source_set_representation: Tensor,
+        start_token_mask: Tensor,
         device: torch.device,
         resampling=4,
     ) -> Tensor:
@@ -641,6 +643,12 @@ class NEAT(LightningModule):
         source_set_representations = torch.cat(
             [source_set_representations for _ in range(resampling)], dim=0
         )
+        start_token_mask = start_token_mask[batch_target]
+        start_token_mask = torch.cat(
+            [start_token_mask for _ in range(resampling)], dim=0
+        )
+        scaling_factor = torch.ones_like(start_token_mask, dtype=torch.float)
+        scaling_factor[start_token_mask] = 0.1
 
         # (4) Calculate k interpolated positions per path given the sampled time steps
         interpolated_pos = pos_random + interpolation * time_step.unsqueeze(
@@ -661,6 +669,7 @@ class NEAT(LightningModule):
         # This is the MSE between the predicted vector field and
         # the interpolation (pos_1 - pos_0) for each path.
         loss_fm = torch.mean((output_fm - interpolation) ** 2, dim=1)  # [n_paths * k]
+        loss_fm = loss_fm * scaling_factor  # [n_paths * k]
 
         # (9) Return the mean loss over all paths and time steps.
         return loss_fm.mean()  # [1]
