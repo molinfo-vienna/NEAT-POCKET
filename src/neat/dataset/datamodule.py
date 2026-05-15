@@ -137,6 +137,8 @@ def source_target_split_batch_transform(
     Returns:
         Batch: Transformed batch of graphs.
     """
+    batch_size = batch.batch.max().item() + 1
+
     # (1) Apply random rotation augmentation (ligand + pocket share one rigid transform)
     rotation_augmentation = RandomRotationAugmentation()
     if (
@@ -162,8 +164,22 @@ def source_target_split_batch_transform(
     splitter = SourceTargetSplitter(splitting_mode=source_target_split)
 
     source_ptr, target_ptr = splitter.create_source_target_split(batch)
+
+    # Modify a random subset in the batch for start token prediction
+    # For the first token, we have an empty source set and a full target set
+    start_token_mask = torch.rand(batch_size) < 0.025
+    corresponding_indices = torch.arange(batch.x.size(0), device=batch.x.device)[
+        start_token_mask[batch.batch]
+    ]
+    mask = torch.isin(source_ptr, corresponding_indices)
+    source_ptr = source_ptr[~mask]
+    target_ptr = torch.unique(
+        torch.cat((target_ptr, corresponding_indices)), sorted=True
+    )
+
     batch.source_ptr = source_ptr
     batch.target_ptr = target_ptr
+    batch.start_token_mask = start_token_mask
 
     # (2.1) Introduce noisy into the source set positions by adding Gaussian noise
     if perturbation_factor is not None and source_set_perturbation is not None:
@@ -176,7 +192,7 @@ def source_target_split_batch_transform(
 
     # (3) Recenter positions w.r.t. the source set atoms
     mean_pos = global_mean_pool(
-        batch.pos[batch.source_ptr], batch.batch[batch.source_ptr]
+        batch.pos[batch.source_ptr], batch.batch[batch.source_ptr], size=batch_size
     )
     batch.pos = batch.pos - mean_pos[batch.batch]
     if (

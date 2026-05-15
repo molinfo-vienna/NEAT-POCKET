@@ -39,6 +39,11 @@ class NEAT(LightningModule):
             embedding_dim=self.hparams.n_embd,
         )
 
+        # Learnable start token embedding
+        self.start_token_embedding = nn.Parameter(
+            torch.randn(1, self.hparams.n_embd) * 0.02
+        )
+
         # Pocket residue type embedding layer
         self.hparams.setdefault("pocket_residue_vocab_size", 21)
         self.pocket_residue_type_embedding_layer = nn.Embedding(
@@ -170,6 +175,7 @@ class NEAT(LightningModule):
             Tuple of total loss, atom type prediction loss, and flow matching loss.
         """
         device = data.x.device
+        batch_size = data.batch.max().item() + 1
 
         # We split the molecular data into source and target atom sets.
         # The indexing tensors point to the same molecules as in the original batch.
@@ -191,6 +197,7 @@ class NEAT(LightningModule):
             data.x[data.source_ptr],
             data.pos[data.source_ptr],
             data.batch[data.source_ptr],
+            batch_size,
             device,
             pocket_info if self.enable_cross_attention else None,
         )  # [batch_size, n_embd]
@@ -230,6 +237,7 @@ class NEAT(LightningModule):
         x_source: Tensor,
         pos_source: Tensor,
         batch_source: Tensor,
+        batch_size: int,
         device: torch.device,
         pocket_info: dict[str, Tensor] | None = None,
     ) -> Tensor:
@@ -248,9 +256,6 @@ class NEAT(LightningModule):
         x_source = x_source.to(device).long()
         pos_source = pos_source.to(device).float()
         batch_source = batch_source.to(device).long()
-        batch_size = (
-            int(batch_source.max().item()) + 1 if batch_source.numel() > 0 else 0
-        )
 
         # (0) Process the pocket data if it is provided
         if pocket_info is not None:
@@ -278,7 +283,9 @@ class NEAT(LightningModule):
             pocket_residue_id = pocket_residue_id + id_offsets[pocket_batch]
 
         # (1) Compute atom counts of the source sets
-        atom_count_source = torch.bincount(batch_source)
+        atom_count_source = torch.bincount(
+            batch_source, minlength=batch_size
+        )  # [batch_size]
 
         # (2) Reshape the input to [batch_size, max_atom_count, n_embd].
         # This could also be done with sequence packing, but for now we keep it simple.
@@ -293,13 +300,6 @@ class NEAT(LightningModule):
         atom_mask = context_range < atom_count_source.unsqueeze(
             1
         )  # [batch_size, max_atom_count]
-        # The attention mask is used in the transformer blocks and is the outer product of the atom mask.
-        attn_mask = atom_mask.unsqueeze(1) * atom_mask.unsqueeze(
-            2
-        )  # [batch_size, max_atom_count, max_atom_count]
-        attn_mask = attn_mask.unsqueeze(1).expand(
-            -1, self.hparams.n_head, -1, -1
-        )  # [batch_size, n_head, max_atom_count, max_atom_count]
 
         # (3) Embed the atom types and positions
         atom_type_embedding = self.atom_type_embedding_layer(
@@ -322,8 +322,26 @@ class NEAT(LightningModule):
         # (6) Apply the atom mask to the input embedding
         x[atom_mask] = input_embedding  # [batch_size, max_atom_count, n_embd]
 
+        # (7) Concatenate start token embedding to the transformer input.
+        x = torch.cat(
+            [self.start_token_embedding.expand(batch_size, 1, -1), x], dim=1
+        )  # [batch_size, max_atom_count + 1, n_embd]
+        atom_mask = torch.cat(
+            [torch.ones(batch_size, 1, device=device, dtype=torch.bool), atom_mask],
+            dim=1,
+        )  # [batch_size, max_atom_count + 1]
+
+        # (8) Create the attention mask for the transformer blocks.
+        # The attention mask is used in the transformer blocks and is the outer product of the atom mask.
+        attn_mask = atom_mask.unsqueeze(1) * atom_mask.unsqueeze(
+            2
+        )  # [batch_size, max_atom_count, max_atom_count]
+        attn_mask = attn_mask.unsqueeze(1).expand(
+            -1, self.hparams.n_head, -1, -1
+        )  # [batch_size, n_head, max_atom_count, max_atom_count]
+
         if pocket_info is not None:
-            # (7) Encode the pocket residues with a lightweight transformer
+            # (9) Encode the pocket residues with a lightweight transformer
             x_residues, residue_mask = self.compute_residue_representations(
                 batch_size=batch_size,
                 device=device,
@@ -333,7 +351,7 @@ class NEAT(LightningModule):
                 pocket_residue_type=pocket_residue_type,
                 pocket_batch=pocket_batch,
             )
-            # (8) Create a cross-attention mask for the pocket residues
+            # (10) Create a cross-attention mask for the pocket residues
             cross_attn_mask = residue_mask.unsqueeze(1) * atom_mask.unsqueeze(
                 2
             )  # [batch_size, max_residue_count, max_atom_count]
@@ -344,13 +362,14 @@ class NEAT(LightningModule):
             x_residues = None
             cross_attn_mask = None
 
-        # (9) Pass through the transformer blocks
+        # (11) Create mask for CFG dropout
         if self.training and pocket_info is not None:
             cfg_dropout = 0.2
             cfg_mask = torch.rand(x.shape[0]) > cfg_dropout
         else:
             cfg_mask = None
 
+        # (12) Pass through the transformer blocks
         for block in self.transformer_blocks:
             x = block(
                 x,
@@ -358,14 +377,14 @@ class NEAT(LightningModule):
                 cross_attn_input=x_residues,
                 cross_attn_mask=cross_attn_mask,
                 cfg_mask=cfg_mask,
-            )  # [batch_size, max_atom_count, n_embd]
+            )  # [batch_size, max_atom_count + 1, n_embd]
 
         x = self.layer_norm_after_transformer_blocks(
             x
-        )  # [batch_size, max_atom_count, n_embd]
+        )  # [batch_size, max_atom_count + 1, n_embd]
 
         # (10) Apply the atom mask to the input embedding (not really needed, could be removed)
-        x = x * atom_mask.unsqueeze(-1)  # [batch_size, max_atom_count, n_embd]
+        x = x * atom_mask.unsqueeze(-1)  # [batch_size, max_atom_count + 1, n_embd]
 
         # (11) Pool the atom embeddings into a molecule embedding
         source_set_representation = x.sum(dim=1)  # [batch_size, n_embd]
@@ -967,10 +986,13 @@ class NEAT(LightningModule):
                 raise ValueError(f"Unknown data set: {self.hparams.data_set}")
 
             # (2) Initialize starting positions with random zeroes
-            pos = torch.zeros(batch_size, 3, device=device)
+            x = torch.empty(0, dtype=torch.long, device=device)
+            pos = torch.empty(0, 3, device=device)
+            # pos = torch.zeros(batch_size, 3, device=device)
 
             # (3) Initialize the batch source tensor
-            batch_source = torch.arange(batch_size, device=device)
+            batch_source = torch.empty(0, device=device, dtype=torch.long)
+            # batch_source = torch.arange(batch_size, device=device)
 
         # (4) Create a mask for the stop tokens that will be used to track which molecules have a stop token
         stop_token_mask = torch.zeros(batch_size, device=device, dtype=torch.bool)
@@ -982,6 +1004,7 @@ class NEAT(LightningModule):
         with tqdm(range(max_atoms)) as pbar:
             for i in pbar:
                 # (6.1) Compute source set representation
+                active_batch_size = len(active_mol_idx)
                 expanded_mask = torch.isin(batch_source, active_mol_idx)
                 masked_x = x[expanded_mask]
                 masked_pos = pos[expanded_mask]
@@ -1017,6 +1040,7 @@ class NEAT(LightningModule):
                     masked_x,
                     masked_pos,
                     batch_source_remapped,
+                    active_batch_size,
                     device,
                     pocket_info=pocket_info_masked,
                 )  # [active_mol_count, n_embd]
@@ -1069,7 +1093,11 @@ class NEAT(LightningModule):
                 if pocket_info is not None:
                     source_set_representation_unconditioned_for_cfg = (
                         self.compute_source_set_representation(
-                            masked_x, masked_pos, batch_source_remapped, device
+                            masked_x,
+                            masked_pos,
+                            batch_source_remapped,
+                            active_batch_size,
+                            device,
                         )[~x_next_mask]
                     )  # [active_mol_count, n_embd]
                 else:
