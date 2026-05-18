@@ -1,5 +1,5 @@
-data_path: output/generated_best_geom/unconditional
-data_set: GEOM
+data_path: output/version_8/conditional
+data_set: CrossDocked
 compute_novelty: true
 compute_posebusters: false
 

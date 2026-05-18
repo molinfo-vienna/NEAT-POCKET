@@ -257,7 +257,7 @@ class DataModule(LightningDataModule):
 
     Args:
         data_dir (str): Directory containing the data.
-        data_set (str): Dataset to use ("QM9" or "GEOM"). Default is "QM9".
+        data_set (str): Dataset to use ("QM9" or "GEOM" or "CROSSDOCKED"). Default is "QM9".
         batch_size (int): Batch size for the data loader. Default is 32.
         num_workers (int): Number of workers for the data loader. Default is 1.
         task (str): Task to perform ("neat" or "bond_prediction"). Default is "neat".
@@ -276,7 +276,7 @@ class DataModule(LightningDataModule):
     def __init__(
         self,
         data_dir: str,
-        data_set: str = "CrossDocked",
+        data_set: str = "QM9",
         batch_size: int = 32,
         num_workers: int = 1,
         task: str = "neat",

@@ -1,10 +1,9 @@
 checkpoints_path: logs/NEAT/version_8
 output_path: output/version_8
 data_set: CrossDocked
-num_molecules: 1000
-batch_size: 1000
+num_molecules: 100
+batch_size: 100
 max_atoms: 200
 num_time_steps: 60
-num_runs: 3
 time_step_spacing: linear
 integration_method: euler_maruyama

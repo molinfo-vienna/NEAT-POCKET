@@ -115,7 +115,7 @@ def train(args: argparse.Namespace) -> None:
     ]
 
     trainer = Trainer(
-        devices=1,
+        devices=[0],
         max_epochs=params["max_epochs"],
         accelerator="gpu",
         logger=tb_logger,

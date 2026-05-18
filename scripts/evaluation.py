@@ -113,7 +113,7 @@ def evaluate(args: argparse.Namespace) -> None:
     # Load preprocessed training data for computing novelty
     if params["compute_novelty"]:
         data_root = os.path.join(ROOT, "data")
-        datamodule = DataModule(data_root, data_set=params["data_set"])
+        datamodule = DataModule(data_root, data_set=params["data_set"].upper())
         datamodule.setup()
         reference_smiles = datamodule.training_data.smiles
     else:
@@ -136,7 +136,7 @@ def evaluate(args: argparse.Namespace) -> None:
     data_path = Path(os.path.join(ROOT, params["data_path"]))
     for subdir in data_path.iterdir():
         if subdir.is_dir() and (
-            subdir.name.startswith("seed") or subdir.name.startswith("prefix")
+            subdir.name.startswith("seed") or subdir.name.startswith("prefix") or subdir.name.startswith("pocket")
         ):
             subdata_path = os.path.join(data_path, subdir.name)
             builder = MoleculeBuilder(vocab=params["data_set"])
@@ -149,7 +149,7 @@ def evaluate(args: argparse.Namespace) -> None:
                 edm_valid,
                 edm_unique,
                 edm_invalid_idxs,
-            ) = edm_metrics(x, pos, batch, params["data_set"])
+            ) = edm_metrics(x, pos, batch, params["data_set"].upper())
             edm_atom_stability_lst.append(atom_stability)
             edm_molecule_stability_lst.append(mol_stability)
             edm_valid_lst.append(edm_valid)
