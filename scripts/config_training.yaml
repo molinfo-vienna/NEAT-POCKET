@@ -1,4 +1,4 @@
-accumulate_grad_batches: 1
+accumulate_grad_batches: 2
 batch_size: 128
 bias: true
 data_set: CrossDocked
@@ -20,3 +20,6 @@ rope: false
 time_step_resampling: 4
 time_step_sampling: logit_normal
 weight_decay: 0.000001
+pretrained_model_path: "logs/NEAT/version_7"
+cfg_dropout: null
+pocket_n_layer: 8

@@ -165,6 +165,61 @@ class NEAT(LightningModule):
 
         return n_params
 
+    def initialize_from_pretrained_model(self, pretrained_model: nn.Module):
+        """
+        Initializes a structurally modified conditional model using weights from a
+        pretrained unconditional model, freezing the pretrained parameters while keeping
+        new conditioning layers and LoRA modules trainable.
+        """
+        # 1. Extract state dicts
+        pretrained_state_dict = pretrained_model.state_dict()
+        current_state_dict = self.state_dict()
+
+        matched_keys = []
+        unmatched_keys = []
+
+        # 2. Load matching weights
+        with torch.no_grad():
+            for key, value in pretrained_state_dict.items():
+                if key in current_state_dict:
+                    if value.shape == current_state_dict[key].shape:
+                        current_state_dict[key].copy_(value)
+                        matched_keys.append(key)
+                    else:
+                        print(
+                            f"[Warning] Shape mismatch for key '{key}': "
+                            f"Pretrained {value.shape} vs Conditional {current_state_dict[key].shape}. Skipping."
+                        )
+                        unmatched_keys.append(key)
+                else:
+                    unmatched_keys.append(key)
+
+        print(f"Successfully transferred {len(matched_keys)} parameter tensors.")
+
+        # 3. Freeze pretrained blocks
+        unfrozen_layers = [
+            "attn_cross",
+            "ln_2",
+            "pocket_residue_type_embedding_layer",
+            "atom_level_pocket_transformer_blocks",
+            "residue_level_pocket_transformer_blocks",
+            "layer_norm_after_atom_level_pocket_transformer_blocks",
+            "layer_norm_after_residue_level_pocket_transformer_blocks",
+        ]
+        for name, param in self.named_parameters():
+            is_new_layer = any(layer in name for layer in unfrozen_layers)
+
+            if is_new_layer:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        frozen_params = sum(p.numel() for p in self.parameters() if not p.requires_grad)
+        print(
+            f"Model configured: {trainable_params:,} trainable params | {frozen_params:,} frozen params."
+        )
+
     def forward(self, data: Data) -> tuple[Tensor, Tensor, Tensor]:
         """Forward pass of the NEAT model.
 
@@ -364,8 +419,8 @@ class NEAT(LightningModule):
             cross_attn_mask = None
 
         # (11) Create mask for CFG dropout
-        if self.training and pocket_info is not None:
-            cfg_dropout = 0.2
+        cfg_dropout = self.hparams.get("cfg_dropout", None)
+        if self.training and pocket_info is not None and cfg_dropout is not None:
             cfg_mask = torch.rand(x.shape[0]) > cfg_dropout
         else:
             cfg_mask = None
