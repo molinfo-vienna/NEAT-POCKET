@@ -6,9 +6,10 @@ from pathlib import Path
 import numpy as np
 import py3Dmol
 import rdkit
+from rdkit import Chem
 import yaml
 from posebusters import PoseBusters
-from rdkit.Chem import AllChem, Draw, MolToSmiles, rdDepictor
+from rdkit.Chem import AllChem, Draw, MolToSmiles, rdDepictor, SDWriter
 
 from neat.dataset import DataModule
 from neat.model.molecule_builder import MoleculeBuilder
@@ -133,10 +134,12 @@ def evaluate(args: argparse.Namespace) -> None:
     posebusters_metrics_list = []
     use_bond_predictor = params.get("bond_predictor_path") is not None
     compute_posebusters = bool(params.get("compute_posebusters", False))
-    data_path = Path(os.path.join(ROOT, params["data_path"]))
+    data_path = Path(os.path.join(ROOT, params["data_path"], params["data_subdir"]))
     for subdir in data_path.iterdir():
         if subdir.is_dir() and (
-            subdir.name.startswith("seed") or subdir.name.startswith("prefix") or subdir.name.startswith("pocket")
+            subdir.name.startswith("seed")
+            or subdir.name.startswith("prefix")
+            or subdir.name.startswith("pocket")
         ):
             subdata_path = os.path.join(data_path, subdir.name)
             builder = MoleculeBuilder(vocab=params["data_set"])
@@ -164,6 +167,22 @@ def evaluate(args: argparse.Namespace) -> None:
                 MolToSmiles(mol, canonical=True) if mol is not None else None
                 for mol in mols_xyz2mol
             ]
+            if datamodule.data_set == "CROSSDOCKED":
+                # 1. Initialize the SDWriter with the output file path
+                writer = SDWriter(os.path.join(subdata_path, "generated_mols.sdf"))
+                try:
+                    # 2. Loop through each molecule and write it to the file
+                    for mol in mols_xyz2mol:
+                        if mol is not None:  # Ensure the molecule object is valid
+                            writer.write(mol)
+                        else:
+                            print(
+                                "Warning: Encountered a 'None' molecule object. Skipping."
+                            )
+                finally:
+                    # 3. Always close the writer to ensure all data is flushed and saved properly
+                    writer.close()
+
             xyz2mol_valid, xyz2mol_valid_x_unique, xyz2mol_valid_x_unique_x_novel = (
                 compute_validity_uniqueness_novelty(smiles_xyz2mol, reference_smiles)
             )

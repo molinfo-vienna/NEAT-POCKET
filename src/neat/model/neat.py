@@ -1005,6 +1005,15 @@ class NEAT(LightningModule):
         Returns:
             tuple[Tensor, Tensor, Tensor]: The atom types, their positions, and the batch indices of the generated molecules.
         """
+        # if pocket_info is not None:
+        #     batch_size = pocket_info["pocket_batch"].max().item() + 1
+        #     pocket_center = global_mean_pool(
+        #         pocket_info["pocket_pos"], pocket_info["pocket_batch"]
+        #     )
+        #     pocket_info["pocket_pos"] = (
+        #         pocket_info["pocket_pos"] - pocket_center[pocket_info["pocket_batch"]]
+        #     )
+
         if prefix_x is not None and prefix_pos is not None:
             # (1) Initialize starting atom types with the provided prefix
             x = torch.cat([prefix_x for _ in range(batch_size)]).to(device)
@@ -1210,6 +1219,11 @@ class NEAT(LightningModule):
                         pocket_info["pocket_pos"]
                         - mean_pos[pocket_info["pocket_batch"]]
                     )
+        if pocket_info is not None:
+            pocket_center = global_mean_pool(
+                pocket_info["pocket_pos"], pocket_info["pocket_batch"]
+            )
+            pos = pos - pocket_center[batch_source]
 
         return Batch(x=x, pos=pos, batch=batch_source)
 
