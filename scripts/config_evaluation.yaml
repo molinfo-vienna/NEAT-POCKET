@@ -1,4 +1,5 @@
-data_path: output/version_8/conditional
+data_path: output/version_13
+data_subdir: conditional
 data_set: CrossDocked
 compute_novelty: true
 compute_posebusters: false
