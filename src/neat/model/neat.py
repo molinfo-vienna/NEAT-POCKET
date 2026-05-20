@@ -31,6 +31,7 @@ class NEAT(LightningModule):
     def __init__(self, **params) -> None:
         super(NEAT, self).__init__()
         self.hparams.setdefault("noise_std", 1.0)
+        self.hparams.setdefault("learnable_cfg_token", False)
         self.save_hyperparameters()
 
         # Atom type embedding layer
@@ -113,6 +114,10 @@ class NEAT(LightningModule):
             self.layer_norm_after_residue_level_pocket_transformer_blocks = (
                 nn.LayerNorm(self.hparams.n_embd, bias=False)
             )
+            if self.hparams.learnable_cfg_token:
+                self.cfg_token_embedding = nn.Parameter(
+                    torch.randn(1, self.hparams.n_embd) * 0.02
+                )
 
         # Linear prediction head for atom type prediction
         self.atom_type_prediction_head = nn.Linear(
@@ -429,6 +434,9 @@ class NEAT(LightningModule):
             if cfg_mask is not None:
                 x_residues[cfg_mask] = 0
                 residue_mask[cfg_mask] = 0
+                if self.hparams.learnable_cfg_token:
+                    x_residues[cfg_mask, 0] = self.cfg_token_embedding
+                    residue_mask[cfg_mask, 0] = 1
 
             # (10) Create a cross-attention mask for the pocket residues
             cross_attn_mask = residue_mask.unsqueeze(1) * atom_mask.unsqueeze(
@@ -440,6 +448,20 @@ class NEAT(LightningModule):
         else:
             x_residues = None
             cross_attn_mask = None
+            if self.hparams.learnable_cfg_token:
+                x_residues = self.cfg_token_embedding.unsqueeze(0).expand(
+                    batch_size, -1, -1
+                )  # [batch_size, 1, n_embd]
+                residue_mask = torch.ones(
+                    (batch_size, 1), device=device, dtype=torch.bool
+                )  # [batch_size, 1]
+                # (10) Create a cross-attention mask for the pocket residues
+                cross_attn_mask = residue_mask.unsqueeze(1) * atom_mask.unsqueeze(
+                    2
+                )  # [batch_size, max_residue_count, max_atom_count]
+                cross_attn_mask = cross_attn_mask.unsqueeze(1).expand(
+                    -1, self.hparams.n_head, -1, -1
+                )  # [batch_size, n_head, max_residue_count, max_atom_count]
 
         # (12) Pass through the transformer blocks
         for block in self.transformer_blocks:

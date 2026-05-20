@@ -1,5 +1,5 @@
-accumulate_grad_batches: 1
-batch_size: 256
+accumulate_grad_batches: 4
+batch_size: 32
 bias: true
 data_set: CrossDocked
 dropout: 0.1
@@ -19,7 +19,8 @@ perturbation_std: 0.05
 rope: false
 time_step_resampling: 4
 time_step_sampling: logit_normal
-weight_decay: 0.000001
-pretrained_model_path: "logs/NEAT/version_6"
-cfg_dropout: null
+weight_decay: 1.0e-06
+pretrained_model_path: "logs/NEAT/pretrained_geom"
+cfg_dropout: 0.10
 pocket_n_layer: 8
+learnable_cfg_token: true
