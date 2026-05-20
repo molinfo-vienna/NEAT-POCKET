@@ -161,16 +161,12 @@ class BidirectionalAttentionBlock(nn.Module):
         cross_attn_input: Optional[torch.Tensor] = None,
         cross_attn_mask: Optional[torch.Tensor] = None,
         pos: Optional[torch.Tensor] = None,
-        cfg_mask: Optional[float] = None,
     ) -> torch.Tensor:
         x = x + self.attn(self.ln_1(x), attn_mask=attn_mask, pos=pos)
         if cross_attn_input is not None and cross_attn_mask is not None:
-            cross_attention_features = self.attn_cross(
+            x = x + self.attn_cross(
                 self.ln_2(x), cross_attn_input, attn_mask=cross_attn_mask
             )
-            if cfg_mask is not None:
-                cross_attention_features[cfg_mask] = 0
-            x = x + cross_attention_features
         x = x + self.mlp(self.ln_3(x))
         return x
 

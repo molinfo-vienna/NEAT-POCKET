@@ -407,6 +407,13 @@ class NEAT(LightningModule):
             -1, self.hparams.n_head, -1, -1
         )  # [batch_size, n_head, max_atom_count, max_atom_count]
 
+        # (11) Create mask for CFG dropout
+        cfg_dropout = self.hparams.get("cfg_dropout", None)
+        if self.training and pocket_info is not None and cfg_dropout is not None:
+            cfg_mask = torch.rand(x.shape[0]) < cfg_dropout
+        else:
+            cfg_mask = None
+
         if pocket_info is not None:
             # (9) Encode the pocket residues with a lightweight transformer
             x_residues, residue_mask = self.compute_residue_representations(
@@ -418,6 +425,11 @@ class NEAT(LightningModule):
                 pocket_residue_type=pocket_residue_type,
                 pocket_batch=pocket_batch,
             )
+
+            if cfg_mask is not None:
+                x_residues[cfg_mask] = 0
+                residue_mask[cfg_mask] = 0
+
             # (10) Create a cross-attention mask for the pocket residues
             cross_attn_mask = residue_mask.unsqueeze(1) * atom_mask.unsqueeze(
                 2
@@ -429,13 +441,6 @@ class NEAT(LightningModule):
             x_residues = None
             cross_attn_mask = None
 
-        # (11) Create mask for CFG dropout
-        cfg_dropout = self.hparams.get("cfg_dropout", None)
-        if self.training and pocket_info is not None and cfg_dropout is not None:
-            cfg_mask = torch.rand(x.shape[0]) > cfg_dropout
-        else:
-            cfg_mask = None
-
         # (12) Pass through the transformer blocks
         for block in self.transformer_blocks:
             x = block(
@@ -443,7 +448,6 @@ class NEAT(LightningModule):
                 attn_mask=attn_mask,
                 cross_attn_input=x_residues,
                 cross_attn_mask=cross_attn_mask,
-                cfg_mask=cfg_mask,
             )  # [batch_size, max_atom_count + 1, n_embd]
 
         x = self.layer_norm_after_transformer_blocks(
@@ -581,7 +585,7 @@ class NEAT(LightningModule):
             -1
         )  # [batch_size, max_residue_count, n_embd]
 
-        return x_residues, residue_mask
+        return x_residues, residue_mask.clone()
 
     def compute_atom_type_loss(
         self,
