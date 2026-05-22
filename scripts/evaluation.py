@@ -9,11 +9,15 @@ import rdkit
 from rdkit import Chem
 import yaml
 from posebusters import PoseBusters
+from posecheck import PoseCheck
+from posecheck.utils.chem import remove_radicals
+
 from rdkit.Chem import AllChem, Draw, MolToSmiles, rdDepictor, SDWriter
 
 from neat.dataset import DataModule
 from neat.model.molecule_builder import MoleculeBuilder
 from neat.utils.edm_metrics import edm_metrics
+from neat.utils.sbdd_metrics import GninaEvalulator
 
 NUM_MOLECULES_PLOTTED = 100
 NUM_MOLECULES_PER_ROW = 5
@@ -132,9 +136,13 @@ def evaluate(args: argparse.Namespace) -> None:
     bp_valid_x_unique_lst = []
     bp_valid_x_unique_x_novel_lst = []
     posebusters_metrics_list = []
+    posecheck_metrics_list = []
     use_bond_predictor = params.get("bond_predictor_path") is not None
     compute_posebusters = bool(params.get("compute_posebusters", False))
     data_path = Path(os.path.join(ROOT, params["data_path"], params["data_subdir"]))
+
+    gnina_evaluator = GninaEvalulator()
+
     for subdir in data_path.iterdir():
         if subdir.is_dir() and (
             subdir.name.startswith("seed")
@@ -182,6 +190,65 @@ def evaluate(args: argparse.Namespace) -> None:
                 finally:
                     # 3. Always close the writer to ensure all data is flushed and saved properly
                     writer.close()
+
+                pocket_path = os.path.join(subdata_path, "pocket.pdb")
+
+                # Initialize the PoseCheck object
+                pc = PoseCheck()
+
+                # Load a protein from a PDB file (will run reduce in the background)
+                pc.load_protein_from_pdb(pocket_path)
+
+                # Load ligands from an SDF file
+                # pc.load_ligands_from_sdf("data/examples/1a2g_ligand.sdf")
+                # Alternatively, load RDKit molecules directly
+                pc_mols = [
+                    remove_radicals(mol) for mol in mols_xyz2mol if mol is not None
+                ]
+                pc.load_ligands_from_mols(pc_mols)
+
+                # Check for clashes
+                clashes = pc.calculate_clashes()
+                pose_check_results = {}
+                pose_check_results["clashes"] = np.array(clashes).mean()
+
+                # Check for strain
+                # strain = pc.calculate_strain_energy()
+                # print(f"Strain energy of example molecule: {strain[0]}")
+
+                # Check for interactions
+                interactions = pc.calculate_interactions()
+                print(f"Interactions of example molecule: {interactions}")
+                interaction_types = [
+                    "HBAcceptor",
+                    "HBDonor",
+                    "Hydrophobic",
+                    "PiStacking",
+                ]
+                n_lig_atoms = [
+                    lig.GetNumAtoms() for lig in mols_xyz2mol if lig is not None
+                ]
+                for i_type in interaction_types:
+                    cols = [col for col in interactions.columns if col[2] == i_type]
+                    i_sum = interactions[cols].sum(axis=1)
+                    pose_check_results[i_type] = np.array(
+                        [
+                            n_interactions
+                            for (n_interactions, n_atoms) in zip(i_sum, n_lig_atoms)
+                        ]
+                    ).mean()
+                posecheck_metrics_list.append(pose_check_results)
+
+                # scores = []
+                # for mol in mols_xyz2mol:
+                #     if mol is not None:
+                #         gnina_score = gnina_evaluator.evaluate(mol, protein=pocket_path)
+                #         print(f"Gnina score for molecule: {gnina_score}")
+                #         scores.append(gnina_score)
+                #     else:
+                #         print(
+                #             "Warning: Encountered a 'None' molecule object. Skipping Gnina evaluation."
+                #         )
 
             xyz2mol_valid, xyz2mol_valid_x_unique, xyz2mol_valid_x_unique_x_novel = (
                 compute_validity_uniqueness_novelty(smiles_xyz2mol, reference_smiles)
@@ -259,6 +326,10 @@ def evaluate(args: argparse.Namespace) -> None:
                     f.write("\nPoseBusters metrics:\n")
                     for metric, value in posebusters_metrics_list[0].items():
                         f.write(f"{metric}: {value*100:.2f}%\n")
+                if datamodule.data_set == "CROSSDOCKED":
+                    f.write("\nPoseCheck metrics:\n")
+                    for metric, value in pose_check_results.items():
+                        f.write(f"{metric}: {value:.2f}\n")
 
             mols_plotting_subset = mols_xyz2mol[:NUM_MOLECULES_PLOTTED]
             for mol in mols_plotting_subset:
@@ -396,6 +467,13 @@ def evaluate(args: argparse.Namespace) -> None:
                     ]
                     mean, ci = compute_mean_and_95_ci(values)
                     f.write(f"{metric_name}: {mean*100:.2f}% ± {ci*100:.2f}%\n")
+        if datamodule.data_set == "CROSSDOCKED":
+            f.write("\nPoseCheck metrics:\n")
+            metric_names = list(posecheck_metrics_list[0].keys())
+            for metric_name in metric_names:
+                values = [metrics[metric_name] for metrics in posecheck_metrics_list]
+                mean, ci = compute_mean_and_95_ci(values)
+                f.write(f"{metric_name}: {mean:.2f} ± {ci:.2f}\n")
 
 
 if __name__ == "__main__":

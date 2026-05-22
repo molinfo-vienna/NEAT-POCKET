@@ -27,7 +27,8 @@ dependencies = [
     "tensorboard===2.20.0",
     "posebusters==0.6.5",
     "gdown==6.0.0",
-    "biopython==1.87"
+    "biopython==1.87",
+    "posecheck"
 ]
 
 [project.optional-dependencies]
