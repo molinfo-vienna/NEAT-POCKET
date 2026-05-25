@@ -81,6 +81,16 @@ class NEAT(LightningModule):
         )
 
         if self.enable_cross_attention:
+            self.atom_type_embedding_layer_pocket = nn.Embedding(
+                num_embeddings=self.hparams.vocab_size,
+                embedding_dim=self.hparams.n_embd,
+            )
+
+            # Fourier features for embedding of Cartesian coordinates
+            self.fourier_embedding_layer_pocket = FourierPositionEncoding(
+                out_dim=self.hparams.n_embd
+            )
+
             # Transformer blocks for the pocket stream
             self.hparams.setdefault("pocket_n_layer", self.hparams.n_layer)
             self.atom_level_pocket_transformer_blocks = nn.ModuleList(
@@ -203,7 +213,8 @@ class NEAT(LightningModule):
 
         # 3. Freeze pretrained blocks
         frozen_layers = [
-            "ada_mlp",
+            # "ada_mlp",
+            # "atom_type_embedding_layer",
         ]
         for name, param in self.named_parameters():
             is_frozen_layer = any(layer in name for layer in frozen_layers)
@@ -520,8 +531,8 @@ class NEAT(LightningModule):
             )
 
         # (1) Atom-level embeddings
-        atom_embedding = self.atom_type_embedding_layer(pocket_x)
-        pos_embedding = self.fourier_embedding_layer(pocket_pos)
+        atom_embedding = self.atom_type_embedding_layer_pocket(pocket_x)
+        pos_embedding = self.fourier_embedding_layer_pocket(pocket_pos)
         residue_type_embedding = self.pocket_residue_type_embedding_layer(
             pocket_residue_type
         )
