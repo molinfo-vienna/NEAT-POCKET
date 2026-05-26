@@ -17,7 +17,7 @@ authors = [
 dependencies = [
     "lightning==2.5.5",
     "networkx==3.5",
-    "numpy==2.3.4",
+    "numpy==1.26.4",
     "pyYAML==6.0.3",
     "py3dmol==2.5.3",
     "rdkit==2025.9.1",
@@ -28,7 +28,8 @@ dependencies = [
     "posebusters==0.6.5",
     "gdown==6.0.0",
     "biopython==1.87",
-    "posecheck"
+    "setuptools==80.10.2,"
+    "posecheck",
 ]
 
 [project.optional-dependencies]
