@@ -444,11 +444,11 @@ class CrossDockedDataSet(InMemoryDataset):
                         [np.asarray(a.get_coord(), dtype=np.float64) for a in heavy],
                         axis=0,
                     )
-                    if (
-                        np.linalg.norm(res_xyz[:, None, :] - lig[None, :, :], axis=-1).min()
-                        >= cutoff
-                    ):
-                        continue
+                    # if (
+                    #     np.linalg.norm(res_xyz[:, None, :] - lig[None, :, :], axis=-1).min()
+                    #     >= cutoff
+                    # ):
+                    #     continue
 
                     for atom in heavy:
                         atom_type = _pdb_heavy_element_symbol(atom)
