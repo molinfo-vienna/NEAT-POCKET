@@ -29,22 +29,22 @@ RDKIT_BOND_TO_ID = {
 }
 
 LIGAND_VOCABULARY = {
-    1: 1, # H
-    5: 2, # B
-    6: 3, # C
-    7: 4, # N
-    8: 5, # O
-    9: 6, # F
-    13: 7, # Al ?
-    14: 8, # Si ?
-    15: 9, # P
-    16: 10, # S
-    17: 11, # Cl
-    33: 12, # As ?
-    35: 13, # Br
-    53: 14, # I
-    80: 15, # Hg ? 
-    83: 16, # Bi ?
+    1: 1,  # H
+    5: 2,  # B
+    6: 3,  # C
+    7: 4,  # N
+    8: 5,  # O
+    9: 6,  # F
+    13: 7,  # Al ?
+    14: 8,  # Si ?
+    15: 9,  # P
+    16: 10,  # S
+    17: 11,  # Cl
+    33: 12,  # As ?
+    35: 13,  # Br
+    53: 14,  # I
+    80: 15,  # Hg ?
+    83: 16,  # Bi ?
 }
 
 # Standard 20 amino acids + unknown
@@ -207,8 +207,8 @@ class CrossDockedDataSet(InMemoryDataset):
     @property
     def processed_file_names(self):
         return [
-            "train_data.pt", 
-            "val_data.pt", 
+            "train_data.pt",
+            "val_data.pt",
             "test_data.pt",
             "log.txt",
         ]
@@ -224,7 +224,7 @@ class CrossDockedDataSet(InMemoryDataset):
         self.logger.setLevel(logging.DEBUG)
         self.logger.addHandler(file_handler)
         self.logger.info("Processing CrossDocked dataset...")
-        
+
         # Load split file
         split_file_path = self.raw_paths[1]
         data_split = torch.load(split_file_path, map_location="cpu", weights_only=False)
@@ -268,11 +268,16 @@ class CrossDockedDataSet(InMemoryDataset):
         data_list: list[Data] = []
         failed: int = 0
         pbar = tqdm(pairs)
+        if split_name == "test":
+            add_hydrogens = False
+        else:
+            add_hydrogens = True
+
         for pocket_fn, ligand_fn in pbar:
             pocket_path = datadir / pocket_fn
             ligand_path = datadir / ligand_fn
             try:
-                data = self._process_pair(pocket_path, ligand_path)
+                data = self._process_pair(pocket_path, ligand_path, add_hydrogens)
                 if data is not None:
                     data_list.append(data)
                 else:
@@ -284,7 +289,9 @@ class CrossDockedDataSet(InMemoryDataset):
             self.logger.warning(f"Dropped {failed} pairs in {split_name} split.")
         return data_list
 
-    def _process_pair(self, pocket_path: Path, ligand_path: Path) -> Data | None:
+    def _process_pair(
+        self, pocket_path: Path, ligand_path: Path, add_hydrogens: bool
+    ) -> Data | None:
         if not pocket_path.is_file() or not ligand_path.is_file():
             return None
 
@@ -292,7 +299,9 @@ class CrossDockedDataSet(InMemoryDataset):
 
         suppl = Chem.SDMolSupplier(str(ligand_path), sanitize=True, removeHs=False)
         if suppl is None or len(suppl) == 0:
-            self.logger.warning(f"Ligand {ligand_path}: cannot be loaded or sanitized by RDKit.")
+            self.logger.warning(
+                f"Ligand {ligand_path}: cannot be loaded or sanitized by RDKit."
+            )
             return None
 
         rdmol = suppl[0]
@@ -303,18 +312,26 @@ class CrossDockedDataSet(InMemoryDataset):
             return None
 
         if rdmol.GetNumAtoms() < 1:
-            self.logger.warning(f"Ligand {ligand_path}: number of atoms is less than 1.")
+            self.logger.warning(
+                f"Ligand {ligand_path}: number of atoms is less than 1."
+            )
             return None
 
         for atom in rdmol.GetAtoms():
             z = atom.GetAtomicNum()
             if z not in LIGAND_VOCABULARY:
-                self.logger.warning(f"Ligand {ligand_path}: atomic number {z} not in vocabulary.")
+                self.logger.warning(
+                    f"Ligand {ligand_path}: atomic number {z} not in vocabulary."
+                )
                 return None
 
-        rdmol = _add_hydrogens(rdmol)
+        if add_hydrogens:
+            rdmol = _add_hydrogens(rdmol)
+
         if rdmol is None:
-            self.logger.warning(f"Ligand {ligand_path}: embedding hydrogen atoms with UFF failed or timed out.")
+            self.logger.warning(
+                f"Ligand {ligand_path}: embedding hydrogen atoms with UFF failed or timed out."
+            )
             return None
 
         ### Process ligand into graph ###
@@ -344,10 +361,15 @@ class CrossDockedDataSet(InMemoryDataset):
 
         ### Process pocket into graph ###
 
-        pocket_x, pocket_pos, pocket_residue_id, pocket_residue_type  = self._pocket_features(
-            pdb_model, lig_pos
+        pocket_x, pocket_pos, pocket_residue_id, pocket_residue_type = (
+            self._pocket_features(pdb_model, lig_pos)
         )
-        if pocket_x is None or pocket_pos is None or pocket_residue_id is None or pocket_residue_type is None:
+        if (
+            pocket_x is None
+            or pocket_pos is None
+            or pocket_residue_id is None
+            or pocket_residue_type is None
+        ):
             return None
 
         com = lig_pos.mean(dim=0, keepdim=True)
@@ -452,9 +474,13 @@ class CrossDockedDataSet(InMemoryDataset):
 
                     for atom in heavy:
                         atom_type = _pdb_heavy_element_symbol(atom)
-                        atom_type_encoded = _encode_pocket_atom(atom_type, LIGAND_VOCABULARY)
+                        atom_type_encoded = _encode_pocket_atom(
+                            atom_type, LIGAND_VOCABULARY
+                        )
                         atom_coords = np.asarray(atom.get_coord(), dtype=np.float32)
-                        selected.append((atom_type_encoded, atom_coords, residue_id, residue_type))
+                        selected.append(
+                            (atom_type_encoded, atom_coords, residue_id, residue_type)
+                        )
                     residue_id += 1
 
             if not selected:
@@ -464,10 +490,12 @@ class CrossDockedDataSet(InMemoryDataset):
             pocket_x = torch.tensor([t[0] for t in selected], dtype=torch.long)
             pocket_pos = torch.from_numpy(np.stack([t[1] for t in selected], axis=0))
             pocket_residue_id = torch.tensor([t[2] for t in selected], dtype=torch.long)
-            pocket_residue_type = torch.tensor([t[3] for t in selected], dtype=torch.long)
+            pocket_residue_type = torch.tensor(
+                [t[3] for t in selected], dtype=torch.long
+            )
 
             return pocket_x, pocket_pos, pocket_residue_id, pocket_residue_type
-        
+
         except Exception as e:
             self.logger.warning(f"Pocket {pdb_model}: cannot get features: {e}")
             return None, None, None, None
