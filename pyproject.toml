@@ -30,6 +30,8 @@ dependencies = [
     "biopython==1.87",
     "setuptools==80.10.2",
     "posecheck",
+    "dask",
+    "distributed",
 ]
 
 [project.optional-dependencies]

@@ -16,6 +16,7 @@ from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
+from dask.distributed import Client, LocalCluster, as_completed
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -119,6 +120,210 @@ def _add_hydrogens(mol: Chem.Mol, max_attempts: int = 50) -> Chem.Mol:
         return mol_h
     except Exception as e:
         return None
+
+
+def _ligand_features(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
+    logger = logging.getLogger(__name__)
+    try:
+        n = mol.GetNumAtoms()
+        x = torch.tensor(
+            [LIGAND_VOCABULARY[a.GetAtomicNum()] for a in mol.GetAtoms()],
+            dtype=torch.long,
+        )
+        conf = mol.GetConformer()
+        pos = torch.zeros((n, 3), dtype=torch.float32)
+        for i in range(n):
+            p = conf.GetAtomPosition(i)
+            pos[i, 0] = p.x
+            pos[i, 1] = p.y
+            pos[i, 2] = p.z
+        return x, pos
+    except Exception as e:
+        logger.warning(f"Ligand {mol}: cannot get features: {e}")
+        return None, None
+
+
+def _ligand_edges(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
+    logger = logging.getLogger(__name__)
+    try:
+        edge_index: list[tuple[int, int]] = []
+        edge_labels: list[int] = []
+        for bond in mol.GetBonds():
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+            edge_index.append((i, j))
+            edge_index.append((j, i))
+            bt = RDKIT_BOND_TO_ID.get(bond.GetBondType(), 0)
+            edge_labels.append(bt)
+            edge_labels.append(bt)
+        if not edge_index:
+            return (
+                torch.empty(2, 0, dtype=torch.long),
+                torch.empty(0, dtype=torch.long),
+            )
+        edge_index_t = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+        edge_labels_t = torch.tensor(edge_labels, dtype=torch.long)
+        return edge_index_t, edge_labels_t
+    except Exception as e:
+        logger.warning(f"Ligand {mol}: cannot get edges: {e}")
+        return None, None
+
+
+def _pocket_features(
+    pdb_model,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+
+    # (atom_type, atom_coords, residue_type, residue_id)
+    selected: list[tuple[int, np.ndarray, int, int]] = []
+    residue_id = 0
+    logger = logging.getLogger(__name__)
+    try:
+        for chain in pdb_model.get_chains():
+            for residue in chain.get_residues():
+                if not is_aa(residue.get_resname(), standard=True):
+                    continue
+                resname = residue.get_resname().strip().upper()
+                residue_type = AA_3_TO_IDX.get(resname, AA_UNK_IDX)
+
+                heavy = [
+                    a
+                    for a in residue.get_atoms()
+                    if _pdb_heavy_element_symbol(a) not in (None, "H")
+                ]
+                if not heavy:
+                    continue
+
+                for atom in heavy:
+                    atom_type = _pdb_heavy_element_symbol(atom)
+                    atom_type_encoded = _encode_pocket_atom(
+                        atom_type, LIGAND_VOCABULARY
+                    )
+                    atom_coords = np.asarray(atom.get_coord(), dtype=np.float32)
+                    selected.append(
+                        (atom_type_encoded, atom_coords, residue_id, residue_type)
+                    )
+                residue_id += 1
+
+        if not selected:
+            logger.warning(f"Pocket {pdb_model}: no atoms selected.")
+            return None, None, None, None
+
+        pocket_x = torch.tensor([t[0] for t in selected], dtype=torch.long)
+        pocket_pos = torch.from_numpy(np.stack([t[1] for t in selected], axis=0))
+        pocket_residue_id = torch.tensor([t[2] for t in selected], dtype=torch.long)
+        pocket_residue_type = torch.tensor([t[3] for t in selected], dtype=torch.long)
+
+        return pocket_x, pocket_pos, pocket_residue_id, pocket_residue_type
+
+    except Exception as e:
+        logger.warning(f"Pocket {pdb_model}: cannot get features: {e}")
+        return None, None, None, None
+
+
+def _process_pair(
+    pocket_path: Path, ligand_path: Path, add_hydrogens: bool
+) -> Data | None:
+
+    logger = logging.getLogger(__name__)
+
+    if not pocket_path.is_file() or not ligand_path.is_file():
+        return None
+
+    ### Load ligand and clean ligand ###
+
+    suppl = Chem.SDMolSupplier(str(ligand_path), sanitize=True, removeHs=False)
+    if suppl is None or len(suppl) == 0:
+        logger.warning(f"Ligand {ligand_path}: cannot be loaded or sanitized by RDKit.")
+        return None
+
+    rdmol = suppl[0]
+
+    rdmol = _largest_fragment(rdmol)
+    if rdmol is None:
+        logger.warning(f"Ligand {ligand_path}: largest fragment is None.")
+        return None
+
+    if rdmol.GetNumAtoms() < 1:
+        logger.warning(f"Ligand {ligand_path}: number of atoms is less than 1.")
+        # )
+        return None
+
+    for atom in rdmol.GetAtoms():
+        z = atom.GetAtomicNum()
+        if z not in LIGAND_VOCABULARY:
+            logger.warning(
+                f"Ligand {ligand_path}: atomic number {z} not in vocabulary."
+            )
+            return None
+
+    if add_hydrogens:
+        rdmol = _add_hydrogens(rdmol)
+
+    if rdmol is None:
+        logger.warning(
+            f"Ligand {ligand_path}: embedding hydrogen atoms with UFF failed or timed out."
+        )
+        return None
+
+    ### Process ligand into graph ###
+
+    lig_x, lig_pos = _ligand_features(rdmol)
+    if lig_x is None or lig_pos is None:
+        logger.warning(f"Ligand {ligand_path}: cannot get features.")
+        return None
+    edge_index, edge_labels = _ligand_edges(rdmol)
+    if edge_index is None or edge_labels is None:
+        logger.warning(f"Ligand {ligand_path}: cannot get edges.")
+        return None
+    if edge_index.numel() == 0:
+        G = nx.Graph()
+        G.add_nodes_from(range(rdmol.GetNumAtoms()))
+    else:
+        G = nx.Graph()
+        for i, j in edge_index.t().tolist():
+            G.add_edge(i, j)
+    eccentricity = torch.tensor(
+        [nx.eccentricity(G, n) for n in range(rdmol.GetNumAtoms())],
+        dtype=torch.long,
+    )
+    smiles = Chem.MolToSmiles(rdmol, canonical=True)
+
+    ### Load pocket ###
+
+    pdb_model = PDBParser(QUIET=True).get_structure("", str(pocket_path))[0]
+
+    ### Process pocket into graph ###
+
+    pocket_x, pocket_pos, pocket_residue_id, pocket_residue_type = _pocket_features(
+        pdb_model
+    )
+    if (
+        pocket_x is None
+        or pocket_pos is None
+        or pocket_residue_id is None
+        or pocket_residue_type is None
+    ):
+        return None
+
+    com = lig_pos.mean(dim=0, keepdim=True)
+    lig_pos = lig_pos - com
+    pocket_pos = pocket_pos - com
+
+    name = f"{pocket_path.stem}__{ligand_path.name}"
+
+    return Data(
+        x=lig_x,
+        pos=lig_pos,
+        edge_index=edge_index,
+        edge_labels=edge_labels,
+        eccentricity=eccentricity,
+        smiles=smiles,
+        name=name,
+        pocket_x=pocket_x,
+        pocket_pos=pocket_pos,
+        pocket_residue_id=pocket_residue_id,
+        pocket_residue_type=pocket_residue_type,
+    )
 
 
 class CrossDockedDataSet(InMemoryDataset):
@@ -264,238 +469,73 @@ class CrossDockedDataSet(InMemoryDataset):
                     f"Saved {len(data_list)} graphs to {self.processed_paths[path_idx]}"
                 )
 
-    def _process_split(self, pairs, datadir: Path, split_name: str) -> list[Data]:
+    def _process_split(
+        self, pairs, datadir: Path, split_name: str, num_workers=8
+    ) -> list[Data]:
         data_list: list[Data] = []
         failed: int = 0
-        pbar = tqdm(pairs)
+
         if split_name == "test":
             add_hydrogens = False
         else:
             add_hydrogens = True
 
-        for pocket_fn, ligand_fn in pbar:
-            pocket_path = datadir / pocket_fn
-            ligand_path = datadir / ligand_fn
-            try:
-                data = self._process_pair(pocket_path, ligand_path, add_hydrogens)
-                if data is not None:
-                    data_list.append(data)
-                else:
+        if num_workers is None or num_workers <= 1:
+            pbar = tqdm(pairs)
+            for pocket_fn, ligand_fn in pbar:
+                pocket_path = datadir / pocket_fn
+                ligand_path = datadir / ligand_fn
+                try:
+                    data = _process_pair(pocket_path, ligand_path, add_hydrogens)
+                    if data is not None:
+                        data_list.append(data)
+                    else:
+                        failed += 1
+                except Exception as e:
                     failed += 1
-            except Exception as e:
-                failed += 1
-            pbar.set_postfix(failed=failed)
-        if failed:
-            self.logger.warning(f"Dropped {failed} pairs in {split_name} split.")
-        return data_list
-
-    def _process_pair(
-        self, pocket_path: Path, ligand_path: Path, add_hydrogens: bool
-    ) -> Data | None:
-        if not pocket_path.is_file() or not ligand_path.is_file():
-            return None
-
-        ### Load ligand and clean ligand ###
-
-        suppl = Chem.SDMolSupplier(str(ligand_path), sanitize=True, removeHs=False)
-        if suppl is None or len(suppl) == 0:
-            self.logger.warning(
-                f"Ligand {ligand_path}: cannot be loaded or sanitized by RDKit."
-            )
-            return None
-
-        rdmol = suppl[0]
-
-        rdmol = _largest_fragment(rdmol)
-        if rdmol is None:
-            self.logger.warning(f"Ligand {ligand_path}: largest fragment is None.")
-            return None
-
-        if rdmol.GetNumAtoms() < 1:
-            self.logger.warning(
-                f"Ligand {ligand_path}: number of atoms is less than 1."
-            )
-            return None
-
-        for atom in rdmol.GetAtoms():
-            z = atom.GetAtomicNum()
-            if z not in LIGAND_VOCABULARY:
-                self.logger.warning(
-                    f"Ligand {ligand_path}: atomic number {z} not in vocabulary."
-                )
-                return None
-
-        if add_hydrogens:
-            rdmol = _add_hydrogens(rdmol)
-
-        if rdmol is None:
-            self.logger.warning(
-                f"Ligand {ligand_path}: embedding hydrogen atoms with UFF failed or timed out."
-            )
-            return None
-
-        ### Process ligand into graph ###
-
-        lig_x, lig_pos = self._ligand_features(rdmol)
-        if lig_x is None or lig_pos is None:
-            return None
-        edge_index, edge_labels = self._ligand_edges(rdmol)
-        if edge_index is None or edge_labels is None:
-            return None
-        if edge_index.numel() == 0:
-            G = nx.Graph()
-            G.add_nodes_from(range(rdmol.GetNumAtoms()))
+                pbar.set_postfix(failed=failed)
+            if failed:
+                self.logger.warning(f"Dropped {failed} pairs in {split_name} split.")
         else:
-            G = nx.Graph()
-            for i, j in edge_index.t().tolist():
-                G.add_edge(i, j)
-        eccentricity = torch.tensor(
-            [nx.eccentricity(G, n) for n in range(rdmol.GetNumAtoms())],
-            dtype=torch.long,
-        )
-        smiles = Chem.MolToSmiles(rdmol, canonical=True)
+            cluster = LocalCluster(n_workers=num_workers, threads_per_worker=1)
+            client = Client(cluster)
+            client.forward_logging(logger_name=__name__)
+            print(f"Dask cluster initialized with {num_workers} workers.")
 
-        ### Load pocket ###
-
-        pdb_model = PDBParser(QUIET=True).get_structure("", str(pocket_path))[0]
-
-        ### Process pocket into graph ###
-
-        pocket_x, pocket_pos, pocket_residue_id, pocket_residue_type = (
-            self._pocket_features(pdb_model, lig_pos)
-        )
-        if (
-            pocket_x is None
-            or pocket_pos is None
-            or pocket_residue_id is None
-            or pocket_residue_type is None
-        ):
-            return None
-
-        com = lig_pos.mean(dim=0, keepdim=True)
-        lig_pos = lig_pos - com
-        pocket_pos = pocket_pos - com
-
-        name = f"{pocket_path.stem}__{ligand_path.name}"
-
-        return Data(
-            x=lig_x,
-            pos=lig_pos,
-            edge_index=edge_index,
-            edge_labels=edge_labels,
-            eccentricity=eccentricity,
-            smiles=smiles,
-            name=name,
-            pocket_x=pocket_x,
-            pocket_pos=pocket_pos,
-            pocket_residue_id=pocket_residue_id,
-            pocket_residue_type=pocket_residue_type,
-        )
-
-    def _ligand_features(self, mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
-        try:
-            n = mol.GetNumAtoms()
-            x = torch.tensor(
-                [LIGAND_VOCABULARY[a.GetAtomicNum()] for a in mol.GetAtoms()],
-                dtype=torch.long,
-            )
-            conf = mol.GetConformer()
-            pos = torch.zeros((n, 3), dtype=torch.float32)
-            for i in range(n):
-                p = conf.GetAtomPosition(i)
-                pos[i, 0] = p.x
-                pos[i, 1] = p.y
-                pos[i, 2] = p.z
-            return x, pos
-        except Exception as e:
-            self.logger.warning(f"Ligand {mol}: cannot get features: {e}")
-            return None, None
-
-    def _ligand_edges(self, mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
-        try:
-            edge_index: list[tuple[int, int]] = []
-            edge_labels: list[int] = []
-            for bond in mol.GetBonds():
-                i = bond.GetBeginAtomIdx()
-                j = bond.GetEndAtomIdx()
-                edge_index.append((i, j))
-                edge_index.append((j, i))
-                bt = RDKIT_BOND_TO_ID.get(bond.GetBondType(), 0)
-                edge_labels.append(bt)
-                edge_labels.append(bt)
-            if not edge_index:
-                return (
-                    torch.empty(2, 0, dtype=torch.long),
-                    torch.empty(0, dtype=torch.long),
+            # 1. Submit tasks eagerly as Futures (this doesn't build a massive graph)
+            # Make sure '_process_pair' is the standalone function we discussed!
+            futures = [
+                client.submit(
+                    _process_pair,
+                    datadir / pocket_fn,
+                    datadir / ligand_fn,
+                    add_hydrogens,
                 )
-            edge_index_t = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
-            edge_labels_t = torch.tensor(edge_labels, dtype=torch.long)
-            return edge_index_t, edge_labels_t
-        except Exception as e:
-            self.logger.warning(f"Ligand {mol}: cannot get edges: {e}")
-            return None, None
+                for pocket_fn, ligand_fn in pairs
+            ]
 
-    def _pocket_features(
-        self,
-        pdb_model,
-        lig_pos: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        cutoff = self.pocket_dist_cutoff
-        lig = lig_pos.numpy()
+            data_list = []
+            failed = 0
 
-        # (atom_type, atom_coords, residue_type, residue_id)
-        selected: list[tuple[int, np.ndarray, int, int]] = []
-        residue_id = 0
+            # 2. Track progress in real-time as tasks finish
+            with tqdm(total=len(futures), desc="Processing complexes") as pbar:
+                # as_completed yields futures the exact second they finish
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()  # Grab the actual output
+                        if result is not None:
+                            data_list.append(result)
+                        else:
+                            failed += 1
+                    except Exception as e:
+                        # This catches worker crashes or unhandled code exceptions
+                        failed += 1
 
-        try:
-            for chain in pdb_model.get_chains():
-                for residue in chain.get_residues():
-                    if not is_aa(residue.get_resname(), standard=True):
-                        continue
-                    resname = residue.get_resname().strip().upper()
-                    residue_type = AA_3_TO_IDX.get(resname, AA_UNK_IDX)
+                    pbar.update(1)
+                    pbar.set_postfix(failed=failed)
 
-                    heavy = [
-                        a
-                        for a in residue.get_atoms()
-                        if _pdb_heavy_element_symbol(a) not in (None, "H")
-                    ]
-                    if not heavy:
-                        continue
-                    res_xyz = np.stack(
-                        [np.asarray(a.get_coord(), dtype=np.float64) for a in heavy],
-                        axis=0,
-                    )
-                    # if (
-                    #     np.linalg.norm(res_xyz[:, None, :] - lig[None, :, :], axis=-1).min()
-                    #     >= cutoff
-                    # ):
-                    #     continue
+            print(f"Done! Successfully processed {len(data_list)} complexes.")
+            client.close()
+            cluster.close()
 
-                    for atom in heavy:
-                        atom_type = _pdb_heavy_element_symbol(atom)
-                        atom_type_encoded = _encode_pocket_atom(
-                            atom_type, LIGAND_VOCABULARY
-                        )
-                        atom_coords = np.asarray(atom.get_coord(), dtype=np.float32)
-                        selected.append(
-                            (atom_type_encoded, atom_coords, residue_id, residue_type)
-                        )
-                    residue_id += 1
-
-            if not selected:
-                self.logger.warning(f"Pocket {pdb_model}: no atoms selected.")
-                return None, None, None, None
-
-            pocket_x = torch.tensor([t[0] for t in selected], dtype=torch.long)
-            pocket_pos = torch.from_numpy(np.stack([t[1] for t in selected], axis=0))
-            pocket_residue_id = torch.tensor([t[2] for t in selected], dtype=torch.long)
-            pocket_residue_type = torch.tensor(
-                [t[3] for t in selected], dtype=torch.long
-            )
-
-            return pocket_x, pocket_pos, pocket_residue_id, pocket_residue_type
-
-        except Exception as e:
-            self.logger.warning(f"Pocket {pdb_model}: cannot get features: {e}")
-            return None, None, None, None
+        return data_list
