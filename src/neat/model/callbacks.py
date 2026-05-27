@@ -1,10 +1,16 @@
+from tempfile import NamedTemporaryFile
+
 import torch
 from lightning import Callback, LightningModule, Trainer
 from rdkit import Chem
-from torch_geometric.nn import global_mean_pool
+from posecheck import (
+    PoseCheck,
+)
+from posecheck.utils.chem import remove_radicals
+import numpy as np
 
 from neat.model.molecule_builder import MoleculeBuilder
-from neat.utils.edm_metrics import edm_metrics
+from neat.utils import center_pdb
 
 
 class GenerationMonitor(Callback):
@@ -52,13 +58,12 @@ class GenerationMonitor(Callback):
         trainer: Trainer,
         pl_module: LightningModule,
     ) -> None:
-        if (
-            trainer.current_epoch % self.every_n_epochs != 0
-            or trainer.current_epoch == 0
-        ):
+        if trainer.current_epoch % self.every_n_epochs != 0:
             return
 
         generated_mols = None
+        pocket_paths = None
+        mols_per_pocket = None
         if str(self.dataset).upper() == "QM9":
             generated_mols = pl_module.generate(
                 batch_size=self.num_samples, integration_method="euler"
@@ -69,18 +74,23 @@ class GenerationMonitor(Callback):
                 batch_size=self.num_samples, integration_method="euler_maruyama"
             )
         elif str(self.dataset).upper() == "CROSSDOCKED":
-            num_pockets = self.num_samples
+            num_pockets = 10
             val_data = list(trainer.val_dataloaders.dataset[:num_pockets])
             mols_per_pocket = self.num_samples // num_pockets
             pocket_info = trainer.val_dataloaders.dataset.collate_pocket_info(
                 val_data, samples_per_pocket=mols_per_pocket, device=pl_module.device
             )
-
             generated_mols = pl_module.generate(
                 batch_size=self.num_samples,
                 integration_method="euler_maruyama",
                 pocket_info=pocket_info,
             )
+            pocket_paths = [
+                trainer.val_dataloaders.dataset.get_pocket_path_from_data_point(
+                    data_point
+                )
+                for data_point in val_data
+            ]
         else:
             raise ValueError(f"Unknown dataset: {self.dataset}")
 
@@ -107,6 +117,33 @@ class GenerationMonitor(Callback):
             on_step=False,
             on_epoch=True,
         )
+        if str(self.dataset).upper() == "CROSSDOCKED":
+            mean_clashes = []
+            for i, pocket_path in enumerate(pocket_paths):
+                with NamedTemporaryFile(delete=True, suffix=".pdb") as temp_file:
+                    # Convert the string path to a pathlib.Path object
+                    center_pdb(pocket_path, temp_file.name)
+                    mols_for_pocket = mols[
+                        i * mols_per_pocket : (i + 1) * mols_per_pocket
+                    ]
+                    pc = PoseCheck()
+                    pc.load_protein_from_pdb(temp_file.name)
+                    pc_mols = [
+                        remove_radicals(mol)
+                        for mol in mols_for_pocket
+                        if mol is not None
+                    ]
+                    pc.load_ligands_from_mols(pc_mols)
+                    clashes = np.array(pc.calculate_clashes()).mean()
+                    mean_clashes.append(clashes)
+
+            pl_module.log(
+                "val/clashes",
+                np.array(mean_clashes).mean(),
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+            )
 
     def compute_validity(
         self,

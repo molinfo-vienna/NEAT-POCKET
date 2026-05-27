@@ -11,7 +11,6 @@ from posebusters import PoseBusters
 from posecheck import (
     PoseCheck,
 )  # Leave import, posecheck will creat segmentation fault otherwise
-from posecheck.utils.chem import remove_radicals
 from rdkit.Chem import AllChem, Draw, MolToSmiles, rdDepictor, SDWriter
 
 from neat.dataset import DataModule

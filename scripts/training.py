@@ -105,7 +105,7 @@ def train(args: argparse.Namespace) -> None:
 
     callbacks = [
         GenerationMonitor(
-            num_samples=1000,
+            num_samples=200,
             every_n_epochs=generate_every_n_epochs,
             dataset=params["data_set"],
         ),

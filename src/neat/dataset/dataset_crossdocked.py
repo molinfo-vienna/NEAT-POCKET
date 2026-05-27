@@ -366,10 +366,13 @@ class CrossDockedDataSet(InMemoryDataset):
         split = split.lower()
         if split == "train":
             self.load(self.processed_paths[0])
+            self.split_names = torch.load(self.raw_paths[1])["train"]
         elif split == "val":
             self.load(self.processed_paths[1])
+            self.split_names = torch.load(self.raw_paths[1])["train"]
         elif split == "test":
             self.load(self.processed_paths[2])
+            self.split_names = torch.load(self.raw_paths[1])["test"]
         else:
             raise ValueError(f"Unknown split: {split}")
 
@@ -581,3 +584,11 @@ class CrossDockedDataSet(InMemoryDataset):
             "pocket_batch": pocket_batch,
         }
         return pocket_info
+
+    def get_pocket_path_from_data_point(self, data_point):
+        name = data_point.name.split("__")[0]
+        pocket_path = [
+            split_name[0] for split_name in self.split_names if name in split_name[0]
+        ][0]
+        pdb_file = os.path.join(self.raw_paths[2], pocket_path)
+        return pdb_file

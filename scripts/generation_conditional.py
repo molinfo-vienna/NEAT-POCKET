@@ -10,6 +10,7 @@ from torch_geometric.data import Batch
 
 from neat.dataset import DataModule
 from neat.model import NEAT
+from neat.utils import center_pdb
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -23,38 +24,6 @@ seed_everything(42)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROOT = os.getcwd()
 
-import numpy as np
-from Bio.PDB import PDBParser, PDBIO
-
-
-def center_pdb(input_path, output_path):
-    # 1. Initialize the parser and load the structure
-    parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("protein", input_path)
-
-    # 2. Collect all atom coordinates
-    # We use a list comprehension to gather coordinates of all atoms in the structure
-    coords = np.array([atom.get_coord() for atom in structure.get_atoms()])
-
-    if len(coords) == 0:
-        raise ValueError("No atoms found in the provided PDB file.")
-
-    # 3. Calculate the geometric center (mean of all coordinates)
-    # Note: If you want the center of mass instead, you would need to weight
-    # these by element masses, but geometric center is the standard for "centering coordinates".
-    geometric_center = coords.mean(axis=0)
-
-    # 4. Subtract the center from each atom's coordinates
-    # This shifts the structure so that its new geometric center is at (0, 0, 0)
-    for atom in structure.get_atoms():
-        new_coord = atom.get_coord() - geometric_center
-        atom.set_coord(new_coord)
-
-    # 5. Write the modified structure to a new PDB file
-    io = PDBIO()
-    io.set_structure(structure)
-    io.save(output_path)
-    print(f"Successfully centered structure and saved to {output_path}")
 
 
 def generate(args: argparse.Namespace) -> None:
@@ -101,7 +70,6 @@ def generate(args: argparse.Namespace) -> None:
     )
     datamodule.setup()
     test_data = datamodule.test_data
-    split_names = torch.load(test_data.raw_paths[1])["test"]
 
     num_molecules = params["num_molecules"]
     batch_size = params["batch_size"]
@@ -141,11 +109,7 @@ def generate(args: argparse.Namespace) -> None:
         if not os.path.exists(out_dir):
             os.makedirs(out_dir)
 
-        name = test_data_point.name.split("__")[0]
-        pocket_path = [
-            split_name[0] for split_name in split_names if name in split_name[0]
-        ][0]
-        in_pdb_file = os.path.join(test_data.raw_paths[2], pocket_path)
+        in_pdb_file = test_data.get_pocket_path_from_data_point(test_data_point)
         out_pdb_file = os.path.join(out_dir, "pocket.pdb")
         center_pdb(in_pdb_file, out_pdb_file)
         torch.save(generated_mols, os.path.join(out_dir, "generated_mols.pt"))
