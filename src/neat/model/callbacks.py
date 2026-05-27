@@ -69,24 +69,13 @@ class GenerationMonitor(Callback):
                 batch_size=self.num_samples, integration_method="euler_maruyama"
             )
         elif str(self.dataset).upper() == "CROSSDOCKED":
-            val_data = trainer.val_dataloaders.dataset
-            res_id = val_data.pocket_residue_id
-            resets = torch.cat([torch.tensor([False]), res_id[1:] < res_id[:-1]])
-            graph_ids = resets.long().cumsum(dim=0)
-            mean_pos = global_mean_pool(val_data.pocket_pos, graph_ids)
-            pos = val_data.pocket_pos - mean_pos[graph_ids]
-            mask = graph_ids < self.num_samples
-            pocket_info = {
-                "pocket_x": val_data.pocket_x[mask].to(pl_module.device),
-                "pocket_pos": pos[mask].to(pl_module.device),
-                "pocket_residue_id": val_data.pocket_residue_id[mask].to(
-                    pl_module.device
-                ),
-                "pocket_residue_type": val_data.pocket_residue_type[mask].to(
-                    pl_module.device
-                ),
-                "pocket_batch": graph_ids[mask].to(pl_module.device),
-            }
+            num_pockets = self.num_samples
+            val_data = list(trainer.val_dataloaders.dataset[:num_pockets])
+            mols_per_pocket = self.num_samples // num_pockets
+            pocket_info = trainer.val_dataloaders.dataset.collate_pocket_info(
+                val_data, samples_per_pocket=mols_per_pocket, device=pl_module.device
+            )
+
             generated_mols = pl_module.generate(
                 batch_size=self.num_samples,
                 integration_method="euler_maruyama",

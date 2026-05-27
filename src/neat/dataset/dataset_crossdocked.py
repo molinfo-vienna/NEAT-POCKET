@@ -539,3 +539,45 @@ class CrossDockedDataSet(InMemoryDataset):
             cluster.close()
 
         return data_list
+
+    @staticmethod
+    def collate_pocket_info(pocket_list, samples_per_pocket=1, device="cpu"):
+        pocket_x = torch.cat(
+            [
+                data_point.pocket_x.to(device).repeat(samples_per_pocket)
+                for data_point in pocket_list
+            ]
+        )
+        pocket_pos = torch.cat(
+            [
+                data_point.pocket_pos.to(device).repeat(samples_per_pocket, 1)
+                for data_point in pocket_list
+            ]
+        )
+        pocket_residue_id = torch.cat(
+            [
+                data_point.pocket_residue_id.to(device).repeat(samples_per_pocket)
+                for data_point in pocket_list
+            ]
+        )
+        pocket_residue_type = torch.cat(
+            [
+                data_point.pocket_residue_type.to(device).repeat(samples_per_pocket)
+                for data_point in pocket_list
+            ]
+        )
+        resets = torch.cat(
+            [
+                torch.tensor([False], device=device),
+                pocket_residue_id[1:] < pocket_residue_id[:-1],
+            ]
+        )
+        pocket_batch = resets.long().cumsum(dim=0).to(device)
+        pocket_info = {
+            "pocket_x": pocket_x,
+            "pocket_pos": pocket_pos,
+            "pocket_residue_id": pocket_residue_id,
+            "pocket_residue_type": pocket_residue_type,
+            "pocket_batch": pocket_batch,
+        }
+        return pocket_info

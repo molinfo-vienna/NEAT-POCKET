@@ -114,30 +114,10 @@ def generate(args: argparse.Namespace) -> None:
         ]
 
     for test_data_idx, test_data_point in enumerate(test_data):
-        pocket_x = torch.cat(
-            [test_data_point.pocket_x.to(DEVICE) for _ in range(batch_size)]
+        data_point_list = [test_data_point]
+        pocket_info = datamodule.test_data.collate_pocket_info(
+            data_point_list, samples_per_pocket=batch_size, device=DEVICE
         )
-        pocket_pos = torch.cat(
-            [test_data_point.pocket_pos.to(DEVICE) for _ in range(batch_size)]
-        )
-        pocket_residue_id = torch.cat(
-            [test_data_point.pocket_residue_id.to(DEVICE) for _ in range(batch_size)]
-        )
-        pocket_residue_type = torch.cat(
-            [test_data_point.pocket_residue_type.to(DEVICE) for _ in range(batch_size)]
-        )
-        res_id = pocket_residue_id
-        resets = torch.cat(
-            [torch.tensor([False], device=DEVICE), res_id[1:] < res_id[:-1]]
-        )
-        pocket_batch = resets.long().cumsum(dim=0).to(DEVICE)
-        pocket_info = {
-            "pocket_x": pocket_x,
-            "pocket_pos": pocket_pos,
-            "pocket_residue_id": pocket_residue_id,
-            "pocket_residue_type": pocket_residue_type,
-            "pocket_batch": pocket_batch.to(DEVICE),
-        }
         pocket_start_time = datetime.now()
         generated_batches = []
         for batch_idx in range(num_batches):
@@ -160,6 +140,7 @@ def generate(args: argparse.Namespace) -> None:
         )
         if not os.path.exists(out_dir):
             os.makedirs(out_dir)
+
         name = test_data_point.name.split("__")[0]
         pocket_path = [
             split_name[0] for split_name in split_names if name in split_name[0]
