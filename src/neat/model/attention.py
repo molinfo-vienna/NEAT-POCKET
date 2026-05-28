@@ -140,9 +140,11 @@ class BidirectionalAttentionBlock(nn.Module):
         dropout: float,
         bias: bool,
         enable_cross_attention: bool = False,
+        scale_shift_weights: bool = False,
         pos_embedder: Optional[nn.Module] = None,
     ) -> None:
         super().__init__()
+        self.scale_shift_weights = scale_shift_weights
         self.ln_1 = nn.LayerNorm(n_embd, bias=False)
         self.attn = MaskedBidirectionalAttention(
             n_embd, n_head, dropout, bias, pos_embedder
@@ -150,7 +152,10 @@ class BidirectionalAttentionBlock(nn.Module):
         if enable_cross_attention:
             self.ln_2 = nn.LayerNorm(n_embd, bias=False)
             self.attn_cross = MaskedCrossAttention(n_embd, n_head, dropout, bias)
-            self.scale_shift = nn.Linear(n_embd, 8 * n_embd, bias=False)
+            if scale_shift_weights:
+                self.scale_shift = nn.Linear(n_embd, 8 * n_embd, bias=False)
+            else:
+                self.scale_shift = nn.Parameter(torch.zeros(8 * n_embd))
         self.ln_3 = nn.LayerNorm(n_embd, bias=False)
         self.mlp = MLP(n_embd, dropout, bias=False)
         self.cross_attention = enable_cross_attention
@@ -166,7 +171,10 @@ class BidirectionalAttentionBlock(nn.Module):
     ) -> torch.Tensor:
         # Preliminary: If using cross-attention, we use AdaLN
         if self.cross_attention:
-            scale_shift = self.scale_shift(ada_ln_condition).unsqueeze(1)
+            if self.scale_shift_weights:
+                scale_shift = self.scale_shift(ada_ln_condition).unsqueeze(1)
+            else:
+                scale_shift = (self.scale_shift + ada_ln_condition).unsqueeze(1)
             alpha_1, beta_1, gamma_1, alpha_2, beta_2, alpha_3, beta_3, gamma_3 = (
                 scale_shift.chunk(8, dim=-1)
             )

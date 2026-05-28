@@ -31,6 +31,8 @@ class NEAT(LightningModule):
     def __init__(self, **params) -> None:
         super(NEAT, self).__init__()
         self.hparams.setdefault("noise_std", 1.0)
+        self.hparams.setdefault("global_cond_proj", False)
+
         self.save_hyperparameters()
 
         # Atom type embedding layer
@@ -61,6 +63,7 @@ class NEAT(LightningModule):
 
         # Transformer blocks for the ligand stream
         self.enable_cross_attention = _dataset_is_crossdocked(self.hparams.data_set)
+        scale_shift_weights = False if self.hparams.global_cond_proj else True
         self.transformer_blocks = nn.ModuleList(
             [
                 BidirectionalAttentionBlock(
@@ -69,6 +72,7 @@ class NEAT(LightningModule):
                     self.hparams.dropout,
                     self.hparams.bias,
                     enable_cross_attention=self.enable_cross_attention,
+                    scale_shift_weights=scale_shift_weights,
                 )
                 for _ in range(self.hparams.n_layer)
             ]
@@ -126,6 +130,14 @@ class NEAT(LightningModule):
             self.null_condition_embedding = nn.Parameter(
                 torch.zeros(1, self.hparams.n_embd)
             )
+            if self.hparams.global_cond_proj:
+                self.global_condition_projection = nn.Sequential(
+                    nn.Linear(self.hparams.n_embd, self.hparams.n_embd, bias=False),
+                    nn.SiLU(),
+                    nn.Linear(self.hparams.n_embd, self.hparams.n_embd, bias=False),
+                    nn.SiLU(),
+                    nn.Linear(self.hparams.n_embd, self.hparams.n_embd * 8, bias=False),
+                )
 
         # Linear prediction head for atom type prediction
         self.atom_type_prediction_head = nn.Linear(
@@ -143,8 +155,10 @@ class NEAT(LightningModule):
                 nn.init.normal_(
                     p, mean=0.0, std=0.02 / math.sqrt(2 * self.hparams.n_layer)
                 )
-            if pn.endswith("attn_cross.c_proj.weight") or pn.endswith(
-                "scale_shift.weight"
+            if (
+                pn.endswith("attn_cross.c_proj.weight")
+                or pn.endswith("scale_shift.weight")
+                or pn.endswith("global_condition_projection.2.weight")
             ):
                 nn.init.constant_(p, 0)
 
@@ -459,6 +473,11 @@ class NEAT(LightningModule):
             x_residues = None
             cross_attn_mask = None
             ada_ln_condition = self.null_condition_embedding.expand(batch_size, -1)
+
+        if self.hparams.global_cond_proj:
+            ada_ln_condition = self.global_condition_projection(
+                ada_ln_condition
+            )  # [batch_size, n_embd * 8]
 
         # (12) Pass through the transformer blocks
         for block in self.transformer_blocks:
