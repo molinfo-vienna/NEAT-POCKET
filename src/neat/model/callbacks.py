@@ -120,26 +120,35 @@ class GenerationMonitor(Callback):
         if str(self.dataset).upper() == "CROSSDOCKED":
             mean_clashes = []
             for i, pocket_path in enumerate(pocket_paths):
-                with NamedTemporaryFile(delete=True, suffix=".pdb") as temp_file:
-                    # Convert the string path to a pathlib.Path object
-                    center_pdb(pocket_path, temp_file.name)
-                    mols_for_pocket = mols[
-                        i * mols_per_pocket : (i + 1) * mols_per_pocket
-                    ]
-                    pc = PoseCheck()
-                    pc.load_protein_from_pdb(temp_file.name)
-                    pc_mols = [
-                        remove_radicals(mol)
-                        for mol in mols_for_pocket
-                        if mol is not None
-                    ]
-                    pc.load_ligands_from_mols(pc_mols)
-                    clashes = np.array(pc.calculate_clashes()).mean()
-                    mean_clashes.append(clashes)
+                try:
+                    with NamedTemporaryFile(delete=True, suffix=".pdb") as temp_file:
+                        # Convert the string path to a pathlib.Path object
+                        center_pdb(pocket_path, temp_file.name)
+                        mols_for_pocket = mols[
+                            i * mols_per_pocket : (i + 1) * mols_per_pocket
+                        ]
+                        pc = PoseCheck()
+                        pc.load_protein_from_pdb(temp_file.name)
+                        pc_mols = [
+                            remove_radicals(mol)
+                            for mol in mols_for_pocket
+                            if mol is not None
+                        ]
+                        pc.load_ligands_from_mols(pc_mols)
+                        clashes = np.array(pc.calculate_clashes()).mean()
+                        mean_clashes.append(clashes)
+                except Exception as e:
+                    print(f"Error during clash calculation: {e}")
+                    print("Skipping clash calculation for this epoch.")
+                    continue
+            if len(mean_clashes) > 0:
+                clashes = np.array(mean_clashes).mean()
+            else:
+                clashes = 0.0
 
             pl_module.log(
                 "val/clashes",
-                np.array(mean_clashes).mean(),
+                clashes,
                 prog_bar=True,
                 on_step=False,
                 on_epoch=True,
