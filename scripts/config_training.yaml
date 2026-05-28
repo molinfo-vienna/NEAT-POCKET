@@ -24,3 +24,4 @@ pretrained_model_path: "logs/NEAT/pretrained_geom"
 cfg_dropout: 0.5
 pocket_n_layer: 8
 global_cond_proj: true
+cross_attn_with_null_token: true

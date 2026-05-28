@@ -32,6 +32,7 @@ class NEAT(LightningModule):
         super(NEAT, self).__init__()
         self.hparams.setdefault("noise_std", 1.0)
         self.hparams.setdefault("global_cond_proj", False)
+        self.hparams.setdefault("cross_attn_with_null_token", False)
 
         self.save_hyperparameters()
 
@@ -461,6 +462,9 @@ class NEAT(LightningModule):
                 x_residues[cfg_mask] = 0
                 residue_mask[cfg_mask] = 0
                 ada_ln_condition[cfg_mask] = self.null_condition_embedding
+                if self.hparams.cross_attn_with_null_token:
+                    x_residues[cfg_mask, 0] = self.null_condition_embedding
+                    residue_mask[cfg_mask, 0] = 1
 
             # (10) Create a cross-attention mask for the pocket residues
             cross_attn_mask = residue_mask.unsqueeze(1) * atom_mask.unsqueeze(
@@ -473,6 +477,20 @@ class NEAT(LightningModule):
             x_residues = None
             cross_attn_mask = None
             ada_ln_condition = self.null_condition_embedding.expand(batch_size, -1)
+            if self.hparams.cross_attn_with_null_token:
+                x_residues = self.null_condition_embedding.unsqueeze(0).expand(
+                    batch_size, -1, -1
+                )  # [batch_size, 1, n_embd]
+                residue_mask = torch.ones(
+                    (batch_size, 1), device=device, dtype=torch.bool
+                )  # [batch_size, 1]
+                # (10) Create a cross-attention mask for the pocket residues
+                cross_attn_mask = residue_mask.unsqueeze(1) * atom_mask.unsqueeze(
+                    2
+                )  # [batch_size, max_residue_count, max_atom_count]
+                cross_attn_mask = cross_attn_mask.unsqueeze(1).expand(
+                    -1, self.hparams.n_head, -1, -1
+                )  # [batch_size, n_head, max_residue_count, max_atom_count]
 
         if self.hparams.global_cond_proj:
             ada_ln_condition = self.global_condition_projection(
