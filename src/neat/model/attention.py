@@ -150,9 +150,10 @@ class BidirectionalAttentionBlock(nn.Module):
         if enable_cross_attention:
             self.ln_2 = nn.LayerNorm(n_embd, bias=False)
             self.attn_cross = MaskedCrossAttention(n_embd, n_head, dropout, bias)
-
+            self.scale_shift = nn.Linear(n_embd, 8 * n_embd, bias=False)
         self.ln_3 = nn.LayerNorm(n_embd, bias=False)
         self.mlp = MLP(n_embd, dropout, bias=False)
+        self.cross_attention = enable_cross_attention
 
     def forward(
         self,
@@ -160,14 +161,48 @@ class BidirectionalAttentionBlock(nn.Module):
         attn_mask: torch.Tensor,
         cross_attn_input: Optional[torch.Tensor] = None,
         cross_attn_mask: Optional[torch.Tensor] = None,
+        ada_ln_condition: Optional[torch.Tensor] = None,
         pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        x = x + self.attn(self.ln_1(x), attn_mask=attn_mask, pos=pos)
-        if cross_attn_input is not None and cross_attn_mask is not None:
-            x = x + self.attn_cross(
-                self.ln_2(x), cross_attn_input, attn_mask=cross_attn_mask
+        # Preliminary: If using cross-attention, we use AdaLN
+        if self.cross_attention:
+            scale_shift = self.scale_shift(ada_ln_condition).unsqueeze(1)
+            alpha_1, beta_1, gamma_1, alpha_2, beta_2, alpha_3, beta_3, gamma_3 = (
+                scale_shift.chunk(8, dim=-1)
             )
-        x = x + self.mlp(self.ln_3(x))
+
+        # (1) Self-attention
+        norm_x = self.ln_1(x)
+        norm_x = norm_x * (1 + alpha_1) + beta_1 if self.cross_attention else norm_x
+        attention_residuals = self.attn(norm_x, attn_mask=attn_mask, pos=pos)
+        attention_residuals = (
+            attention_residuals * (1 + gamma_1)
+            if self.cross_attention
+            else attention_residuals
+        )
+        x = x + attention_residuals
+
+        # (2) (Optional) Cross-attention
+        if (
+            self.cross_attention
+            and cross_attn_input is not None
+            and cross_attn_mask is not None
+        ):
+            norm_x = self.ln_2(x)
+            norm_x = norm_x * (1 + alpha_2) + beta_2
+            cross_attn_residuals = self.attn_cross(
+                norm_x, cross_attn_input, attn_mask=cross_attn_mask
+            )
+            x = x + cross_attn_residuals
+
+        # (3) Feed-forward network
+        norm_x = self.ln_3(x)
+        norm_x = norm_x * (1 + alpha_3) + beta_3 if self.cross_attention else norm_x
+        ffn_projection = self.mlp(norm_x)
+        ffn_projection = (
+            ffn_projection * (1 + gamma_3) if self.cross_attention else ffn_projection
+        )
+        x = x + ffn_projection
         return x
 
 
