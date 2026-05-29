@@ -232,20 +232,23 @@ class ClashEvaluator(AbstractEvaluator):
         }
         if molecule is not None:
             molecule = self.load_molecule(molecule)
-            clash_score = self.clash_score(molecule)
-            result["clash_score_ligands"] = clash_score
-            result["passed_clash_score_ligands"] = clash_score == 0
+            clash_score_mean, clash_score_sum = self.clash_score(molecule)
+            result["clash_score_ligands_mean"] = clash_score_mean
+            result["clash_score_ligands_sum"] = clash_score_sum
+            result["passed_clash_score_ligands"] = clash_score_mean == 0
 
         if protein is not None:
             protein = Chem.MolFromPDBFile(str(protein), sanitize=False)
-            clash_score = self.clash_score(protein)
-            result["clash_score_pockets"] = clash_score
-            result["passed_clash_score_pockets"] = clash_score == 0
+            clash_score_mean, clash_score_sum = self.clash_score(protein)
+            result["clash_score_pockets_mean"] = clash_score_mean
+            result["clash_score_pockets_sum"] = clash_score_sum
+            result["passed_clash_score_pockets"] = clash_score_mean == 0
 
         if molecule is not None and protein is not None:
-            clash_score = self.clash_score(molecule, protein)
-            result["clash_score_between"] = clash_score
-            result["passed_clash_score_between"] = clash_score == 0
+            clash_score_mean, clash_score_sum = self.clash_score(molecule, protein)
+            result["clash_score_between_mean"] = clash_score_mean
+            result["clash_score_between_sum"] = clash_score_sum
+            result["passed_clash_score_between"] = clash_score_mean == 0
 
         return result
 
@@ -282,7 +285,7 @@ class ClashEvaluator(AbstractEvaluator):
 
         clashes = dist < self.margin * (radii1[:, None] + radii2[None, :])
         clashes = np.any(clashes, axis=1)
-        return np.mean(clashes)
+        return np.mean(clashes), np.sum(clashes)
 
     def coord_and_radii(self, rdmol, intramolecular):
         _periodic_table = Chem.GetPeriodicTable()
