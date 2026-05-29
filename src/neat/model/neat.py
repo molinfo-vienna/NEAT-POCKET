@@ -159,7 +159,7 @@ class NEAT(LightningModule):
             if (
                 pn.endswith("attn_cross.c_proj.weight")
                 or pn.endswith("scale_shift.weight")
-                or pn.endswith("global_condition_projection.2.weight")
+                or pn.endswith("global_condition_projection.4.weight")
             ):
                 nn.init.constant_(p, 0)
 
@@ -227,34 +227,27 @@ class NEAT(LightningModule):
         print(f"Successfully transferred {len(matched_keys)} parameter tensors.")
 
         # 3. Freeze pretrained blocks
-        frozen_layers = [
-            # "ada_mlp",
-            # "atom_type_embedding_layer",
+        unfrozen_layers = [
+            "atom_type_embedding_layer_pocket",
+            "fourier_embedding_layer_pocket",
+            "atom_level_pocket_transformer_blocks",
+            "residue_level_pocket_transformer_blocks",
+            "layer_norm_after_atom_level_pocket_transformer_blocks",
+            "layer_norm_after_residue_level_pocket_transformer_blocks",
+            "null_condition_embedding",
+            "global_condition_projection",
+            "pocket_residue_type_embedding_layer",
+            "attn_cross",
+            "ln_2",
+            "scale_shift",
         ]
         for name, param in self.named_parameters():
-            is_frozen_layer = any(layer in name for layer in frozen_layers)
+            is_new_layer = any(layer in name for layer in unfrozen_layers)
 
-            if is_frozen_layer:
-                param.requires_grad = False
-            else:
+            if is_new_layer:
                 param.requires_grad = True
-
-        # unfrozen_layers = [
-        #     "attn_cross",
-        #     "ln_2",
-        #     "pocket_residue_type_embedding_layer",
-        #     "atom_level_pocket_transformer_blocks",
-        #     "residue_level_pocket_transformer_blocks",
-        #     "layer_norm_after_atom_level_pocket_transformer_blocks",
-        #     "layer_norm_after_residue_level_pocket_transformer_blocks",
-        # ]
-        # for name, param in self.named_parameters():
-        #     is_new_layer = any(layer in name for layer in unfrozen_layers)
-
-        #     if is_new_layer:
-        #         param.requires_grad = True
-        #     else:
-        #         param.requires_grad = False
+            else:
+                param.requires_grad = False
 
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         frozen_params = sum(p.numel() for p in self.parameters() if not p.requires_grad)
