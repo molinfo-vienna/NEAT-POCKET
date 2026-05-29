@@ -158,7 +158,7 @@ class NEAT(LightningModule):
                 )
             if (
                 pn.endswith("attn_cross.c_proj.weight")
-                or pn.endswith("scale_shift.weight")
+                or pn.endswith("scale_shift.2.weight")
                 or pn.endswith("global_condition_projection.4.weight")
             ):
                 nn.init.constant_(p, 0)

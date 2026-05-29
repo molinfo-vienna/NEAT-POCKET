@@ -21,7 +21,7 @@ time_step_resampling: 4
 time_step_sampling: logit_normal
 weight_decay: 1.0e-06
 pretrained_model_path: "logs/NEAT/pretrained_geom"
-cfg_dropout: 0.5
+cfg_dropout: 0.1
 pocket_n_layer: 8
-global_cond_proj: true
+global_cond_proj: false
 cross_attn_with_null_token: true

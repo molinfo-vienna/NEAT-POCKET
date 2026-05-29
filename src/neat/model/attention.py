@@ -153,7 +153,11 @@ class BidirectionalAttentionBlock(nn.Module):
             self.ln_2 = nn.LayerNorm(n_embd, bias=False)
             self.attn_cross = MaskedCrossAttention(n_embd, n_head, dropout, bias)
             if scale_shift_weights:
-                self.scale_shift = nn.Linear(n_embd, 8 * n_embd, bias=False)
+                self.scale_shift = nn.Sequential(
+                    nn.Linear(n_embd, 256, bias=False),
+                    nn.SiLU(),
+                    nn.Linear(256, 8 * n_embd, bias=False),
+                )
             else:
                 self.scale_shift = nn.Parameter(torch.zeros(8 * n_embd))
         self.ln_3 = nn.LayerNorm(n_embd, bias=False)
