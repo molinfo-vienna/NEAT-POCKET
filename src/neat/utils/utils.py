@@ -29,4 +29,3 @@ def center_pdb(input_path, output_path):
     io = PDBIO()
     io.set_structure(structure)
     io.save(output_path)
-    print(f"Successfully centered structure and saved to {output_path}")

@@ -3,12 +3,9 @@ from tempfile import NamedTemporaryFile
 import torch
 from lightning import Callback, LightningModule, Trainer
 from rdkit import Chem
-from posecheck import (
-    PoseCheck,
-)
-from posecheck.utils.chem import remove_radicals
 import numpy as np
 
+from neat.utils.sbdd_metrics import ClashEvaluator
 from neat.model.molecule_builder import MoleculeBuilder
 from neat.utils import center_pdb
 
@@ -118,7 +115,8 @@ class GenerationMonitor(Callback):
             on_epoch=True,
         )
         if str(self.dataset).upper() == "CROSSDOCKED":
-            mean_clashes = []
+            clash_scores_mean = []
+            clash_scores_sum = []
             for i, pocket_path in enumerate(pocket_paths):
                 try:
                     with NamedTemporaryFile(delete=True, suffix=".pdb") as temp_file:
@@ -127,28 +125,38 @@ class GenerationMonitor(Callback):
                         mols_for_pocket = mols[
                             i * mols_per_pocket : (i + 1) * mols_per_pocket
                         ]
-                        pc = PoseCheck()
-                        pc.load_protein_from_pdb(temp_file.name)
-                        pc_mols = [
-                            remove_radicals(mol)
-                            for mol in mols_for_pocket
-                            if mol is not None
-                        ]
-                        pc.load_ligands_from_mols(pc_mols)
-                        clashes = np.array(pc.calculate_clashes()).mean()
-                        mean_clashes.append(clashes)
+                        clash_evaluator = ClashEvaluator()
+                        for mol in mols_for_pocket:
+                            if mol is None:
+                                continue
+                            clash_results = clash_evaluator.evaluate(
+                                mol, temp_file.name
+                            )
+                            clash_score_mean = clash_results["clash_score_between_mean"]
+                            clash_score_sum = clash_results["clash_score_between_sum"]
+                            clash_scores_mean.append(clash_score_mean)
+                            clash_scores_sum.append(clash_score_sum)
                 except Exception as e:
-                    print(f"Error during clash calculation: {e}")
-                    print("Skipping clash calculation for this epoch.")
+                    print(f"Error during evaluation: {e}")
                     continue
-            if len(mean_clashes) > 0:
-                clashes = np.array(mean_clashes).mean()
+
+            if len(clash_scores_mean) > 0:
+                mean_clash_score_mean = np.array(clash_scores_mean).mean()
+                mean_clash_score_sum = np.array(clash_scores_sum).mean()
             else:
-                clashes = 0.0
+                mean_clash_score_mean = 0.0
+                mean_clash_score_sum = 0.0
 
             pl_module.log(
-                "val/clashes",
-                clashes,
+                "val/clashes_mean",
+                mean_clash_score_mean,
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+            )
+            pl_module.log(
+                "val/clashes_sum",
+                mean_clash_score_sum,
                 prog_bar=True,
                 on_step=False,
                 on_epoch=True,
