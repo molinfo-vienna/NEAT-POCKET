@@ -19,8 +19,9 @@ n_layers_fm: 6
 noise_std: 2.5
 perturbation_fraction: 0.5
 perturbation_std: 0.05
-pocket_n_layer: 8
+pocket_n_layer: 12
 pretrained_model_path: logs/NEAT/pretrained_geom
+residue_pooling: sum
 rope: false
 time_step_resampling: 4
 time_step_sampling: logit_normal

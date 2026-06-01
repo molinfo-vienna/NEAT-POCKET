@@ -33,6 +33,7 @@ class NEAT(LightningModule):
         self.hparams.setdefault("noise_std", 1.0)
         self.hparams.setdefault("global_cond_proj", False)
         self.hparams.setdefault("cross_attn_with_null_token", False)
+        self.hparams.setdefault("residue_pooling", "sum")
 
         self.save_hyperparameters()
 
@@ -242,6 +243,22 @@ class NEAT(LightningModule):
         print(f"Successfully transferred {len(matched_keys)} parameter tensors.")
 
         # 3. Freeze pretrained blocks
+        # unfrozen_layers = [
+        #     "atom_type_embedding_layer_pocket",
+        #     "fourier_embedding_layer_pocket",
+        #     "atom_level_pocket_transformer_blocks",
+        #     "residue_level_pocket_transformer_blocks",
+        #     "layer_norm_after_atom_level_pocket_transformer_blocks",
+        #     "layer_norm_after_residue_level_pocket_transformer_blocks",
+        #     "null_condition_embedding",
+        #     "global_condition_projection",
+        #     "pocket_residue_type_embedding_layer",
+        #     "attn_cross",
+        #     "ln_2",
+        #     "scale_shift",
+        # ]
+        # for name, param in self.named_parameters():
+        #     is_new_layer = any(layer in name for layer in unfrozen_layers)
         # unfrozen_layers = [
         #     "atom_type_embedding_layer_pocket",
         #     "fourier_embedding_layer_pocket",
@@ -609,7 +626,14 @@ class NEAT(LightningModule):
         )  # [num_residues, max_atom_count_per_residue, n_embd]
 
         # (4) Pool atom-level tokens into residue-level tokens via sum pooling
-        residue_tokens = x_atom.sum(dim=1)  # [num_residues, n_embd]
+        if self.hparams.residue_pooling == "mean":
+            residue_tokens = x_atom.sum(dim=1) / atom_count_per_residue.unsqueeze(-1)
+        elif self.hparams.residue_pooling == "sum":
+            residue_tokens = x_atom.sum(dim=1)  # [num_residues, n_embd]
+        else:
+            raise ValueError(
+                f"Invalid residue_pooling: {self.hparams.residue_pooling}. Must be 'mean' or 'sum'."
+            )
 
         # (5) Now we need a residue-level attention mask
         ptr = torch.cat(
@@ -642,7 +666,8 @@ class NEAT(LightningModule):
         # (6) Pass through the residue-level transformer blocks
         for block in self.residue_level_pocket_transformer_blocks:
             x_residues = block(
-                x_residues, attn_mask=attn_mask_residues,
+                x_residues,
+                attn_mask=attn_mask_residues,
             )  # [batch_size, max_residue_count, n_embd]
 
         x_residues = self.layer_norm_after_residue_level_pocket_transformer_blocks(
@@ -660,7 +685,8 @@ class NEAT(LightningModule):
         # (8) Pass through another round of atom-level transformer blocks
         for block in self.atom_level_pocket_transformer_blocks_2:
             x_atom = block(
-                x_atom, attn_mask=attn_mask_atom,
+                x_atom,
+                attn_mask=attn_mask_atom,
             )  # [num_residues, max_atom_count_per_residue, n_embd]
         x_atom = self.layer_norm_after_atom_level_pocket_transformer_blocks_2(
             x_atom
