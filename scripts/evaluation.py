@@ -175,7 +175,10 @@ def evaluate(args: argparse.Namespace) -> None:
                 MolToSmiles(mol, canonical=True) if mol is not None else None
                 for mol in mols_xyz2mol
             ]
-            if datamodule.data_set == "CROSSDOCKED":
+            if (
+                datamodule.data_set == "CROSSDOCKED"
+                and params["data_subdir"] == "conditional"
+            ):
                 # 1. Initialize the SDWriter with the output file path
                 writer = SDWriter(os.path.join(subdata_path, "generated_mols.sdf"))
                 try:
@@ -284,7 +287,10 @@ def evaluate(args: argparse.Namespace) -> None:
                     f.write("\nPoseBusters metrics:\n")
                     for metric, value in posebusters_metrics_list[0].items():
                         f.write(f"{metric}: {value*100:.2f}%\n")
-                if datamodule.data_set == "CROSSDOCKED":
+                if (
+                    datamodule.data_set == "CROSSDOCKED"
+                    and params["data_subdir"] == "conditional"
+                ):
                     f.write("\nPoseCheck metrics:\n")
                     for metric, value in pose_check_results.items():
                         f.write(f"{metric}: {value:.2f}\n")
@@ -425,7 +431,10 @@ def evaluate(args: argparse.Namespace) -> None:
                     ]
                     mean, ci = compute_mean_and_95_ci(values)
                     f.write(f"{metric_name}: {mean*100:.2f}% ± {ci*100:.2f}%\n")
-        if datamodule.data_set == "CROSSDOCKED":
+        if (
+            datamodule.data_set == "CROSSDOCKED"
+            and params["data_subdir"] == "conditional"
+        ):
             f.write("\nPoseCheck metrics:\n")
             metric_names = list(posecheck_metrics_list[0].keys())
             for metric_name in metric_names:
