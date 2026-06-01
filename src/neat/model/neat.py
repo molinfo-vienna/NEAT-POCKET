@@ -31,7 +31,9 @@ class NEAT(LightningModule):
     def __init__(self, **params) -> None:
         super(NEAT, self).__init__()
         self.hparams.setdefault("noise_std", 1.0)
-        self.hparams.setdefault("learnable_cfg_token", False)
+        self.hparams.setdefault("global_cond_proj", False)
+        self.hparams.setdefault("cross_attn_with_null_token", False)
+
         self.save_hyperparameters()
 
         # Atom type embedding layer
@@ -62,6 +64,7 @@ class NEAT(LightningModule):
 
         # Transformer blocks for the ligand stream
         self.enable_cross_attention = _dataset_is_crossdocked(self.hparams.data_set)
+        scale_shift_weights = False if self.hparams.global_cond_proj else True
         self.transformer_blocks = nn.ModuleList(
             [
                 BidirectionalAttentionBlock(
@@ -70,6 +73,7 @@ class NEAT(LightningModule):
                     self.hparams.dropout,
                     self.hparams.bias,
                     enable_cross_attention=self.enable_cross_attention,
+                    scale_shift_weights=scale_shift_weights,
                 )
                 for _ in range(self.hparams.n_layer)
             ]
@@ -124,9 +128,16 @@ class NEAT(LightningModule):
             self.layer_norm_after_residue_level_pocket_transformer_blocks = (
                 nn.LayerNorm(self.hparams.n_embd, bias=False)
             )
-            if self.hparams.learnable_cfg_token:
-                self.cfg_token_embedding = nn.Parameter(
-                    torch.randn(1, self.hparams.n_embd) * 0.02
+            self.null_condition_embedding = nn.Parameter(
+                torch.zeros(1, self.hparams.n_embd)
+            )
+            if self.hparams.global_cond_proj:
+                self.global_condition_projection = nn.Sequential(
+                    nn.Linear(self.hparams.n_embd, self.hparams.n_embd, bias=False),
+                    nn.SiLU(),
+                    nn.Linear(self.hparams.n_embd, self.hparams.n_embd, bias=False),
+                    nn.SiLU(),
+                    nn.Linear(self.hparams.n_embd, self.hparams.n_embd * 8, bias=False),
                 )
 
         # Linear prediction head for atom type prediction
@@ -145,7 +156,11 @@ class NEAT(LightningModule):
                 nn.init.normal_(
                     p, mean=0.0, std=0.02 / math.sqrt(2 * self.hparams.n_layer)
                 )
-            if pn.endswith("attn_cross.c_proj.weight"):
+            if (
+                pn.endswith("attn_cross.c_proj.weight")
+                or pn.endswith("scale_shift.2.weight")
+                or pn.endswith("global_condition_projection.4.weight")
+            ):
                 nn.init.constant_(p, 0)
 
         # This is the Diffusion MLP with AdaLN conditioning.s
@@ -212,34 +227,27 @@ class NEAT(LightningModule):
         print(f"Successfully transferred {len(matched_keys)} parameter tensors.")
 
         # 3. Freeze pretrained blocks
-        frozen_layers = [
-            # "ada_mlp",
-            # "atom_type_embedding_layer",
+        unfrozen_layers = [
+            "atom_type_embedding_layer_pocket",
+            "fourier_embedding_layer_pocket",
+            "atom_level_pocket_transformer_blocks",
+            "residue_level_pocket_transformer_blocks",
+            "layer_norm_after_atom_level_pocket_transformer_blocks",
+            "layer_norm_after_residue_level_pocket_transformer_blocks",
+            "null_condition_embedding",
+            "global_condition_projection",
+            "pocket_residue_type_embedding_layer",
+            "attn_cross",
+            "ln_2",
+            "scale_shift",
         ]
         for name, param in self.named_parameters():
-            is_frozen_layer = any(layer in name for layer in frozen_layers)
+            is_new_layer = any(layer in name for layer in unfrozen_layers)
 
-            if is_frozen_layer:
-                param.requires_grad = False
-            else:
+            if is_new_layer:
                 param.requires_grad = True
-
-        # unfrozen_layers = [
-        #     "attn_cross",
-        #     "ln_2",
-        #     "pocket_residue_type_embedding_layer",
-        #     "atom_level_pocket_transformer_blocks",
-        #     "residue_level_pocket_transformer_blocks",
-        #     "layer_norm_after_atom_level_pocket_transformer_blocks",
-        #     "layer_norm_after_residue_level_pocket_transformer_blocks",
-        # ]
-        # for name, param in self.named_parameters():
-        #     is_new_layer = any(layer in name for layer in unfrozen_layers)
-
-        #     if is_new_layer:
-        #         param.requires_grad = True
-        #     else:
-        #         param.requires_grad = False
+            else:
+                param.requires_grad = False
 
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         frozen_params = sum(p.numel() for p in self.parameters() if not p.requires_grad)
@@ -441,12 +449,14 @@ class NEAT(LightningModule):
                 pocket_residue_type=pocket_residue_type,
                 pocket_batch=pocket_batch,
             )
+            ada_ln_condition = x_residues.sum(dim=1)  # [batch_size, n_embd]
 
             if cfg_mask is not None:
                 x_residues[cfg_mask] = 0
                 residue_mask[cfg_mask] = 0
-                if self.hparams.learnable_cfg_token:
-                    x_residues[cfg_mask, 0] = self.cfg_token_embedding
+                ada_ln_condition[cfg_mask] = self.null_condition_embedding
+                if self.hparams.cross_attn_with_null_token:
+                    x_residues[cfg_mask, 0] = self.null_condition_embedding
                     residue_mask[cfg_mask, 0] = 1
 
             # (10) Create a cross-attention mask for the pocket residues
@@ -459,8 +469,9 @@ class NEAT(LightningModule):
         else:
             x_residues = None
             cross_attn_mask = None
-            if self.hparams.learnable_cfg_token:
-                x_residues = self.cfg_token_embedding.unsqueeze(0).expand(
+            ada_ln_condition = self.null_condition_embedding.expand(batch_size, -1)
+            if self.hparams.cross_attn_with_null_token:
+                x_residues = self.null_condition_embedding.unsqueeze(0).expand(
                     batch_size, -1, -1
                 )  # [batch_size, 1, n_embd]
                 residue_mask = torch.ones(
@@ -474,6 +485,11 @@ class NEAT(LightningModule):
                     -1, self.hparams.n_head, -1, -1
                 )  # [batch_size, n_head, max_residue_count, max_atom_count]
 
+        if self.hparams.global_cond_proj:
+            ada_ln_condition = self.global_condition_projection(
+                ada_ln_condition
+            )  # [batch_size, n_embd * 8]
+
         # (12) Pass through the transformer blocks
         for block in self.transformer_blocks:
             x = block(
@@ -481,6 +497,7 @@ class NEAT(LightningModule):
                 attn_mask=attn_mask,
                 cross_attn_input=x_residues,
                 cross_attn_mask=cross_attn_mask,
+                ada_ln_condition=ada_ln_condition,
             )  # [batch_size, max_atom_count + 1, n_embd]
 
         x = self.layer_norm_after_transformer_blocks(

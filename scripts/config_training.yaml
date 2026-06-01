@@ -1,13 +1,13 @@
 accumulate_grad_batches: 4
-batch_size: 32
+batch_size: 64
 bias: true
 data_set: CrossDocked
 dropout: 0.1
-learning_rate: 2.5e-5
-lr_decay_epochs: 1000
+learning_rate: 5.0e-05
+lr_decay_epochs: 2000
 lr_min_ratio: 0.1
 lr_warmup_epochs: 10
-max_epochs: 1000
+max_epochs: 2000
 n_embd: 768
 n_embd_fm: 1536
 n_head: 12
@@ -21,6 +21,7 @@ time_step_resampling: 4
 time_step_sampling: logit_normal
 weight_decay: 1.0e-06
 pretrained_model_path: "logs/NEAT/pretrained_geom"
-cfg_dropout: 0.10
+cfg_dropout: 0.1
 pocket_n_layer: 8
-learnable_cfg_token: true
+global_cond_proj: false
+cross_attn_with_null_token: true

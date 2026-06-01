@@ -1,8 +1,8 @@
-checkpoints_path: logs/NEAT/version_8
-output_path: output/version_8
+checkpoints_path: logs/NEAT/version_72
+output_path: output/version_72
 data_set: CrossDocked
 num_molecules: 100
-batch_size: 100
+chunk_size: 4
 max_atoms: 200
 num_time_steps: 60
 time_step_spacing: linear

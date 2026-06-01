@@ -1,7 +1,8 @@
-data_path: output/version_13
+data_path: output/version_72
 data_subdir: conditional
 data_set: CrossDocked
 compute_novelty: true
+compute_edm: false
 compute_posebusters: false
 
 # Optional: path to bond predictor checkpoint directory.
