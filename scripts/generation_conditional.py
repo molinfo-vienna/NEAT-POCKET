@@ -25,7 +25,6 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROOT = os.getcwd()
 
 
-
 def generate(args: argparse.Namespace) -> None:
     """Generate molecules using the NEAT model.
 
@@ -72,51 +71,60 @@ def generate(args: argparse.Namespace) -> None:
     test_data = datamodule.test_data
 
     num_molecules = params["num_molecules"]
-    batch_size = params["batch_size"]
-    num_batches = (num_molecules + batch_size - 1) // batch_size
-    if (num_molecules % batch_size) == 0:
-        num_mols_per_batch = [batch_size] * num_batches
-    else:
-        num_mols_per_batch = [batch_size] * (num_batches - 1) + [
-            num_molecules % batch_size
-        ]
+    chunk_size = params["chunk_size"]
 
-    for test_data_idx, test_data_point in enumerate(test_data):
-        data_point_list = [test_data_point]
+    for chunk_start_idx in range(0, len(test_data), chunk_size):
+        data_point_list = list(
+            test_data[chunk_start_idx : chunk_start_idx + chunk_size]
+        )
         pocket_info = datamodule.test_data.collate_pocket_info(
-            data_point_list, samples_per_pocket=batch_size, device=DEVICE
+            data_point_list, samples_per_pocket=num_molecules, device=DEVICE
         )
         pocket_start_time = datetime.now()
-        generated_batches = []
-        for batch_idx in range(num_batches):
-            num_mols_batch = num_mols_per_batch[batch_idx]
-            with torch.no_grad():
-                model.eval()
-                generated_batch = model.generate(
-                    batch_size=num_mols_batch,
-                    max_atoms=params["max_atoms"],
-                    num_time_steps=params["num_time_steps"],
-                    time_step_spacing=params["time_step_spacing"],
-                    integration_method=params["integration_method"],
-                    pocket_info=pocket_info,
-                )
-            generated_batches.append(generated_batch)
+        with torch.no_grad():
+            model.eval()
+            generated_mols = model.generate(
+                batch_size=pocket_info["pocket_batch"].max().item() + 1,
+                max_atoms=params["max_atoms"],
+                num_time_steps=params["num_time_steps"],
+                time_step_spacing=params["time_step_spacing"],
+                integration_method=params["integration_method"],
+                pocket_info=pocket_info,
+            )
 
-        generated_mols = Batch.from_data_list(generated_batches)
-        out_dir = os.path.join(
-            ROOT, params["output_path"], "conditional", f"pocket_{test_data_idx}"
-        )
-        if not os.path.exists(out_dir):
-            os.makedirs(out_dir)
+        for data_idx_in_chunk, data_idx in enumerate(
+            range(chunk_start_idx, min(chunk_start_idx + chunk_size, len(test_data)))
+        ):
+            out_dir = os.path.join(
+                ROOT, params["output_path"], "conditional", f"pocket_{data_idx}"
+            )
+            if not os.path.exists(out_dir):
+                os.makedirs(out_dir)
 
-        in_pdb_file = test_data.get_pocket_path_from_data_point(test_data_point)
-        out_pdb_file = os.path.join(out_dir, "pocket.pdb")
-        center_pdb(in_pdb_file, out_pdb_file)
-        torch.save(generated_mols, os.path.join(out_dir, "generated_mols.pt"))
+            in_pdb_file = test_data.get_pocket_path_from_data_point(test_data[data_idx])
+            out_pdb_file = os.path.join(out_dir, "pocket.pdb")
+            center_pdb(in_pdb_file, out_pdb_file)
+            subset_mask = torch.isin(
+                generated_mols.batch,
+                torch.arange(
+                    data_idx_in_chunk * num_molecules,
+                    (data_idx_in_chunk + 1) * num_molecules,
+                    device=generated_mols.batch.device,
+                ),
+            )
+            generated_mols_subset = Batch(
+                x=generated_mols.x[subset_mask],
+                pos=generated_mols.pos[subset_mask],
+                batch=generated_mols.batch[subset_mask],
+            )
+            generated_mols_subset.batch -= generated_mols_subset.batch.min()
+            torch.save(
+                generated_mols_subset, os.path.join(out_dir, "generated_mols.pt")
+            )
 
         seed_end_time = datetime.now()
         print(
-            f"Generation time for pocket {test_data_idx}: {seed_end_time - pocket_start_time}"
+            f"Generation time for pockets {chunk_start_idx} to {min(chunk_start_idx + chunk_size, len(test_data)) - 1}: {seed_end_time - pocket_start_time}"
         )
 
 
