@@ -635,7 +635,26 @@ class NEAT(LightningModule):
             -1
         )  # [batch_size, max_residue_count, n_embd]
 
-        return x_residues, residue_mask.clone()
+        # Now we want an atom-level representation with skip-connections
+        atom_count_per_residue = torch.bincount(pocket_batch)
+        dim = [
+            len(atom_count_per_residue),
+            atom_count_per_residue.max(),
+            self.hparams.n_embd,
+        ]
+        x_final = torch.zeros(
+            dim, device=device
+        )  # [num_residues, max_atom_count_per_residue, n_embd]
+        context_range = torch.arange(
+            atom_count_per_residue.max(), device=atom_count_per_residue.device
+        ).unsqueeze(0)
+        atom_mask_final = context_range < atom_count_per_residue.unsqueeze(1)
+
+        x_final[atom_mask_final] = (
+            x[atom_mask] + x_residues[residue_mask][pocket_residue_id]
+        )
+
+        return x_final, atom_mask_final.clone()
 
     def compute_atom_type_loss(
         self,
