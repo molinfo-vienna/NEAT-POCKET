@@ -138,6 +138,7 @@ def evaluate(args: argparse.Namespace) -> None:
     posebusters_metrics_list = []
     posecheck_metrics_list = []
     use_bond_predictor = params.get("bond_predictor_path") is not None
+    compute_edm = bool(params.get("compute_edm", True))
     compute_posebusters = bool(params.get("compute_posebusters", False))
     data_path = Path(os.path.join(ROOT, params["data_path"], params["data_subdir"]))
 
@@ -153,19 +154,20 @@ def evaluate(args: argparse.Namespace) -> None:
             builder = MoleculeBuilder(vocab=params["data_set"])
             x, pos, batch = builder.load_tensor_from_file(subdata_path)
 
-            # Compute EDM-based metrics
-            (
-                atom_stability,
-                mol_stability,
-                edm_valid,
-                edm_unique,
-                edm_invalid_idxs,
-            ) = edm_metrics(x, pos, batch, params["data_set"].upper())
-            edm_atom_stability_lst.append(atom_stability)
-            edm_molecule_stability_lst.append(mol_stability)
-            edm_valid_lst.append(edm_valid)
-            edm_valid_x_unique = edm_valid * edm_unique
-            edm_valid_x_unique_lst.append(edm_valid_x_unique)
+            if compute_edm:
+                # Compute EDM-based metrics
+                (
+                    atom_stability,
+                    mol_stability,
+                    edm_valid,
+                    edm_unique,
+                    edm_invalid_idxs,
+                ) = edm_metrics(x, pos, batch, params["data_set"].upper())
+                edm_atom_stability_lst.append(atom_stability)
+                edm_molecule_stability_lst.append(mol_stability)
+                edm_valid_lst.append(edm_valid)
+                edm_valid_x_unique = edm_valid * edm_unique
+                edm_valid_x_unique_lst.append(edm_valid_x_unique)
 
             # Compute xyz2mol-based metrics
             mols_xyz2mol = builder.generate_rdkit_molecules_via_xyz2mol(
@@ -263,11 +265,13 @@ def evaluate(args: argparse.Namespace) -> None:
             with open(os.path.join(subdata_path, "evaluation_results.txt"), "w") as f:
                 f.write(f"Data set: {params['data_set']}\n")
                 f.write(f"RDKit version: {rdkit.__version__}\n")
-                f.write("\nEDM metrics:\n")
-                f.write(f"Atom stable: {atom_stability*100:.2f}%\n")
-                f.write(f"Molecule stable: {mol_stability*100:.2f}%\n")
-                f.write(f"Valid: {edm_valid*100:.2f}%\n")
-                f.write(f"Valid x unique: { edm_valid_x_unique * 100:.2f}%\n")
+                if compute_edm:
+                    f.write("\nEDM metrics:\n")
+                    f.write(f"Atom stable: {atom_stability*100:.2f}%\n")
+                    f.write(f"Molecule stable: {mol_stability*100:.2f}%\n")
+                    f.write(f"Valid: {edm_valid*100:.2f}%\n")
+                    f.write(f"Valid x unique: { edm_valid_x_unique * 100:.2f}%\n")
+
                 f.write("\nxyz2mol metrics:\n")
                 f.write(f"Valid: {xyz2mol_valid*100:.2f}%\n")
                 f.write(f"Valid x unique: {xyz2mol_valid_x_unique * 100:.2f}%\n")
@@ -390,17 +394,21 @@ def evaluate(args: argparse.Namespace) -> None:
     with open(os.path.join(data_path, "evaluation_summary.txt"), "w") as f:
         f.write(f"Data set: {params['data_set']}\n")
         f.write(f"RDKit version: {rdkit.__version__}\n")
-        f.write("\nEDM metrics:\n")
-        f.write(
-            f"Atom stable: {atom_stability_mean*100:.2f}% ± {atom_stability_ci*100:.2f}%\n"
-        )
-        f.write(
-            f"Molecule stable: {molecule_stability_mean*100:.2f}% ± {molecule_stability_ci*100:.2f}%\n"
-        )
-        f.write(f"Valid: {lookup_valid_mean*100:.2f}% ± {lookup_valid_ci*100:.2f}%\n")
-        f.write(
-            f"Valid x unique: {lookup_valid_x_unique_mean*100:.2f}% ± {lookup_valid_x_unique_ci*100:.2f}%\n"
-        )
+        if compute_edm:
+            f.write("\nEDM metrics:\n")
+            f.write(
+                f"Atom stable: {atom_stability_mean*100:.2f}% ± {atom_stability_ci*100:.2f}%\n"
+            )
+            f.write(
+                f"Molecule stable: {molecule_stability_mean*100:.2f}% ± {molecule_stability_ci*100:.2f}%\n"
+            )
+            f.write(
+                f"Valid: {lookup_valid_mean*100:.2f}% ± {lookup_valid_ci*100:.2f}%\n"
+            )
+            f.write(
+                f"Valid x unique: {lookup_valid_x_unique_mean*100:.2f}% ± {lookup_valid_x_unique_ci*100:.2f}%\n"
+            )
+
         f.write("\nxyz2mol metrics:\n")
         f.write(f"Valid: {xyz2mol_valid_mean*100:.2f}% ± {xyz2mol_valid_ci*100:.2f}%\n")
         f.write(
