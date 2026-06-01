@@ -8,11 +8,16 @@ import py3Dmol
 import rdkit
 import yaml
 from posebusters import PoseBusters
-from rdkit.Chem import AllChem, Draw, MolToSmiles, rdDepictor
+from posecheck import (
+    PoseCheck,
+)  # Leave import, posecheck will creat segmentation fault otherwise
+from rdkit.Chem import AllChem, Draw, MolToSmiles, rdDepictor, SDWriter
 
 from neat.dataset import DataModule
 from neat.model.molecule_builder import MoleculeBuilder
 from neat.utils.edm_metrics import edm_metrics
+from neat.utils.sbdd_metrics import GninaEvalulator
+from neat.utils.pose_check_metrics import compute_pose_check_metrics
 
 NUM_MOLECULES_PLOTTED = 100
 NUM_MOLECULES_PER_ROW = 5
@@ -113,7 +118,7 @@ def evaluate(args: argparse.Namespace) -> None:
     # Load preprocessed training data for computing novelty
     if params["compute_novelty"]:
         data_root = os.path.join(ROOT, "data")
-        datamodule = DataModule(data_root, data_set=params["data_set"])
+        datamodule = DataModule(data_root, data_set=params["data_set"].upper())
         datamodule.setup()
         reference_smiles = datamodule.training_data.smiles
     else:
@@ -131,30 +136,38 @@ def evaluate(args: argparse.Namespace) -> None:
     bp_valid_x_unique_lst = []
     bp_valid_x_unique_x_novel_lst = []
     posebusters_metrics_list = []
+    posecheck_metrics_list = []
     use_bond_predictor = params.get("bond_predictor_path") is not None
+    compute_edm = bool(params.get("compute_edm", True))
     compute_posebusters = bool(params.get("compute_posebusters", False))
-    data_path = Path(os.path.join(ROOT, params["data_path"]))
+    data_path = Path(os.path.join(ROOT, params["data_path"], params["data_subdir"]))
+
+    gnina_evaluator = GninaEvalulator()
+
     for subdir in data_path.iterdir():
         if subdir.is_dir() and (
-            subdir.name.startswith("seed") or subdir.name.startswith("prefix")
+            subdir.name.startswith("seed")
+            or subdir.name.startswith("prefix")
+            or subdir.name.startswith("pocket")
         ):
             subdata_path = os.path.join(data_path, subdir.name)
             builder = MoleculeBuilder(vocab=params["data_set"])
             x, pos, batch = builder.load_tensor_from_file(subdata_path)
 
-            # Compute EDM-based metrics
-            (
-                atom_stability,
-                mol_stability,
-                edm_valid,
-                edm_unique,
-                edm_invalid_idxs,
-            ) = edm_metrics(x, pos, batch, params["data_set"])
-            edm_atom_stability_lst.append(atom_stability)
-            edm_molecule_stability_lst.append(mol_stability)
-            edm_valid_lst.append(edm_valid)
-            edm_valid_x_unique = edm_valid * edm_unique
-            edm_valid_x_unique_lst.append(edm_valid_x_unique)
+            if compute_edm:
+                # Compute EDM-based metrics
+                (
+                    atom_stability,
+                    mol_stability,
+                    edm_valid,
+                    edm_unique,
+                    edm_invalid_idxs,
+                ) = edm_metrics(x, pos, batch, params["data_set"].upper())
+                edm_atom_stability_lst.append(atom_stability)
+                edm_molecule_stability_lst.append(mol_stability)
+                edm_valid_lst.append(edm_valid)
+                edm_valid_x_unique = edm_valid * edm_unique
+                edm_valid_x_unique_lst.append(edm_valid_x_unique)
 
             # Compute xyz2mol-based metrics
             mols_xyz2mol = builder.generate_rdkit_molecules_via_xyz2mol(
@@ -164,6 +177,42 @@ def evaluate(args: argparse.Namespace) -> None:
                 MolToSmiles(mol, canonical=True) if mol is not None else None
                 for mol in mols_xyz2mol
             ]
+            if (
+                datamodule.data_set == "CROSSDOCKED"
+                and params["data_subdir"] == "conditional"
+            ):
+                # 1. Initialize the SDWriter with the output file path
+                writer = SDWriter(os.path.join(subdata_path, "generated_mols.sdf"))
+                try:
+                    # 2. Loop through each molecule and write it to the file
+                    for mol in mols_xyz2mol:
+                        if mol is not None:  # Ensure the molecule object is valid
+                            writer.write(mol)
+                        else:
+                            print(
+                                "Warning: Encountered a 'None' molecule object. Skipping."
+                            )
+                finally:
+                    # 3. Always close the writer to ensure all data is flushed and saved properly
+                    writer.close()
+
+                pocket_path = os.path.join(subdata_path, "pocket.pdb")
+                pose_check_results = compute_pose_check_metrics(
+                    mols_xyz2mol, pocket_path
+                )
+                posecheck_metrics_list.append(pose_check_results)
+
+                # scores = []
+                # for mol in mols_xyz2mol:
+                #     if mol is not None:
+                #         gnina_score = gnina_evaluator.evaluate(mol, protein=pocket_path)
+                #         print(f"Gnina score for molecule: {gnina_score}")
+                #         scores.append(gnina_score)
+                #     else:
+                #         print(
+                #             "Warning: Encountered a 'None' molecule object. Skipping Gnina evaluation."
+                #         )
+
             xyz2mol_valid, xyz2mol_valid_x_unique, xyz2mol_valid_x_unique_x_novel = (
                 compute_validity_uniqueness_novelty(smiles_xyz2mol, reference_smiles)
             )
@@ -216,11 +265,13 @@ def evaluate(args: argparse.Namespace) -> None:
             with open(os.path.join(subdata_path, "evaluation_results.txt"), "w") as f:
                 f.write(f"Data set: {params['data_set']}\n")
                 f.write(f"RDKit version: {rdkit.__version__}\n")
-                f.write("\nEDM metrics:\n")
-                f.write(f"Atom stable: {atom_stability*100:.2f}%\n")
-                f.write(f"Molecule stable: {mol_stability*100:.2f}%\n")
-                f.write(f"Valid: {edm_valid*100:.2f}%\n")
-                f.write(f"Valid x unique: { edm_valid_x_unique * 100:.2f}%\n")
+                if compute_edm:
+                    f.write("\nEDM metrics:\n")
+                    f.write(f"Atom stable: {atom_stability*100:.2f}%\n")
+                    f.write(f"Molecule stable: {mol_stability*100:.2f}%\n")
+                    f.write(f"Valid: {edm_valid*100:.2f}%\n")
+                    f.write(f"Valid x unique: { edm_valid_x_unique * 100:.2f}%\n")
+
                 f.write("\nxyz2mol metrics:\n")
                 f.write(f"Valid: {xyz2mol_valid*100:.2f}%\n")
                 f.write(f"Valid x unique: {xyz2mol_valid_x_unique * 100:.2f}%\n")
@@ -240,6 +291,13 @@ def evaluate(args: argparse.Namespace) -> None:
                     f.write("\nPoseBusters metrics:\n")
                     for metric, value in posebusters_metrics_list[0].items():
                         f.write(f"{metric}: {value*100:.2f}%\n")
+                if (
+                    datamodule.data_set == "CROSSDOCKED"
+                    and params["data_subdir"] == "conditional"
+                ):
+                    f.write("\nPoseCheck metrics:\n")
+                    for metric, value in pose_check_results.items():
+                        f.write(f"{metric}: {value:.2f}\n")
 
             mols_plotting_subset = mols_xyz2mol[:NUM_MOLECULES_PLOTTED]
             for mol in mols_plotting_subset:
@@ -336,17 +394,21 @@ def evaluate(args: argparse.Namespace) -> None:
     with open(os.path.join(data_path, "evaluation_summary.txt"), "w") as f:
         f.write(f"Data set: {params['data_set']}\n")
         f.write(f"RDKit version: {rdkit.__version__}\n")
-        f.write("\nEDM metrics:\n")
-        f.write(
-            f"Atom stable: {atom_stability_mean*100:.2f}% ± {atom_stability_ci*100:.2f}%\n"
-        )
-        f.write(
-            f"Molecule stable: {molecule_stability_mean*100:.2f}% ± {molecule_stability_ci*100:.2f}%\n"
-        )
-        f.write(f"Valid: {lookup_valid_mean*100:.2f}% ± {lookup_valid_ci*100:.2f}%\n")
-        f.write(
-            f"Valid x unique: {lookup_valid_x_unique_mean*100:.2f}% ± {lookup_valid_x_unique_ci*100:.2f}%\n"
-        )
+        if compute_edm:
+            f.write("\nEDM metrics:\n")
+            f.write(
+                f"Atom stable: {atom_stability_mean*100:.2f}% ± {atom_stability_ci*100:.2f}%\n"
+            )
+            f.write(
+                f"Molecule stable: {molecule_stability_mean*100:.2f}% ± {molecule_stability_ci*100:.2f}%\n"
+            )
+            f.write(
+                f"Valid: {lookup_valid_mean*100:.2f}% ± {lookup_valid_ci*100:.2f}%\n"
+            )
+            f.write(
+                f"Valid x unique: {lookup_valid_x_unique_mean*100:.2f}% ± {lookup_valid_x_unique_ci*100:.2f}%\n"
+            )
+
         f.write("\nxyz2mol metrics:\n")
         f.write(f"Valid: {xyz2mol_valid_mean*100:.2f}% ± {xyz2mol_valid_ci*100:.2f}%\n")
         f.write(
@@ -377,6 +439,16 @@ def evaluate(args: argparse.Namespace) -> None:
                     ]
                     mean, ci = compute_mean_and_95_ci(values)
                     f.write(f"{metric_name}: {mean*100:.2f}% ± {ci*100:.2f}%\n")
+        if (
+            datamodule.data_set == "CROSSDOCKED"
+            and params["data_subdir"] == "conditional"
+        ):
+            f.write("\nPoseCheck metrics:\n")
+            metric_names = list(posecheck_metrics_list[0].keys())
+            for metric_name in metric_names:
+                values = [metrics[metric_name] for metrics in posecheck_metrics_list]
+                mean, ci = compute_mean_and_95_ci(values)
+                f.write(f"{metric_name}: {mean:.2f} ± {ci:.2f}\n")
 
 
 if __name__ == "__main__":

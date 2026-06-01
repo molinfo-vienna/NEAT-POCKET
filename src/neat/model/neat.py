@@ -31,12 +31,20 @@ class NEAT(LightningModule):
     def __init__(self, **params) -> None:
         super(NEAT, self).__init__()
         self.hparams.setdefault("noise_std", 1.0)
+        self.hparams.setdefault("global_cond_proj", False)
+        self.hparams.setdefault("cross_attn_with_null_token", False)
+
         self.save_hyperparameters()
 
         # Atom type embedding layer
         self.atom_type_embedding_layer = nn.Embedding(
             num_embeddings=self.hparams.vocab_size,
             embedding_dim=self.hparams.n_embd,
+        )
+
+        # Learnable start token embedding
+        self.start_token_embedding = nn.Parameter(
+            torch.randn(1, self.hparams.n_embd) * 0.02
         )
 
         # Pocket residue type embedding layer
@@ -56,6 +64,7 @@ class NEAT(LightningModule):
 
         # Transformer blocks for the ligand stream
         self.enable_cross_attention = _dataset_is_crossdocked(self.hparams.data_set)
+        scale_shift_weights = False if self.hparams.global_cond_proj else True
         self.transformer_blocks = nn.ModuleList(
             [
                 BidirectionalAttentionBlock(
@@ -64,6 +73,7 @@ class NEAT(LightningModule):
                     self.hparams.dropout,
                     self.hparams.bias,
                     enable_cross_attention=self.enable_cross_attention,
+                    scale_shift_weights=scale_shift_weights,
                 )
                 for _ in range(self.hparams.n_layer)
             ]
@@ -75,6 +85,16 @@ class NEAT(LightningModule):
         )
 
         if self.enable_cross_attention:
+            self.atom_type_embedding_layer_pocket = nn.Embedding(
+                num_embeddings=self.hparams.vocab_size,
+                embedding_dim=self.hparams.n_embd,
+            )
+
+            # Fourier features for embedding of Cartesian coordinates
+            self.fourier_embedding_layer_pocket = FourierPositionEncoding(
+                out_dim=self.hparams.n_embd
+            )
+
             # Transformer blocks for the pocket stream
             self.hparams.setdefault("pocket_n_layer", self.hparams.n_layer)
             self.atom_level_pocket_transformer_blocks = nn.ModuleList(
@@ -108,6 +128,17 @@ class NEAT(LightningModule):
             self.layer_norm_after_residue_level_pocket_transformer_blocks = (
                 nn.LayerNorm(self.hparams.n_embd, bias=False)
             )
+            self.null_condition_embedding = nn.Parameter(
+                torch.zeros(1, self.hparams.n_embd)
+            )
+            if self.hparams.global_cond_proj:
+                self.global_condition_projection = nn.Sequential(
+                    nn.Linear(self.hparams.n_embd, self.hparams.n_embd, bias=False),
+                    nn.SiLU(),
+                    nn.Linear(self.hparams.n_embd, self.hparams.n_embd, bias=False),
+                    nn.SiLU(),
+                    nn.Linear(self.hparams.n_embd, self.hparams.n_embd * 8, bias=False),
+                )
 
         # Linear prediction head for atom type prediction
         self.atom_type_prediction_head = nn.Linear(
@@ -121,10 +152,16 @@ class NEAT(LightningModule):
         # Apply special scaled initialization to the residual projections
         # (taken from the nanoGPT repository)
         for pn, p in self.named_parameters():
-            if pn.endswith("c_proj.weight"):
+            if pn.endswith("attn.c_proj.weight"):
                 nn.init.normal_(
                     p, mean=0.0, std=0.02 / math.sqrt(2 * self.hparams.n_layer)
                 )
+            if (
+                pn.endswith("attn_cross.c_proj.weight")
+                or pn.endswith("scale_shift.2.weight")
+                or pn.endswith("global_condition_projection.4.weight")
+            ):
+                nn.init.constant_(p, 0)
 
         # This is the Diffusion MLP with AdaLN conditioning.s
         # It was used in the original diffusion loss paper, and QUETZAL also uses it.
@@ -158,6 +195,66 @@ class NEAT(LightningModule):
 
         return n_params
 
+    def initialize_from_pretrained_model(self, pretrained_model: nn.Module):
+        """
+        Initializes a structurally modified conditional model using weights from a
+        pretrained unconditional model, freezing the pretrained parameters while keeping
+        new conditioning layers and LoRA modules trainable.
+        """
+        # 1. Extract state dicts
+        pretrained_state_dict = pretrained_model.state_dict()
+        current_state_dict = self.state_dict()
+
+        matched_keys = []
+        unmatched_keys = []
+
+        # 2. Load matching weights
+        with torch.no_grad():
+            for key, value in pretrained_state_dict.items():
+                if key in current_state_dict:
+                    if value.shape == current_state_dict[key].shape:
+                        current_state_dict[key].copy_(value)
+                        matched_keys.append(key)
+                    else:
+                        print(
+                            f"[Warning] Shape mismatch for key '{key}': "
+                            f"Pretrained {value.shape} vs Conditional {current_state_dict[key].shape}. Skipping."
+                        )
+                        unmatched_keys.append(key)
+                else:
+                    unmatched_keys.append(key)
+
+        print(f"Successfully transferred {len(matched_keys)} parameter tensors.")
+
+        # 3. Freeze pretrained blocks
+        unfrozen_layers = [
+            "atom_type_embedding_layer_pocket",
+            "fourier_embedding_layer_pocket",
+            "atom_level_pocket_transformer_blocks",
+            "residue_level_pocket_transformer_blocks",
+            "layer_norm_after_atom_level_pocket_transformer_blocks",
+            "layer_norm_after_residue_level_pocket_transformer_blocks",
+            "null_condition_embedding",
+            "global_condition_projection",
+            "pocket_residue_type_embedding_layer",
+            "attn_cross",
+            "ln_2",
+            "scale_shift",
+        ]
+        for name, param in self.named_parameters():
+            is_new_layer = any(layer in name for layer in unfrozen_layers)
+
+            if is_new_layer:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        frozen_params = sum(p.numel() for p in self.parameters() if not p.requires_grad)
+        print(
+            f"Model configured: {trainable_params:,} trainable params | {frozen_params:,} frozen params."
+        )
+
     def forward(self, data: Data) -> tuple[Tensor, Tensor, Tensor]:
         """Forward pass of the NEAT model.
 
@@ -168,6 +265,7 @@ class NEAT(LightningModule):
             Tuple of total loss, atom type prediction loss, and flow matching loss.
         """
         device = data.x.device
+        batch_size = data.batch.max().item() + 1
 
         # We split the molecular data into source and target atom sets.
         # The indexing tensors point to the same molecules as in the original batch.
@@ -189,6 +287,7 @@ class NEAT(LightningModule):
             data.x[data.source_ptr],
             data.pos[data.source_ptr],
             data.batch[data.source_ptr],
+            batch_size,
             device,
             pocket_info if self.enable_cross_attention else None,
         )  # [batch_size, n_embd]
@@ -214,6 +313,7 @@ class NEAT(LightningModule):
             data.pos_random,
             data.batch[data.target_ptr],
             source_set_representation,
+            data.start_token_mask,
             device,
         )
 
@@ -228,6 +328,7 @@ class NEAT(LightningModule):
         x_source: Tensor,
         pos_source: Tensor,
         batch_source: Tensor,
+        batch_size: int,
         device: torch.device,
         pocket_info: dict[str, Tensor] | None = None,
     ) -> Tensor:
@@ -246,9 +347,6 @@ class NEAT(LightningModule):
         x_source = x_source.to(device).long()
         pos_source = pos_source.to(device).float()
         batch_source = batch_source.to(device).long()
-        batch_size = (
-            int(batch_source.max().item()) + 1 if batch_source.numel() > 0 else 0
-        )
 
         # (0) Process the pocket data if it is provided
         if pocket_info is not None:
@@ -276,7 +374,9 @@ class NEAT(LightningModule):
             pocket_residue_id = pocket_residue_id + id_offsets[pocket_batch]
 
         # (1) Compute atom counts of the source sets
-        atom_count_source = torch.bincount(batch_source)
+        atom_count_source = torch.bincount(
+            batch_source, minlength=batch_size
+        )  # [batch_size]
 
         # (2) Reshape the input to [batch_size, max_atom_count, n_embd].
         # This could also be done with sequence packing, but for now we keep it simple.
@@ -291,13 +391,6 @@ class NEAT(LightningModule):
         atom_mask = context_range < atom_count_source.unsqueeze(
             1
         )  # [batch_size, max_atom_count]
-        # The attention mask is used in the transformer blocks and is the outer product of the atom mask.
-        attn_mask = atom_mask.unsqueeze(1) * atom_mask.unsqueeze(
-            2
-        )  # [batch_size, max_atom_count, max_atom_count]
-        attn_mask = attn_mask.unsqueeze(1).expand(
-            -1, self.hparams.n_head, -1, -1
-        )  # [batch_size, n_head, max_atom_count, max_atom_count]
 
         # (3) Embed the atom types and positions
         atom_type_embedding = self.atom_type_embedding_layer(
@@ -320,8 +413,33 @@ class NEAT(LightningModule):
         # (6) Apply the atom mask to the input embedding
         x[atom_mask] = input_embedding  # [batch_size, max_atom_count, n_embd]
 
+        # (7) Concatenate start token embedding to the transformer input.
+        x = torch.cat(
+            [self.start_token_embedding.expand(batch_size, 1, -1), x], dim=1
+        )  # [batch_size, max_atom_count + 1, n_embd]
+        atom_mask = torch.cat(
+            [torch.ones(batch_size, 1, device=device, dtype=torch.bool), atom_mask],
+            dim=1,
+        )  # [batch_size, max_atom_count + 1]
+
+        # (8) Create the attention mask for the transformer blocks.
+        # The attention mask is used in the transformer blocks and is the outer product of the atom mask.
+        attn_mask = atom_mask.unsqueeze(1) * atom_mask.unsqueeze(
+            2
+        )  # [batch_size, max_atom_count, max_atom_count]
+        attn_mask = attn_mask.unsqueeze(1).expand(
+            -1, self.hparams.n_head, -1, -1
+        )  # [batch_size, n_head, max_atom_count, max_atom_count]
+
+        # (11) Create mask for CFG dropout
+        cfg_dropout = self.hparams.get("cfg_dropout", None)
+        if self.training and pocket_info is not None and cfg_dropout is not None:
+            cfg_mask = torch.rand(x.shape[0]) < cfg_dropout
+        else:
+            cfg_mask = None
+
         if pocket_info is not None:
-            # (7) Encode the pocket residues with a lightweight transformer
+            # (9) Encode the pocket residues with a lightweight transformer
             x_residues, residue_mask = self.compute_residue_representations(
                 batch_size=batch_size,
                 device=device,
@@ -331,7 +449,17 @@ class NEAT(LightningModule):
                 pocket_residue_type=pocket_residue_type,
                 pocket_batch=pocket_batch,
             )
-            # (8) Create a cross-attention mask for the pocket residues
+            ada_ln_condition = x_residues.sum(dim=1)  # [batch_size, n_embd]
+
+            if cfg_mask is not None:
+                x_residues[cfg_mask] = 0
+                residue_mask[cfg_mask] = 0
+                ada_ln_condition[cfg_mask] = self.null_condition_embedding
+                if self.hparams.cross_attn_with_null_token:
+                    x_residues[cfg_mask, 0] = self.null_condition_embedding
+                    residue_mask[cfg_mask, 0] = 1
+
+            # (10) Create a cross-attention mask for the pocket residues
             cross_attn_mask = residue_mask.unsqueeze(1) * atom_mask.unsqueeze(
                 2
             )  # [batch_size, max_residue_count, max_atom_count]
@@ -341,29 +469,43 @@ class NEAT(LightningModule):
         else:
             x_residues = None
             cross_attn_mask = None
+            ada_ln_condition = self.null_condition_embedding.expand(batch_size, -1)
+            if self.hparams.cross_attn_with_null_token:
+                x_residues = self.null_condition_embedding.unsqueeze(0).expand(
+                    batch_size, -1, -1
+                )  # [batch_size, 1, n_embd]
+                residue_mask = torch.ones(
+                    (batch_size, 1), device=device, dtype=torch.bool
+                )  # [batch_size, 1]
+                # (10) Create a cross-attention mask for the pocket residues
+                cross_attn_mask = residue_mask.unsqueeze(1) * atom_mask.unsqueeze(
+                    2
+                )  # [batch_size, max_residue_count, max_atom_count]
+                cross_attn_mask = cross_attn_mask.unsqueeze(1).expand(
+                    -1, self.hparams.n_head, -1, -1
+                )  # [batch_size, n_head, max_residue_count, max_atom_count]
 
-        # (9) Pass through the transformer blocks
-        if self.training and pocket_info is not None:
-            cfg_dropout = 0.2
-            cfg_mask = torch.rand(x.shape[0]) > cfg_dropout
-        else:
-            cfg_mask = None
+        if self.hparams.global_cond_proj:
+            ada_ln_condition = self.global_condition_projection(
+                ada_ln_condition
+            )  # [batch_size, n_embd * 8]
 
+        # (12) Pass through the transformer blocks
         for block in self.transformer_blocks:
             x = block(
                 x,
                 attn_mask=attn_mask,
                 cross_attn_input=x_residues,
                 cross_attn_mask=cross_attn_mask,
-                cfg_mask=cfg_mask,
-            )  # [batch_size, max_atom_count, n_embd]
+                ada_ln_condition=ada_ln_condition,
+            )  # [batch_size, max_atom_count + 1, n_embd]
 
         x = self.layer_norm_after_transformer_blocks(
             x
-        )  # [batch_size, max_atom_count, n_embd]
+        )  # [batch_size, max_atom_count + 1, n_embd]
 
         # (10) Apply the atom mask to the input embedding (not really needed, could be removed)
-        x = x * atom_mask.unsqueeze(-1)  # [batch_size, max_atom_count, n_embd]
+        x = x * atom_mask.unsqueeze(-1)  # [batch_size, max_atom_count + 1, n_embd]
 
         # (11) Pool the atom embeddings into a molecule embedding
         source_set_representation = x.sum(dim=1)  # [batch_size, n_embd]
@@ -406,8 +548,8 @@ class NEAT(LightningModule):
             )
 
         # (1) Atom-level embeddings
-        atom_embedding = self.atom_type_embedding_layer(pocket_x)
-        pos_embedding = self.fourier_embedding_layer(pocket_pos)
+        atom_embedding = self.atom_type_embedding_layer_pocket(pocket_x)
+        pos_embedding = self.fourier_embedding_layer_pocket(pocket_pos)
         residue_type_embedding = self.pocket_residue_type_embedding_layer(
             pocket_residue_type
         )
@@ -493,7 +635,7 @@ class NEAT(LightningModule):
             -1
         )  # [batch_size, max_residue_count, n_embd]
 
-        return x_residues, residue_mask
+        return x_residues, residue_mask.clone()
 
     def compute_atom_type_loss(
         self,
@@ -563,6 +705,7 @@ class NEAT(LightningModule):
         pos_random: Tensor,
         batch_target: Tensor,
         source_set_representation: Tensor,
+        start_token_mask: Tensor,
         device: torch.device,
         resampling=4,
     ) -> Tensor:
@@ -620,6 +763,12 @@ class NEAT(LightningModule):
         source_set_representations = torch.cat(
             [source_set_representations for _ in range(resampling)], dim=0
         )
+        start_token_mask = start_token_mask[batch_target]
+        start_token_mask = torch.cat(
+            [start_token_mask for _ in range(resampling)], dim=0
+        )
+        scaling_factor = torch.ones_like(start_token_mask, dtype=torch.float)
+        scaling_factor[start_token_mask] = 0.1
 
         # (4) Calculate k interpolated positions per path given the sampled time steps
         interpolated_pos = pos_random + interpolation * time_step.unsqueeze(
@@ -640,6 +789,7 @@ class NEAT(LightningModule):
         # This is the MSE between the predicted vector field and
         # the interpolation (pos_1 - pos_0) for each path.
         loss_fm = torch.mean((output_fm - interpolation) ** 2, dim=1)  # [n_paths * k]
+        loss_fm = loss_fm * scaling_factor  # [n_paths * k]
 
         # (9) Return the mean loss over all paths and time steps.
         return loss_fm.mean()  # [1]
@@ -909,6 +1059,15 @@ class NEAT(LightningModule):
         Returns:
             tuple[Tensor, Tensor, Tensor]: The atom types, their positions, and the batch indices of the generated molecules.
         """
+        # if pocket_info is not None:
+        #     batch_size = pocket_info["pocket_batch"].max().item() + 1
+        #     pocket_center = global_mean_pool(
+        #         pocket_info["pocket_pos"], pocket_info["pocket_batch"]
+        #     )
+        #     pocket_info["pocket_pos"] = (
+        #         pocket_info["pocket_pos"] - pocket_center[pocket_info["pocket_batch"]]
+        #     )
+
         if prefix_x is not None and prefix_pos is not None:
             # (1) Initialize starting atom types with the provided prefix
             x = torch.cat([prefix_x for _ in range(batch_size)]).to(device)
@@ -965,10 +1124,13 @@ class NEAT(LightningModule):
                 raise ValueError(f"Unknown data set: {self.hparams.data_set}")
 
             # (2) Initialize starting positions with random zeroes
-            pos = torch.zeros(batch_size, 3, device=device)
+            x = torch.empty(0, dtype=torch.long, device=device)
+            pos = torch.empty(0, 3, device=device)
+            # pos = torch.zeros(batch_size, 3, device=device)
 
             # (3) Initialize the batch source tensor
-            batch_source = torch.arange(batch_size, device=device)
+            batch_source = torch.empty(0, device=device, dtype=torch.long)
+            # batch_source = torch.arange(batch_size, device=device)
 
         # (4) Create a mask for the stop tokens that will be used to track which molecules have a stop token
         stop_token_mask = torch.zeros(batch_size, device=device, dtype=torch.bool)
@@ -980,6 +1142,7 @@ class NEAT(LightningModule):
         with tqdm(range(max_atoms)) as pbar:
             for i in pbar:
                 # (6.1) Compute source set representation
+                active_batch_size = len(active_mol_idx)
                 expanded_mask = torch.isin(batch_source, active_mol_idx)
                 masked_x = x[expanded_mask]
                 masked_pos = pos[expanded_mask]
@@ -1015,6 +1178,7 @@ class NEAT(LightningModule):
                     masked_x,
                     masked_pos,
                     batch_source_remapped,
+                    active_batch_size,
                     device,
                     pocket_info=pocket_info_masked,
                 )  # [active_mol_count, n_embd]
@@ -1067,7 +1231,11 @@ class NEAT(LightningModule):
                 if pocket_info is not None:
                     source_set_representation_unconditioned_for_cfg = (
                         self.compute_source_set_representation(
-                            masked_x, masked_pos, batch_source_remapped, device
+                            masked_x,
+                            masked_pos,
+                            batch_source_remapped,
+                            active_batch_size,
+                            device,
                         )[~x_next_mask]
                     )  # [active_mol_count, n_embd]
                 else:
@@ -1105,6 +1273,11 @@ class NEAT(LightningModule):
                         pocket_info["pocket_pos"]
                         - mean_pos[pocket_info["pocket_batch"]]
                     )
+        if pocket_info is not None:
+            pocket_center = global_mean_pool(
+                pocket_info["pocket_pos"], pocket_info["pocket_batch"]
+            )
+            pos = pos - pocket_center[batch_source]
 
         return Batch(x=x, pos=pos, batch=batch_source)
 

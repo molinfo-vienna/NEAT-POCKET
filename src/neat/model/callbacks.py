@@ -1,10 +1,13 @@
+from tempfile import NamedTemporaryFile
+
 import torch
 from lightning import Callback, LightningModule, Trainer
 from rdkit import Chem
-from torch_geometric.nn import global_mean_pool
+import numpy as np
 
+from neat.utils.sbdd_metrics import ClashEvaluator
 from neat.model.molecule_builder import MoleculeBuilder
-from neat.utils.edm_metrics import edm_metrics
+from neat.utils import center_pdb
 
 
 class GenerationMonitor(Callback):
@@ -52,13 +55,12 @@ class GenerationMonitor(Callback):
         trainer: Trainer,
         pl_module: LightningModule,
     ) -> None:
-        if (
-            trainer.current_epoch % self.every_n_epochs != 0
-            or trainer.current_epoch == 0
-        ):
+        if trainer.current_epoch % self.every_n_epochs != 0:
             return
 
         generated_mols = None
+        pocket_paths = None
+        mols_per_pocket = None
         if str(self.dataset).upper() == "QM9":
             generated_mols = pl_module.generate(
                 batch_size=self.num_samples, integration_method="euler"
@@ -69,29 +71,23 @@ class GenerationMonitor(Callback):
                 batch_size=self.num_samples, integration_method="euler_maruyama"
             )
         elif str(self.dataset).upper() == "CROSSDOCKED":
-            val_data = trainer.val_dataloaders.dataset
-            res_id = val_data.pocket_residue_id
-            resets = torch.cat([torch.tensor([False]), res_id[1:] < res_id[:-1]])
-            graph_ids = resets.long().cumsum(dim=0)
-            mean_pos = global_mean_pool(val_data.pocket_pos, graph_ids)
-            pos = val_data.pocket_pos - mean_pos[graph_ids]
-            mask = graph_ids < self.num_samples
-            pocket_info = {
-                "pocket_x": val_data.pocket_x[mask].to(pl_module.device),
-                "pocket_pos": pos[mask].to(pl_module.device),
-                "pocket_residue_id": val_data.pocket_residue_id[mask].to(
-                    pl_module.device
-                ),
-                "pocket_residue_type": val_data.pocket_residue_type[mask].to(
-                    pl_module.device
-                ),
-                "pocket_batch": graph_ids[mask].to(pl_module.device),
-            }
+            num_pockets = 10
+            val_data = list(trainer.val_dataloaders.dataset[:num_pockets])
+            mols_per_pocket = self.num_samples // num_pockets
+            pocket_info = trainer.val_dataloaders.dataset.collate_pocket_info(
+                val_data, samples_per_pocket=mols_per_pocket, device=pl_module.device
+            )
             generated_mols = pl_module.generate(
                 batch_size=self.num_samples,
                 integration_method="euler_maruyama",
                 pocket_info=pocket_info,
             )
+            pocket_paths = [
+                trainer.val_dataloaders.dataset.get_pocket_path_from_data_point(
+                    data_point
+                )
+                for data_point in val_data
+            ]
         else:
             raise ValueError(f"Unknown dataset: {self.dataset}")
 
@@ -118,6 +114,53 @@ class GenerationMonitor(Callback):
             on_step=False,
             on_epoch=True,
         )
+        if str(self.dataset).upper() == "CROSSDOCKED":
+            clash_scores_mean = []
+            clash_scores_sum = []
+            for i, pocket_path in enumerate(pocket_paths):
+                try:
+                    with NamedTemporaryFile(delete=True, suffix=".pdb") as temp_file:
+                        # Convert the string path to a pathlib.Path object
+                        center_pdb(pocket_path, temp_file.name)
+                        mols_for_pocket = mols[
+                            i * mols_per_pocket : (i + 1) * mols_per_pocket
+                        ]
+                        clash_evaluator = ClashEvaluator()
+                        for mol in mols_for_pocket:
+                            if mol is None:
+                                continue
+                            clash_results = clash_evaluator.evaluate(
+                                mol, temp_file.name
+                            )
+                            clash_score_mean = clash_results["clash_score_between_mean"]
+                            clash_score_sum = clash_results["clash_score_between_sum"]
+                            clash_scores_mean.append(clash_score_mean)
+                            clash_scores_sum.append(clash_score_sum)
+                except Exception as e:
+                    print(f"Error during evaluation: {e}")
+                    continue
+
+            if len(clash_scores_mean) > 0:
+                mean_clash_score_mean = np.array(clash_scores_mean).mean()
+                mean_clash_score_sum = np.array(clash_scores_sum).mean()
+            else:
+                mean_clash_score_mean = 0.0
+                mean_clash_score_sum = 0.0
+
+            pl_module.log(
+                "val/clashes_mean",
+                mean_clash_score_mean,
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+            )
+            pl_module.log(
+                "val/clashes_sum",
+                mean_clash_score_sum,
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+            )
 
     def compute_validity(
         self,

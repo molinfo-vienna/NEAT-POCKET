@@ -56,10 +56,29 @@ def train(args: argparse.Namespace) -> None:
     )
     datamodule.setup()
 
+    # Initialize the model
     accumulate_grad_batches = params.pop("accumulate_grad_batches")
     params["vocab_size"] = datamodule.vocab_size
-
     model = MODEL(**params)
+
+    # If path to pretrained weights is provided, load them
+    pretrained_model_path = params.get("pretrained_model_path", None)
+    if pretrained_model_path is not None:
+        checkpoints_dir = os.path.join(ROOT, pretrained_model_path, "checkpoints")
+        pt_files = [
+            f
+            for f in os.listdir(checkpoints_dir)
+            if f.endswith(".ckpt") and f.startswith("best-val-loss")
+        ]
+        if not pt_files:
+            raise FileNotFoundError(f"No .ckpt files found in {checkpoints_dir}")
+
+        checkpoints_path = os.path.join(checkpoints_dir, pt_files[0])
+        print(f"Using checkpoint file: {checkpoints_path}")
+        pretrained_model = MODEL.load_from_checkpoint(
+            checkpoints_path, map_location="cpu"
+        )
+        model.initialize_from_pretrained_model(pretrained_model)
 
     tb_logger = TensorBoardLogger(
         os.path.join(ROOT, "logs"),
@@ -86,7 +105,7 @@ def train(args: argparse.Namespace) -> None:
 
     callbacks = [
         GenerationMonitor(
-            num_samples=1000,
+            num_samples=400,
             every_n_epochs=generate_every_n_epochs,
             dataset=params["data_set"],
         ),

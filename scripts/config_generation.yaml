@@ -1,8 +1,8 @@
-checkpoints_path: trained_models/version_best_geom
-output_path: output/generated_best_geom
-data_set: GEOM
-num_molecules: 10000
-batch_size: 5000
+checkpoints_path: logs/NEAT/version_8
+output_path: output/version_8
+data_set: CrossDocked
+num_molecules: 1000
+batch_size: 1000
 max_atoms: 200
 num_time_steps: 60
 num_runs: 3

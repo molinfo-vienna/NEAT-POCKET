@@ -49,6 +49,12 @@ python scripts/get_weights.py
 
 Alternatively you can download the trained model weights manually from [figshare](https://doi.org/10.6084/m9.figshare.31113949). Unzip and place into a `trained_models` folder for using the generation script without modifications to the `config_generation.yaml` configuration file.
 
+6. For docking score computation, add the Gnina binary to the conda environment:
+```bash
+wget https://github.com/gnina/gnina/releases/download/v1.1/gnina -O $CONDA_PREFIX/bin/gnina
+chmod +x $CONDA_PREFIX/bin/gnina
+```
+
 # Usage
 
 ## Generate molecules

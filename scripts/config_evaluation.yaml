@@ -1,6 +1,8 @@
-data_path: output/generated_best_geom/unconditional
-data_set: GEOM
+data_path: output/version_72
+data_subdir: conditional
+data_set: CrossDocked
 compute_novelty: true
+compute_edm: false
 compute_posebusters: false
 
 # Optional: path to bond predictor checkpoint directory.
