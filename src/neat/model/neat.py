@@ -121,12 +121,27 @@ class NEAT(LightningModule):
                 ]
             )
 
+            self.atom_level_pocket_transformer_blocks_2 = nn.ModuleList(
+                [
+                    BidirectionalAttentionBlock(
+                        self.hparams.n_embd,
+                        self.hparams.n_head,
+                        self.hparams.dropout,
+                        self.hparams.bias,
+                    )
+                    for _ in range(self.hparams.pocket_n_layer // 4)
+                ]
+            )
+
             # Layer normalization after the pocket transformer blocks
             self.layer_norm_after_atom_level_pocket_transformer_blocks = nn.LayerNorm(
                 self.hparams.n_embd, bias=False
             )
             self.layer_norm_after_residue_level_pocket_transformer_blocks = (
                 nn.LayerNorm(self.hparams.n_embd, bias=False)
+            )
+            self.layer_norm_after_atom_level_pocket_transformer_blocks_2 = nn.LayerNorm(
+                self.hparams.n_embd, bias=False
             )
             self.null_condition_embedding = nn.Parameter(
                 torch.zeros(1, self.hparams.n_embd)
@@ -564,35 +579,37 @@ class NEAT(LightningModule):
             atom_count_per_residue.max(),
             self.hparams.n_embd,
         ]
-        x = torch.zeros(
+        x_atom = torch.zeros(
             dim, device=device
         )  # [num_residues, max_atom_count_per_residue, n_embd]
         context_range = torch.arange(
             atom_count_per_residue.max(), device=atom_count_per_residue.device
         ).unsqueeze(0)
         atom_mask = context_range < atom_count_per_residue.unsqueeze(1)
-        attn_mask = atom_mask.unsqueeze(1) * atom_mask.unsqueeze(
+        attn_mask_atom = atom_mask.unsqueeze(1) * atom_mask.unsqueeze(
             2
         )  # [num_residues, max_atom_count_per_residue, max_atom_count_per_residue]
-        attn_mask = attn_mask.unsqueeze(1).expand(
+        attn_mask_atom = attn_mask_atom.unsqueeze(1).expand(
             -1, self.hparams.n_head, -1, -1
         )  # [num_residues, n_head, max_atom_count_per_residue, max_atom_count_per_residue]
 
         # (3) Pass throught atom-level transformer blocks
-        x[atom_mask] = atom_tokens  # [num_residues, max_atom_count_per_residue, n_embd]
+        x_atom[atom_mask] = (
+            atom_tokens  # [num_residues, max_atom_count_per_residue, n_embd]
+        )
         for block in self.atom_level_pocket_transformer_blocks:
-            x = block(
-                x, attn_mask=attn_mask, pos=None
+            x_atom = block(
+                x_atom, attn_mask=attn_mask_atom, pos=None
             )  # [num_residues, max_atom_count_per_residue, n_embd]
-        x = self.layer_norm_after_atom_level_pocket_transformer_blocks(
-            x
+        x_atom = self.layer_norm_after_atom_level_pocket_transformer_blocks(
+            x_atom
         )  # [num_residues, max_atom_count_per_residue, n_embd]
-        x = x * atom_mask.unsqueeze(
+        x_atom = x_atom * atom_mask.unsqueeze(
             -1
         )  # [num_residues, max_atom_count_per_residue, n_embd]
 
         # (4) Pool atom-level tokens into residue-level tokens via sum pooling
-        residue_tokens = x.sum(dim=1)  # [num_residues, n_embd]
+        residue_tokens = x_atom.sum(dim=1)  # [num_residues, n_embd]
 
         # (5) Now we need a residue-level attention mask
         ptr = torch.cat(
@@ -612,10 +629,10 @@ class NEAT(LightningModule):
             residue_count.max(), device=residue_count.device
         ).unsqueeze(0)
         residue_mask = context_range_residues < residue_count.unsqueeze(1)
-        attn_mask = residue_mask.unsqueeze(1) * residue_mask.unsqueeze(
+        attn_mask_residues = residue_mask.unsqueeze(1) * residue_mask.unsqueeze(
             2
         )  # [num_residues, max_atom_count_per_residue, max_atom_count_per_residue]
-        attn_mask = attn_mask.unsqueeze(1).expand(
+        attn_mask_residues = attn_mask_residues.unsqueeze(1).expand(
             -1, self.hparams.n_head, -1, -1
         )  # [num_residues, n_head, max_atom_count_per_residue, max_atom_count_per_residue]
         x_residues[residue_mask] = (
@@ -625,7 +642,7 @@ class NEAT(LightningModule):
         # (6) Pass through the residue-level transformer blocks
         for block in self.residue_level_pocket_transformer_blocks:
             x_residues = block(
-                x_residues, attn_mask=attn_mask, pos=None
+                x_residues, attn_mask=attn_mask_residues,
             )  # [batch_size, max_residue_count, n_embd]
 
         x_residues = self.layer_norm_after_residue_level_pocket_transformer_blocks(
@@ -635,7 +652,24 @@ class NEAT(LightningModule):
             -1
         )  # [batch_size, max_residue_count, n_embd]
 
-        # Now we want an atom-level representation with skip-connections
+        # (7) Now we go back to residue-level attention on the atom level
+        x_atom[atom_mask] = (
+            x_atom[atom_mask] + x_residues[residue_mask][pocket_residue_id]
+        )
+
+        # (8) Pass through another round of atom-level transformer blocks
+        for block in self.atom_level_pocket_transformer_blocks_2:
+            x_atom = block(
+                x_atom, attn_mask=attn_mask_atom,
+            )  # [num_residues, max_atom_count_per_residue, n_embd]
+        x_atom = self.layer_norm_after_atom_level_pocket_transformer_blocks_2(
+            x_atom
+        )  # [num_residues, max_atom_count_per_residue, n_embd]
+        x_atom = x_atom * atom_mask.unsqueeze(
+            -1
+        )  # [num_residues, max_atom_count_per_residue, n_embd]
+
+        # Now we need to reshape the atom-level tokens according to the batch size
         atom_count_per_residue = torch.bincount(pocket_batch)
         dim = [
             len(atom_count_per_residue),
@@ -650,9 +684,7 @@ class NEAT(LightningModule):
         ).unsqueeze(0)
         atom_mask_final = context_range < atom_count_per_residue.unsqueeze(1)
 
-        x_final[atom_mask_final] = (
-            x[atom_mask] + x_residues[residue_mask][pocket_residue_id]
-        )
+        x_final[atom_mask_final] = x_atom[atom_mask]
 
         return x_final, atom_mask_final.clone()
 
