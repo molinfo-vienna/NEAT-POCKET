@@ -34,6 +34,7 @@ class NEAT(LightningModule):
         self.hparams.setdefault("global_cond_proj", False)
         self.hparams.setdefault("cross_attn_with_null_token", False)
         self.hparams.setdefault("residue_pooling", "sum")
+        self.hparams.setdefault("pocket_n_layer_atom_level", 1)
 
         self.save_hyperparameters()
 
@@ -106,7 +107,7 @@ class NEAT(LightningModule):
                         self.hparams.dropout,
                         self.hparams.bias,
                     )
-                    for _ in range(self.hparams.pocket_n_layer // 4)
+                    for _ in range(self.hparams.pocket_n_layer_atom_level)
                 ]
             )
 
@@ -130,7 +131,7 @@ class NEAT(LightningModule):
                         self.hparams.dropout,
                         self.hparams.bias,
                     )
-                    for _ in range(self.hparams.pocket_n_layer // 4)
+                    for _ in range(self.hparams.pocket_n_layer_atom_level)
                 ]
             )
 

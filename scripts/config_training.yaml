@@ -1,7 +1,7 @@
 accumulate_grad_batches: 4
 batch_size: 64
 bias: true
-cfg_dropout: 0.1
+cfg_dropout: 0.2
 cross_attn_with_null_token: true
 data_set: CrossDocked
 dropout: 0.1
@@ -19,7 +19,8 @@ n_layers_fm: 6
 noise_std: 2.5
 perturbation_fraction: 0.5
 perturbation_std: 0.05
-pocket_n_layer: 12
+pocket_n_layer: 4
+pocket_n_layer_atom_level: 1
 pretrained_model_path: logs/NEAT/pretrained_geom
 residue_pooling: sum
 rope: false
