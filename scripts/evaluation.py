@@ -17,7 +17,8 @@ from posebusters import PoseBusters
 from posecheck import (
     PoseCheck,
 )  # Required import; omitting posecheck can cause a segmentation fault.
-from rdkit.Chem import AllChem, Draw, MolToSmiles, rdDepictor, SDWriter
+from rdkit.Chem import AllChem, Descriptors, Draw, MolToSmiles, QED, rdDepictor, SDWriter
+from rdkit.Contrib.SA_Score import sascorer
 
 from neat.dataset import DataModule
 from neat.model.molecule_builder import MoleculeBuilder
@@ -233,11 +234,17 @@ def _write_rdkit_metrics(
 
 
 def _write_dict_metrics(
-    f, title: str, metrics: dict[str, float], *, as_percent: bool
+    f,
+    title: str,
+    metrics: dict[str, float],
+    *,
+    as_percent: bool,
+    percent_keys: set[str] | None = None,
 ) -> None:
+    percent_keys = percent_keys or set()
     f.write(f"\n{title}:\n")
     for name, value in metrics.items():
-        if as_percent:
+        if as_percent or name in percent_keys:
             f.write(f"{name}: {pct(value)}\n")
         else:
             f.write(f"{name}: {value:.2f}\n")
@@ -270,6 +277,15 @@ def write_subdir_results(
 
         if run.posecheck is not None:
             _write_dict_metrics(f, "PoseCheck metrics", run.posecheck, as_percent=False)
+
+        if run.scores is not None:
+            _write_dict_metrics(
+                f,
+                "Scores metrics",
+                run.scores,
+                as_percent=False,
+                percent_keys={"Lipinski"},
+            )
 
 
 def _write_aggregate_edm_metrics(
@@ -316,14 +332,16 @@ def _write_aggregate_dict_metrics(
     runs: list[dict[str, float]],
     *,
     as_percent: bool,
+    percent_keys: set[str] | None = None,
 ) -> None:
     if not runs:
         return
+    percent_keys = percent_keys or set()
     f.write(f"\n{title}:\n")
     for metric_name in runs[0]:
         values = [run[metric_name] for run in runs]
         mean, ci = compute_mean_and_95_ci(values)
-        if as_percent:
+        if as_percent or metric_name in percent_keys:
             f.write(f"{metric_name}: {pct(mean)} ± {pct(ci)}\n")
         else:
             f.write(f"{metric_name}: {mean:.2f} ± {ci:.2f}\n")
@@ -338,6 +356,7 @@ def write_summary(
     compute_novelty: bool,
     compute_posebusters: bool,
     compute_posecheck: bool,
+    compute_scores: bool,
     molecule_pipeline: str,
 ) -> None:
     with (data_path / "evaluation_summary.txt").open("w") as f:
@@ -386,6 +405,18 @@ def write_summary(
             else:
                 f.write("PoseCheck metrics: No data available\n")
 
+        if compute_scores:
+            if aggregate.scores:
+                _write_aggregate_dict_metrics(
+                    f,
+                    "Scores metrics",
+                    aggregate.scores,
+                    as_percent=False,
+                    percent_keys={"Lipinski"},
+                )
+            else:
+                f.write("Scores metrics: No data available\n")
+
 
 # ---------------------------------------------------------------------------
 # Per-run and aggregate results
@@ -413,6 +444,7 @@ class SubdirRunResult:
     rdkit: RdkitMetrics | None = None
     posebusters: dict[str, float] | None = None
     posecheck: dict[str, float] | None = None
+    scores: dict[str, float] | None = None
 
 
 @dataclass
@@ -423,6 +455,7 @@ class AggregateResults:
     edm_valid_x_unique: list[float] = field(default_factory=list)
     posebusters: list[dict[str, float]] = field(default_factory=list)
     posecheck: list[dict[str, float]] = field(default_factory=list)
+    scores: list[dict[str, float]] = field(default_factory=list)
     rdkit_valid: list[float] = field(default_factory=list)
     rdkit_valid_x_unique: list[float] = field(default_factory=list)
     rdkit_valid_x_unique_x_novel: list[float] = field(default_factory=list)
@@ -439,6 +472,9 @@ class AggregateResults:
 
         if run.posecheck is not None:
             self.posecheck.append(run.posecheck)
+
+        if run.scores is not None:
+            self.scores.append(run.scores)
 
         if run.rdkit is not None:
             self.rdkit_valid.append(run.rdkit.valid)
@@ -463,6 +499,40 @@ def _compute_rdkit_metrics_from_smiles(
 # ---------------------------------------------------------------------------
 
 
+def compute_scores_from_mols(mols: list) -> dict[str, float] | None:
+    sa_scores: list[float] = []
+    qed_scores: list[float] = []
+    lipinski_pass: list[float] = []
+
+    for mol in mols:
+        if mol is None:
+            continue
+
+        mol_weight = Descriptors.ExactMolWt(mol)
+        logp = Descriptors.MolLogP(mol)
+        num_h_donors = Descriptors.NumHDonors(mol)
+        num_h_acceptors = Descriptors.NumHAcceptors(mol)
+        lipinski_bool = (
+            mol_weight < 500
+            and logp < 5
+            and num_h_donors < 5
+            and num_h_acceptors < 10
+        )
+
+        sa_scores.append(sascorer.calculateScore(mol))
+        qed_scores.append(QED.qed(mol))
+        lipinski_pass.append(float(lipinski_bool))
+
+    if not sa_scores:
+        return None
+
+    return {
+        "Synthetic accessibility": float(np.mean(sa_scores)),
+        "QED": float(np.mean(qed_scores)),
+        "Lipinsk rule of 5": float(np.mean(lipinski_pass)),
+    }
+
+
 def run_posebusters(subdir: Path) -> dict[str, float]:
     buster = PoseBusters(config="mol")
     pred_file = subdir / "generated_mols.sdf"
@@ -480,6 +550,7 @@ def evaluate_subdirectory(
     compute_novelty: bool,
     compute_posebusters: bool,
     compute_posecheck: bool,
+    compute_scores: bool,
     use_bond_predictor: bool,
     molecule_pipeline: str,
 ) -> SubdirRunResult:
@@ -526,6 +597,9 @@ def evaluate_subdirectory(
         pocket_path = subdir / "pocket.pdb"
         result.posecheck = compute_pose_check_metrics_from_mols(mols, str(pocket_path))
 
+    if compute_scores:
+        result.scores = compute_scores_from_mols(mols)
+
     write_subdir_results(
         subdir,
         params,
@@ -551,6 +625,7 @@ def evaluate(args: argparse.Namespace) -> None:
     compute_novelty = bool(params.get("compute_novelty", False))
     compute_posebusters = bool(params.get("compute_posebusters", False))
     compute_posecheck = bool(params.get("compute_posecheck", False))
+    compute_scores = bool(params.get("compute_scores", False))
     use_bond_predictor = params.get("bond_predictor_path") is not None
     molecule_pipeline = molecule_pipeline_label(
         params, use_bond_predictor=use_bond_predictor
@@ -574,6 +649,7 @@ def evaluate(args: argparse.Namespace) -> None:
             compute_novelty=compute_novelty,
             compute_posebusters=compute_posebusters,
             compute_posecheck=compute_posecheck,
+            compute_scores=compute_scores,
             use_bond_predictor=use_bond_predictor,
             molecule_pipeline=molecule_pipeline,
         )
@@ -587,6 +663,7 @@ def evaluate(args: argparse.Namespace) -> None:
         compute_novelty=compute_novelty,
         compute_posebusters=compute_posebusters,
         compute_posecheck=compute_posecheck,
+        compute_scores=compute_scores,
         molecule_pipeline=molecule_pipeline,
     )
 

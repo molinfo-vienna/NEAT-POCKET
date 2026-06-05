@@ -5,6 +5,7 @@ compute_edm: true
 compute_novelty: true
 compute_posebusters: true
 compute_posecheck: true
+compute_scores: true
 
 # Optional: path to bond predictor checkpoint directory.
 # If set, evaluation will also compute validity/uniqueness/novelty via bond predictor.
