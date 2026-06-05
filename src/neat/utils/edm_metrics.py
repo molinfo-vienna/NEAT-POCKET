@@ -816,7 +816,7 @@ def build_xae_molecule(positions, atom_types, dataset_info, bond_orders=None):
     return X, A, E
 
 
-def edm_metrics(x, pos, batch, dataset):
+def compute_edm_metrics_from_tensors(x, pos, batch, dataset):
     # atom/mol stability depends on the dataset
     # atom stability depends on the group of molecules - cannot be computed for individual molecules and mean-aggregated
     if dataset == "QM9":

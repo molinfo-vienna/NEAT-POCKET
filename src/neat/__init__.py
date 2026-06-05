@@ -1,6 +1,6 @@
 from .dataset import DataModule, CrossDockedDataSet, GEOMDataSet, QM9DataSet
 from .model import NEAT, GenerationMonitor, MoleculeBuilder
-from .utils import edm_metrics
+from .utils import compute_edm_metrics_from_tensors
 
 __all__ = [
     "DataModule",
@@ -10,5 +10,5 @@ __all__ = [
     "GenerationMonitor",
     "MoleculeBuilder",
     "NEAT",
-    "edm_metrics",
+    "compute_edm_metrics_from_tensors",
 ]

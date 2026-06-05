@@ -3,7 +3,7 @@ from posecheck import PoseCheck
 from posecheck.utils.chem import remove_radicals
 
 
-def compute_pose_check_metrics(mols_xyz2mol, pocket_path):
+def compute_pose_check_metrics_from_mols(mols: list, pocket_path: str) -> dict[str, float]:
     # Initialize the PoseCheck object
     pc = PoseCheck()
 
@@ -13,7 +13,7 @@ def compute_pose_check_metrics(mols_xyz2mol, pocket_path):
     # Load ligands from an SDF file
     # pc.load_ligands_from_sdf("data/examples/1a2g_ligand.sdf")
     # Alternatively, load RDKit molecules directly
-    pc_mols = [remove_radicals(mol) for mol in mols_xyz2mol if mol is not None]
+    pc_mols = [remove_radicals(mol) for mol in mols if mol is not None]
     pc.load_ligands_from_mols(pc_mols)
 
     # Check for clashes
@@ -34,7 +34,7 @@ def compute_pose_check_metrics(mols_xyz2mol, pocket_path):
         "Hydrophobic",
         "PiStacking",
     ]
-    n_lig_atoms = [lig.GetNumAtoms() for lig in mols_xyz2mol if lig is not None]
+    n_lig_atoms = [lig.GetNumAtoms() for lig in mols if lig is not None]
     for i_type in interaction_types:
         cols = [col for col in interactions.columns if col[2] == i_type]
         i_sum = interactions[cols].sum(axis=1)

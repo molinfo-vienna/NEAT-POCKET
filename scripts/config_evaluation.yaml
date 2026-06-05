@@ -1,9 +1,10 @@
-data_path: output/version_72
+data_path: output/version_21
 data_subdir: conditional
 data_set: CrossDocked
+compute_edm: true
 compute_novelty: true
-compute_edm: false
-compute_posebusters: false
+compute_posebusters: true
+compute_posecheck: true
 
 # Optional: path to bond predictor checkpoint directory.
 # If set, evaluation will also compute validity/uniqueness/novelty via bond predictor.
