@@ -249,7 +249,6 @@ def _write_dict_metrics(
         else:
             f.write(f"{name}: {value:.2f}\n")
 
-
 def write_subdir_results(
     subdir: Path,
     params: dict,
@@ -523,13 +522,13 @@ def compute_scores_from_mols(mols: list) -> dict[str, float] | None:
         qed_scores.append(QED.qed(mol))
         lipinski_pass.append(float(lipinski_bool))
 
-    if not sa_scores:
+    if not sa_scores or not qed_scores or not lipinski_pass:
         return None
 
     return {
-        "Synthetic accessibility": float(np.mean(sa_scores)),
+        "SA": float(np.mean(sa_scores)),
         "QED": float(np.mean(qed_scores)),
-        "Lipinsk rule of 5": float(np.mean(lipinski_pass)),
+        "Lipinski": float(np.mean(lipinski_pass)),
     }
 
 
