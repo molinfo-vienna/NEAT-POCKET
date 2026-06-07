@@ -535,8 +535,20 @@ def compute_scores_from_mols(mols: list) -> dict[str, float] | None:
 
 def run_posebusters(subdir: Path) -> dict[str, float]:
     buster = PoseBusters(config="mol")
-    pred_file = subdir / "generated_mols.sdf"
-    df = buster.bust([str(pred_file)], None, None, full_report=False)
+    pred_file = Path(subdir / "generated_mols.sdf")
+    cond_file = None
+    for file in subdir.iterdir():
+        if file.name.endswith(".pdb"):
+            cond_file = Path(file)
+            break
+    if cond_file is not None:
+        buster = PoseBusters(config="dock")
+    df = buster.bust(
+        mol_pred=[pred_file], 
+        mol_true=None, 
+        mol_cond=cond_file, 
+        full_report=False
+    )
     df.to_csv(subdir / "posebusters_report.csv", index=False)
     return {column: df[column].mean().item() for column in df.columns}
 
