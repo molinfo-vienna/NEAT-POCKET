@@ -2,11 +2,13 @@ import argparse
 import os
 from datetime import datetime
 
+from rdkit import Chem
 import torch
 import torch_geometric
 import yaml
 from lightning import seed_everything
 from torch_geometric.data import Batch
+import numpy as np
 
 from neat.dataset import DataModule
 from neat.model import NEAT
@@ -103,7 +105,23 @@ def generate(args: argparse.Namespace) -> None:
 
             in_pdb_file = test_data.get_pocket_path_from_data_point(test_data[data_idx])
             out_pdb_file = os.path.join(out_dir, "pocket.pdb")
-            center_pdb(in_pdb_file, out_pdb_file)
+            pocket_center = center_pdb(in_pdb_file, out_pdb_file, return_center=True)
+            in_sdf_file = in_pdb_file.replace("_pocket10.pdb", ".sdf")
+            out_sdf_file = os.path.join(out_dir, "ligand.sdf")
+            supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False)
+            mol = supplier[0]
+            conformer = mol.GetConformer()
+            for i in range(mol.GetNumAtoms()):
+                pos = conformer.GetAtomPosition(i)
+                # Convert Point3D to numpy array, subtract center, and update
+                new_pos = np.array([pos.x, pos.y, pos.z]) - pocket_center
+                conformer.SetAtomPosition(i, new_pos)
+
+            # 4. Save the modified molecule back to an SDF file
+            writer = Chem.SDWriter(out_sdf_file)
+            writer.write(mol)
+            writer.close()
+
             subset_mask = torch.isin(
                 generated_mols.batch,
                 torch.arange(

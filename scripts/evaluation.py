@@ -36,6 +36,7 @@ from neat.dataset import DataModule
 from neat.model.molecule_builder import MoleculeBuilder
 from neat.utils.edm_metrics import compute_edm_metrics_from_tensors
 from neat.utils.pose_check_metrics import compute_pose_check_metrics_from_mols
+from neat.utils.sbdd_metrics import ClashEvaluator, GninaEvaluator
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -290,6 +291,12 @@ def write_subdir_results(
         if run.posecheck is not None:
             _write_dict_metrics(f, "PoseCheck metrics", run.posecheck, as_percent=False)
 
+        if run.drugflow is not None:
+            _write_dict_metrics(f, "DrugFlow metrics", run.drugflow, as_percent=False)
+
+        if run.vina is not None:
+            _write_dict_metrics(f, "Vina metrics", run.vina, as_percent=False)
+
         if run.scores is not None:
             _write_dict_metrics(
                 f,
@@ -369,6 +376,8 @@ def write_summary(
     compute_posebusters: bool,
     compute_posecheck: bool,
     compute_scores: bool,
+    compute_drugflow: bool,
+    compute_vina: bool,
     molecule_pipeline: str,
 ) -> None:
     with (data_path / "evaluation_summary.txt").open("w") as f:
@@ -429,6 +438,22 @@ def write_summary(
             else:
                 f.write("Scores metrics: No data available\n")
 
+        if compute_drugflow:
+            if aggregate.drugflow:
+                _write_aggregate_dict_metrics(
+                    f, "DrugFlow metrics", aggregate.drugflow, as_percent=False
+                )
+            else:
+                f.write("DrugFlow metrics: No data available\n")
+
+        if compute_vina:
+            if aggregate.vina:
+                _write_aggregate_dict_metrics(
+                    f, "Vina metrics", aggregate.vina, as_percent=False
+                )
+            else:
+                f.write("Vina metrics: No data available\n")
+
 
 # ---------------------------------------------------------------------------
 # Per-run and aggregate results
@@ -457,6 +482,8 @@ class SubdirRunResult:
     posebusters: dict[str, float] | None = None
     posecheck: dict[str, float] | None = None
     scores: dict[str, float] | None = None
+    drugflow: dict[str, float] | None = None
+    vina: dict[str, float] | None = None
 
 
 @dataclass
@@ -468,6 +495,8 @@ class AggregateResults:
     posebusters: list[dict[str, float]] = field(default_factory=list)
     posecheck: list[dict[str, float]] = field(default_factory=list)
     scores: list[dict[str, float]] = field(default_factory=list)
+    drugflow: list[dict[str, float]] = field(default_factory=list)
+    vina: list[dict[str, float]] = field(default_factory=list)
     rdkit_valid: list[float] = field(default_factory=list)
     rdkit_valid_x_unique: list[float] = field(default_factory=list)
     rdkit_valid_x_unique_x_novel: list[float] = field(default_factory=list)
@@ -487,6 +516,12 @@ class AggregateResults:
 
         if run.scores is not None:
             self.scores.append(run.scores)
+
+        if run.drugflow is not None:
+            self.drugflow.append(run.drugflow)
+
+        if run.vina is not None:
+            self.vina.append(run.vina)
 
         if run.rdkit is not None:
             self.rdkit_valid.append(run.rdkit.valid)
@@ -569,6 +604,8 @@ def evaluate_subdirectory(
     compute_posebusters: bool,
     compute_posecheck: bool,
     compute_scores: bool,
+    compute_drugflow: bool,
+    compute_vina: bool,
     use_bond_predictor: bool,
     molecule_pipeline: str,
 ) -> SubdirRunResult:
@@ -615,6 +652,25 @@ def evaluate_subdirectory(
         pocket_path = subdir / "pocket.pdb"
         result.posecheck = compute_pose_check_metrics_from_mols(mols, str(pocket_path))
 
+    if compute_drugflow:
+        clash_evaluator = ClashEvaluator()
+        pocket_path = subdir / "pocket.pdb"
+        result.drugflow = clash_evaluator.evaluate_mols(mols, str(pocket_path))
+
+    if compute_vina:
+        gnina_evaluator = GninaEvaluator()
+        pocket_path = subdir / "pocket.pdb"
+        mol_sdf_path = subdir / "generated_mols.sdf"
+        ligand_sdf_path = subdir / "ligand.sdf"
+        vina_results = gnina_evaluator.evaluate_mols(
+            mol_sdf_path, str(pocket_path), str(ligand_sdf_path), minimize=True
+        )
+        vin_min_results = {f"{key}_min": value for key, value in vina_results.items()}
+        vina_results = gnina_evaluator.evaluate_mols(
+            mol_sdf_path, str(pocket_path), str(ligand_sdf_path), minimize=False
+        )
+        result.vina = vina_results | vin_min_results
+
     if compute_scores:
         result.scores = compute_scores_from_mols(mols)
 
@@ -645,6 +701,8 @@ def eval_worker(
     compute_posebusters,
     compute_posecheck,
     compute_scores,
+    compute_drugflow,
+    compute_vina,
     use_bond_predictor,
     molecule_pipeline,
     log_filename="evaluation.log",
@@ -674,6 +732,8 @@ def eval_worker(
                 compute_posebusters=compute_posebusters,
                 compute_posecheck=compute_posecheck,
                 compute_scores=compute_scores,
+                compute_drugflow=compute_drugflow,
+                compute_vina=compute_vina,
                 use_bond_predictor=use_bond_predictor,
                 molecule_pipeline=molecule_pipeline,
             )
@@ -693,6 +753,8 @@ def evaluate(args: argparse.Namespace) -> None:
     compute_posebusters = bool(params.get("compute_posebusters", False))
     compute_posecheck = bool(params.get("compute_posecheck", False))
     compute_scores = bool(params.get("compute_scores", False))
+    compute_drugflow = bool(params.get("compute_drugflow", False))
+    compute_vina = bool(params.get("compute_vina", False))
     use_bond_predictor = params.get("bond_predictor_path") is not None
     molecule_pipeline = molecule_pipeline_label(
         params, use_bond_predictor=use_bond_predictor
@@ -720,6 +782,8 @@ def evaluate(args: argparse.Namespace) -> None:
             compute_posebusters=compute_posebusters,
             compute_posecheck=compute_posecheck,
             compute_scores=compute_scores,
+            compute_drugflow=compute_drugflow,
+            compute_vina=compute_vina,
             use_bond_predictor=use_bond_predictor,
             molecule_pipeline=molecule_pipeline,
         )
@@ -728,7 +792,7 @@ def evaluate(args: argparse.Namespace) -> None:
         #     runs = list(executor.map(worker_func, subdirs))
         # 2. Switch to executor.submit and as_completed for the progress bar
         runs_dict = {}
-        with ProcessPoolExecutor(max_workers=4) as executor:
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
             # Submit all jobs to the executor immediately
             futures = {
                 executor.submit(worker_func, subdir): i
@@ -759,6 +823,8 @@ def evaluate(args: argparse.Namespace) -> None:
                 compute_posebusters=compute_posebusters,
                 compute_posecheck=compute_posecheck,
                 compute_scores=compute_scores,
+                compute_drugflow=compute_drugflow,
+                compute_vina=compute_vina,
                 use_bond_predictor=use_bond_predictor,
                 molecule_pipeline=molecule_pipeline,
             )
@@ -776,6 +842,8 @@ def evaluate(args: argparse.Namespace) -> None:
         compute_posebusters=compute_posebusters,
         compute_posecheck=compute_posecheck,
         compute_scores=compute_scores,
+        compute_drugflow=compute_drugflow,
+        compute_vina=compute_vina,
         molecule_pipeline=molecule_pipeline,
     )
 

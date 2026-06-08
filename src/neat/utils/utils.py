@@ -2,7 +2,7 @@ import numpy as np
 from Bio.PDB import PDBParser, PDBIO
 
 
-def center_pdb(input_path, output_path):
+def center_pdb(input_path, output_path, return_center=False):
     # 1. Initialize the parser and load the structure
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("protein", input_path)
@@ -29,3 +29,6 @@ def center_pdb(input_path, output_path):
     io = PDBIO()
     io.set_structure(structure)
     io.save(output_path)
+
+    if return_center:
+        return geometric_center

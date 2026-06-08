@@ -129,7 +129,7 @@ class GenerationMonitor(Callback):
                         for mol in mols_for_pocket:
                             if mol is None:
                                 continue
-                            clash_results = clash_evaluator.evaluate(
+                            clash_results = clash_evaluator.evaluate_mol(
                                 mol, temp_file.name
                             )
                             clash_score_mean = clash_results["clash_score_between_mean"]
