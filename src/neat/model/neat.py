@@ -34,7 +34,7 @@ class NEAT(LightningModule):
         self.hparams.setdefault("global_cond_proj", False)
         self.hparams.setdefault("cross_attn_with_null_token", False)
         self.hparams.setdefault("residue_pooling", "sum")
-        self.hparams.setdefault("pocket_n_layer_atom_level", params["pocket_n_layer"] // 4)
+        self.hparams.setdefault("pocket_n_layer_atom_level", 1)
 
         self.save_hyperparameters()
 
@@ -1117,7 +1117,7 @@ class NEAT(LightningModule):
         prefix_pos: Tensor = None,
         time_step_spacing: str = "linear",
         integration_method: str = "euler_maruyama",
-        cfg_factor: float = 1.5,
+        cfg_factor: float = 0.0,
         pocket_info: dict | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Generate a molecule using the flow matching network.
