@@ -83,12 +83,10 @@ class MoleculeBuilder:
         Returns:
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple containing the atom types, positions, and batch indices.
         """
-        generated_mols = (
-            torch.load(
-                os.path.join(files_path, "generated_mols.pt"), weights_only=False
-            )
-            .detach()
-            .cpu()
+        generated_mols = torch.load(
+            os.path.join(files_path, "generated_mols.pt"),
+            weights_only=False,
+            map_location="cpu",
         )
         return generated_mols.x, generated_mols.pos, generated_mols.batch
 

@@ -8,6 +8,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
+from tqdm import tqdm
+import logging
 
 import numpy as np
 import py3Dmol
@@ -17,7 +21,15 @@ from posebusters import PoseBusters
 from posecheck import (
     PoseCheck,
 )  # Required import; omitting posecheck can cause a segmentation fault.
-from rdkit.Chem import AllChem, Descriptors, Draw, MolToSmiles, QED, rdDepictor, SDWriter
+from rdkit.Chem import (
+    AllChem,
+    Descriptors,
+    Draw,
+    MolToSmiles,
+    QED,
+    rdDepictor,
+    SDWriter,
+)
 from rdkit.Contrib.SA_Score import sascorer
 
 from neat.dataset import DataModule
@@ -248,6 +260,7 @@ def _write_dict_metrics(
             f.write(f"{name}: {pct(value)}\n")
         else:
             f.write(f"{name}: {value:.2f}\n")
+
 
 def write_subdir_results(
     subdir: Path,
@@ -512,10 +525,7 @@ def compute_scores_from_mols(mols: list) -> dict[str, float] | None:
         num_h_donors = Descriptors.NumHDonors(mol)
         num_h_acceptors = Descriptors.NumHAcceptors(mol)
         lipinski_bool = (
-            mol_weight < 500
-            and logp < 5
-            and num_h_donors < 5
-            and num_h_acceptors < 10
+            mol_weight < 500 and logp < 5 and num_h_donors < 5 and num_h_acceptors < 10
         )
 
         sa_scores.append(sascorer.calculateScore(mol))
@@ -543,10 +553,7 @@ def run_posebusters(subdir: Path) -> dict[str, float]:
     if cond_file is not None:
         buster = PoseBusters(config="dock")
     df = buster.bust(
-        mol_pred=[pred_file], 
-        mol_true=None, 
-        mol_cond=cond_file, 
-        full_report=False
+        mol_pred=[pred_file], mol_true=None, mol_cond=cond_file, full_report=False
     )
     df.to_csv(subdir / "posebusters_report.csv", index=False)
     return {column: df[column].mean().item() for column in df.columns}
@@ -629,6 +636,55 @@ def evaluate_subdirectory(
 # ---------------------------------------------------------------------------
 
 
+def eval_worker(
+    subdir,
+    params,
+    reference_smiles,
+    compute_edm,
+    compute_novelty,
+    compute_posebusters,
+    compute_posecheck,
+    compute_scores,
+    use_bond_predictor,
+    molecule_pipeline,
+    log_filename="evaluation.log",
+):
+
+    # 1. Disable all standard Python logging for this process
+    logging.getLogger().setLevel(logging.CRITICAL)
+
+    # 2. Open the log file
+    with open(log_filename, "a") as log_file:
+        # Save copies of the original low-level system streams
+        old_stdout_fd = os.dup(1)
+        old_stderr_fd = os.dup(2)
+
+        try:
+            # Redirect system stdout (1) and stderr (2) to the log file descriptor
+            os.dup2(log_file.fileno(), 1)
+            os.dup2(log_file.fileno(), 2)
+
+            # Execute your function in complete stealth mode
+            return evaluate_subdirectory(
+                subdir,
+                params,
+                reference_smiles,
+                compute_edm=compute_edm,
+                compute_novelty=compute_novelty,
+                compute_posebusters=compute_posebusters,
+                compute_posecheck=compute_posecheck,
+                compute_scores=compute_scores,
+                use_bond_predictor=use_bond_predictor,
+                molecule_pipeline=molecule_pipeline,
+            )
+        finally:
+            # Always restore the low-level streams back to the terminal
+            os.dup2(old_stdout_fd, 1)
+            os.dup2(old_stderr_fd, 2)
+            os.close(old_stdout_fd)
+            os.close(old_stderr_fd)
+
+
 def evaluate(args: argparse.Namespace) -> None:
     params = load_evaluation_config(args.config_file)
 
@@ -650,12 +706,15 @@ def evaluate(args: argparse.Namespace) -> None:
     data_path = ROOT / params["data_path"] / params["data_subdir"]
     aggregate = AggregateResults()
 
-    for subdir in iter_result_subdirs(data_path):
-        print(f"Evaluating {subdir.name}...")
-        run = evaluate_subdirectory(
-            subdir,
-            params,
-            reference_smiles,
+    num_workers = params.get("num_workers", 1)
+    runs = []
+
+    if num_workers > 1:
+        subdirs = list(iter_result_subdirs(data_path))
+        worker_func = partial(
+            eval_worker,
+            params=params,
+            reference_smiles=reference_smiles,
             compute_edm=compute_edm,
             compute_novelty=compute_novelty,
             compute_posebusters=compute_posebusters,
@@ -664,6 +723,48 @@ def evaluate(args: argparse.Namespace) -> None:
             use_bond_predictor=use_bond_predictor,
             molecule_pipeline=molecule_pipeline,
         )
+        # with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        #     # executor.map automatically distributes the subdirs across the 4 workers
+        #     runs = list(executor.map(worker_func, subdirs))
+        # 2. Switch to executor.submit and as_completed for the progress bar
+        runs_dict = {}
+        with ProcessPoolExecutor(max_workers=4) as executor:
+            # Submit all jobs to the executor immediately
+            futures = {
+                executor.submit(worker_func, subdir): i
+                for i, subdir in enumerate(subdirs)
+            }
+
+            # Wrap as_completed with tqdm to get a live updating progress bar
+            for future in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc="Evaluating Subdirectories",
+            ):
+                # Store the result mapped to its original index to preserve order
+                original_index = futures[future]
+                runs_dict[original_index] = future.result()
+
+        # 3. Sort by original index to ensure 'runs' matches the input 'subdirs' order
+        runs = [runs_dict[i] for i in sorted(runs_dict.keys())]
+    else:
+        for subdir in iter_result_subdirs(data_path):
+            print(f"Evaluating {subdir.name}...")
+            run = evaluate_subdirectory(
+                subdir,
+                params,
+                reference_smiles,
+                compute_edm=compute_edm,
+                compute_novelty=compute_novelty,
+                compute_posebusters=compute_posebusters,
+                compute_posecheck=compute_posecheck,
+                compute_scores=compute_scores,
+                use_bond_predictor=use_bond_predictor,
+                molecule_pipeline=molecule_pipeline,
+            )
+            runs.append(run)
+
+    for run in runs:
         aggregate.record(run)
 
     write_summary(

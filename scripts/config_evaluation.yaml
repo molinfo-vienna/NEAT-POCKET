@@ -1,6 +1,7 @@
-data_path: output/version_21
+data_path: output/version_94
 data_subdir: conditional
 data_set: CrossDocked
+num_workers: 16
 compute_edm: true
 compute_novelty: true
 compute_posebusters: true

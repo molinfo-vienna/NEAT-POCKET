@@ -4,6 +4,7 @@ build
 data
 logs 
 output
+evaluation.log
 trained_models*
 *.egg-info
 *.env
