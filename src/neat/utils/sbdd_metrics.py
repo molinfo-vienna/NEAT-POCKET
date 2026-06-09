@@ -18,12 +18,15 @@ class GninaEvaluator:
         self.gnina = gnina
 
     def evaluate_mols(
-        self, sdf_path, pdb_path=None, ligand_path=None, minimize=False
+        self, sdf_path, pdb_path=None, ligand_path=None, minimize=False, cnn_scoring=False
     ) -> dict[str, float]:
         if minimize:
             minimize_flag = "--minimize"
         else:
             minimize_flag = "--score_only"
+        if not cnn_scoring:
+            minimize_flag += " --cnn_scoring none"
+            
 
         # gnina result of the original ligand
         if ligand_path is not None:
@@ -31,14 +34,14 @@ class GninaEvaluator:
             gnina_result = subprocess.run(
                 gnina_cmd, shell=True, capture_output=True, text=True
             )
-            ligand_scores = self.read_gnina_results(gnina_result)
+            ligand_scores = self.read_gnina_results(gnina_result, cnn_scoring=cnn_scoring)
 
         # gnina results of the generated mols
         gnina_cmd = f"{self.gnina} -r {str(pdb_path)} -l {str(sdf_path)} {minimize_flag} --seed 42 --no_gpu"
         gnina_result = subprocess.run(
             gnina_cmd, shell=True, capture_output=True, text=True
         )
-        generated_mol_scores = self.read_gnina_results(gnina_result)
+        generated_mol_scores = self.read_gnina_results(gnina_result, cnn_scoring=cnn_scoring)
         if ligand_path is not None:
             generated_mol_scores["high_affinity"] = (
                 list(np.array(generated_mol_scores["vina_score"]) < ligand_scores["vina_score"][0])
@@ -51,23 +54,25 @@ class GninaEvaluator:
         return mean_results
 
     @staticmethod
-    def read_gnina_results(gnina_result):
-        res = {
-            "vina_score": None,
-            "gnina_score": None,
-            "minimisation_rmsd": None,
-            "cnn_score": None,
-        }
+    def read_gnina_results(gnina_result, cnn_scoring= False):
+
+        if cnn_scoring:
+            metrics = {
+                "vina_score": [],
+                "gnina_score": [],
+                "cnn_score": [],
+                "minimisation_rmsd": [],
+
+            }
+        else:
+            metrics = {
+                "vina_score": [],
+
+            }
+        
         if gnina_result.returncode != 0:
             print(gnina_result.stderr)
-            return res
-
-        metrics = {
-            "vina_score": [],
-            "gnina_score": [],
-            "cnn_score": [],
-            "minimisation_rmsd": [],
-        }
+            return metrics
 
         # Step 1: Parse and collect all data points
         for line in gnina_result.stdout.split("\n"):
@@ -76,19 +81,38 @@ class GninaEvaluator:
                 continue
 
             # Split by whitespace, ignoring multiple spaces
-            parts = line.split()
 
             if line.startswith("Affinity:"):
-                metrics["vina_score"].append(float(parts[1]))
+                try:
+                    value = float(line.split()[1])
+                    metrics["vina_score"].append(value)
+                except Exception as e:
+                    print(f"Error parsing line: '{line}'. Error: {e}")
+                    continue
 
-            elif line.startswith("CNNaffinity:"):
-                metrics["gnina_score"].append(float(parts[1]))
+            elif line.startswith("CNNaffinity:") and cnn_scoring:
+                try:
+                    value = float(line.split()[1])
+                    metrics["gnina_score"].append(value)
+                except Exception as e:
+                    print(f"Error parsing line: '{line}'. Error: {e}")
+                    continue
 
-            elif line.startswith("CNNscore:"):
-                metrics["cnn_score"].append(float(parts[1]))
+            elif line.startswith("CNNscore:") and cnn_scoring:
+                try:
+                    value = float(line.split()[1])
+                    metrics["cnn_score"].append(value)
+                except Exception as e:
+                    print(f"Error parsing line: '{line}'. Error: {e}")
+                    continue
 
-            elif line.startswith("RMSD:"):
-                metrics["minimisation_rmsd"].append(float(parts[1]))
+            elif line.startswith("RMSD:") and cnn_scoring:
+                try:
+                    value = float(line.split()[1])
+                    metrics["minimisation_rmsd"].append(value)
+                except Exception as e:
+                    print(f"Error parsing line: '{line}'. Error: {e}")
+                    continue
 
         return metrics
 
