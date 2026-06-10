@@ -1,14 +1,15 @@
-data_path: output/version_94
+data_path: output/diffsbdd
 data_subdir: conditional
 data_set: CrossDocked
-num_workers: 16
+num_workers: 12
+compute_drugflow_clashes: true
 compute_edm: true
 compute_novelty: true
 compute_posebusters: true
 compute_posecheck: true
-compute_scores: true
-compute_drugflow: true
+compute_physchem: true
 compute_vina: true
+use_sdf: true
 
 # Optional: path to bond predictor checkpoint directory.
 # If set, evaluation will also compute validity/uniqueness/novelty via bond predictor.

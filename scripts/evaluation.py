@@ -1,8 +1,9 @@
-"""Evaluate generated molecules from NEAT model outputs."""
+"""Evaluate generated molecules."""
 
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -25,9 +26,12 @@ from rdkit.Chem import (
     AllChem,
     Descriptors,
     Draw,
+    Mol,
     MolToSmiles,
     QED,
     rdDepictor,
+    SanitizeMol,
+    SDMolSupplier,
     SDWriter,
 )
 from rdkit.Contrib.SA_Score import sascorer
@@ -157,28 +161,43 @@ def save_3d_molecules_visualizations_to_html(
 
 
 def compute_validity_uniqueness_novelty(
-    smiles: list[str | None],
+    mols: list[Mol],
     reference_smiles: list[str] | None = None,
 ) -> tuple[float, float, float | None]:
     """Return validity, uniqueness, and optional novelty ratios."""
-    unique_smiles: set[str] = set()
+
+    smiles: list[str] = []
     num_valid = 0
 
-    for smile in smiles:
-        if smile is None:
-            continue
-        num_valid += 1
-        unique_smiles.add(smile)
+    # Validity computed as number of valid molecules / total number of molecules
+    # Valid molecules are those that are not None, can be sanitized, and can be converted to a canonical SMILES string
+    for mol in mols:
+        if mol is not None:
+            mol_copy = copy.deepcopy(mol)
+            sanitization_flag = SanitizeMol(mol_copy)
+            if int(sanitization_flag) != 0:
+                continue
+            smile = MolToSmiles(mol, canonical=True)
+            if smiles is not None:
+                smiles.append(smile)
+                num_valid += 1
 
-    p_valid = num_valid / len(smiles)
-    p_valid_unique = len(unique_smiles) / len(smiles)
+    p_valid = num_valid / len(mols)
 
+    # Uniqueness computed as number of unique canonical SMILES strings / total number of molecules
+    unique_smiles = set[str](smiles)
+    p_valid_unique = len(unique_smiles) / len(mols)
+
+    # Novelty computed as number of unique canonical SMILES strings that are not in the reference set / total number of molecules
     if reference_smiles is None:
         return p_valid, p_valid_unique, None
 
     ref_set = set(reference_smiles)
     num_novel = len(unique_smiles - ref_set)
-    return p_valid, p_valid_unique, num_novel / len(smiles)
+
+    p_valid_unique_novel = num_novel / len(mols)
+
+    return p_valid, p_valid_unique, p_valid_unique_novel
 
 
 def compute_mean_and_95_ci(data: list[float]) -> tuple[float, float]:
@@ -292,16 +311,22 @@ def write_subdir_results(
             _write_dict_metrics(f, "PoseCheck metrics", run.posecheck, as_percent=False)
 
         if run.drugflow is not None:
-            _write_dict_metrics(f, "DrugFlow metrics", run.drugflow, as_percent=False)
+            _write_dict_metrics(
+                f, 
+                "DrugFlow metrics", 
+                run.drugflow, 
+                as_percent=False, 
+                percent_keys={"no_clashes"}
+            )
 
         if run.vina is not None:
             _write_dict_metrics(f, "Vina metrics", run.vina, as_percent=False)
 
-        if run.scores is not None:
+        if run.physchem is not None:
             _write_dict_metrics(
                 f,
-                "Scores metrics",
-                run.scores,
+                "Physchem metrics",
+                run.physchem,
                 as_percent=False,
                 percent_keys={"Lipinski"},
             )
@@ -375,8 +400,8 @@ def write_summary(
     compute_novelty: bool,
     compute_posebusters: bool,
     compute_posecheck: bool,
-    compute_scores: bool,
-    compute_drugflow: bool,
+    compute_physchem: bool,
+    compute_drugflow_clashes: bool,
     compute_vina: bool,
     molecule_pipeline: str,
 ) -> None:
@@ -426,22 +451,26 @@ def write_summary(
             else:
                 f.write("PoseCheck metrics: No data available\n")
 
-        if compute_scores:
-            if aggregate.scores:
+        if compute_physchem:
+            if aggregate.physchem:
                 _write_aggregate_dict_metrics(
                     f,
-                    "Scores metrics",
-                    aggregate.scores,
+                    "Physchem metrics",
+                    aggregate.physchem,
                     as_percent=False,
                     percent_keys={"Lipinski"},
                 )
             else:
-                f.write("Scores metrics: No data available\n")
+                f.write("Physchem metrics: No data available\n")
 
-        if compute_drugflow:
+        if compute_drugflow_clashes:
             if aggregate.drugflow:
                 _write_aggregate_dict_metrics(
-                    f, "DrugFlow metrics", aggregate.drugflow, as_percent=False
+                    f, 
+                    "DrugFlow metrics", 
+                    aggregate.drugflow, 
+                    as_percent=False, 
+                    percent_keys={"no_clashes"}
                 )
             else:
                 f.write("DrugFlow metrics: No data available\n")
@@ -481,7 +510,7 @@ class SubdirRunResult:
     rdkit: RdkitMetrics | None = None
     posebusters: dict[str, float] | None = None
     posecheck: dict[str, float] | None = None
-    scores: dict[str, float] | None = None
+    physchem: dict[str, float] | None = None
     drugflow: dict[str, float] | None = None
     vina: dict[str, float] | None = None
 
@@ -494,7 +523,7 @@ class AggregateResults:
     edm_valid_x_unique: list[float] = field(default_factory=list)
     posebusters: list[dict[str, float]] = field(default_factory=list)
     posecheck: list[dict[str, float]] = field(default_factory=list)
-    scores: list[dict[str, float]] = field(default_factory=list)
+    physchem: list[dict[str, float]] = field(default_factory=list)
     drugflow: list[dict[str, float]] = field(default_factory=list)
     vina: list[dict[str, float]] = field(default_factory=list)
     rdkit_valid: list[float] = field(default_factory=list)
@@ -514,8 +543,8 @@ class AggregateResults:
         if run.posecheck is not None:
             self.posecheck.append(run.posecheck)
 
-        if run.scores is not None:
-            self.scores.append(run.scores)
+        if run.physchem is not None:
+            self.physchem.append(run.physchem)
 
         if run.drugflow is not None:
             self.drugflow.append(run.drugflow)
@@ -532,11 +561,11 @@ class AggregateResults:
                 )
 
 
-def _compute_rdkit_metrics_from_smiles(
-    smiles: list[str | None], reference_smiles: list[str] | None
+def _compute_rdkit_metrics(
+    mols: list[Mol], reference_smiles: list[str] | None
 ) -> RdkitMetrics:
     valid, valid_x_unique, valid_x_unique_x_novel = compute_validity_uniqueness_novelty(
-        smiles, reference_smiles
+        mols, reference_smiles
     )
     return RdkitMetrics(valid, valid_x_unique, valid_x_unique_x_novel)
 
@@ -546,7 +575,9 @@ def _compute_rdkit_metrics_from_smiles(
 # ---------------------------------------------------------------------------
 
 
-def compute_scores_from_mols(mols: list) -> dict[str, float] | None:
+def compute_physchem_properties_from_mols(mols: list) -> dict[str, float] | None:
+    mol_weights: list[float] = []
+    num_heavy_atoms: list[int] = []
     sa_scores: list[float] = []
     qed_scores: list[float] = []
     lipinski_pass: list[float] = []
@@ -563,6 +594,8 @@ def compute_scores_from_mols(mols: list) -> dict[str, float] | None:
             mol_weight < 500 and logp < 5 and num_h_donors < 5 and num_h_acceptors < 10
         )
 
+        mol_weights.append(mol_weight)
+        num_heavy_atoms.append(mol.GetNumHeavyAtoms())
         sa_scores.append(sascorer.calculateScore(mol))
         qed_scores.append(QED.qed(mol))
         lipinski_pass.append(float(lipinski_bool))
@@ -571,6 +604,8 @@ def compute_scores_from_mols(mols: list) -> dict[str, float] | None:
         return None
 
     return {
+        "MW": float(np.mean(mol_weights)),
+        "NHA": float(np.mean(num_heavy_atoms)),
         "SA": float(np.mean(sa_scores)),
         "QED": float(np.mean(qed_scores)),
         "Lipinski": float(np.mean(lipinski_pass)),
@@ -591,47 +626,56 @@ def run_posebusters(subdir: Path) -> dict[str, float]:
         mol_pred=[pred_file], mol_true=None, mol_cond=cond_file, full_report=False
     )
     df.to_csv(subdir / "posebusters_report.csv", index=False)
-    return {column: df[column].mean().item() for column in df.columns}
+    try:
+        return {column: df[column].mean() for column in df.columns}
+    except:
+        return 0
 
 
 def evaluate_subdirectory(
     subdir: Path,
     params: dict,
-    reference_smiles: list[str] | None,
     *,
+    compute_drugflow_clashes: bool,
     compute_edm: bool,
     compute_novelty: bool,
     compute_posebusters: bool,
     compute_posecheck: bool,
-    compute_scores: bool,
-    compute_drugflow: bool,
+    compute_physchem: bool,
     compute_vina: bool,
-    use_bond_predictor: bool,
+    reference_smiles: list[str] | None,
     molecule_pipeline: str,
+    use_bond_predictor: bool,
+    use_sdf: bool,
 ) -> SubdirRunResult:
 
-    builder = MoleculeBuilder(vocab=params["data_set"])
-    x, pos, batch = builder.load_tensor_from_file(subdir)
     result = SubdirRunResult()
 
-    if use_bond_predictor:
-        mols = builder.generate_rdkit_molecules_via_bond_predictor(
-            x,
-            pos,
-            batch,
-            bond_predictor_path=params["bond_predictor_path"],
-            progress_bar=True,
-        )
-
+    if use_sdf:
+        supplier = SDMolSupplier(str(subdir / "generated_mols.sdf"))
+        mols = [mol for mol in supplier]
     else:
-        mols = builder.generate_rdkit_molecules_via_xyz2mol(
-            x, pos, batch, progress_bar=True
-        )
+        builder = MoleculeBuilder(vocab=params["data_set"])
+        x, pos, batch = builder.load_tensor_from_file(subdir)
 
-    save_molecules_to_sdf(mols, subdir / "generated_mols.sdf")
+        if use_bond_predictor:
+            mols = builder.generate_rdkit_molecules_via_bond_predictor(
+                x,
+                pos,
+                batch,
+                bond_predictor_path=params["bond_predictor_path"],
+                progress_bar=True,
+            )
 
-    result.rdkit = _compute_rdkit_metrics_from_smiles(
-        canonical_smiles_from_mols(mols), reference_smiles
+        else:
+            mols = builder.generate_rdkit_molecules_via_xyz2mol(
+                x, pos, batch, progress_bar=True
+            )
+
+        save_molecules_to_sdf(mols, subdir / "generated_mols.sdf")
+
+    result.rdkit = _compute_rdkit_metrics(
+        mols, reference_smiles
     )
 
     if compute_edm:
@@ -652,7 +696,7 @@ def evaluate_subdirectory(
         pocket_path = subdir / "pocket.pdb"
         result.posecheck = compute_pose_check_metrics_from_mols(mols, str(pocket_path))
 
-    if compute_drugflow:
+    if compute_drugflow_clashes:
         clash_evaluator = ClashEvaluator()
         pocket_path = subdir / "pocket.pdb"
         result.drugflow = clash_evaluator.evaluate_mols(mols, str(pocket_path))
@@ -671,8 +715,8 @@ def evaluate_subdirectory(
         )
         result.vina = vina_results | vin_min_results
 
-    if compute_scores:
-        result.scores = compute_scores_from_mols(mols)
+    if compute_physchem:
+        result.physchem = compute_physchem_properties_from_mols(mols)
 
     write_subdir_results(
         subdir,
@@ -682,7 +726,8 @@ def evaluate_subdirectory(
         molecule_pipeline,
     )
     save_2d_molecules_visualizations_to_png(subdir, mols)
-    save_3d_molecules_visualizations_to_html(subdir, builder, x, pos, batch)
+    if not use_sdf:
+        save_3d_molecules_visualizations_to_html(subdir, builder, x, pos, batch)
 
     return result
 
@@ -695,16 +740,17 @@ def evaluate_subdirectory(
 def eval_worker(
     subdir,
     params,
-    reference_smiles,
+    compute_drugflow_clashes,
     compute_edm,
     compute_novelty,
     compute_posebusters,
     compute_posecheck,
-    compute_scores,
-    compute_drugflow,
+    compute_physchem,
     compute_vina,
-    use_bond_predictor,
+    reference_smiles,
     molecule_pipeline,
+    use_bond_predictor,
+    use_sdf,
     log_filename="evaluation.log",
 ):
 
@@ -726,16 +772,17 @@ def eval_worker(
             return evaluate_subdirectory(
                 subdir,
                 params,
-                reference_smiles,
+                compute_drugflow_clashes=compute_drugflow_clashes,
                 compute_edm=compute_edm,
                 compute_novelty=compute_novelty,
                 compute_posebusters=compute_posebusters,
                 compute_posecheck=compute_posecheck,
-                compute_scores=compute_scores,
-                compute_drugflow=compute_drugflow,
+                compute_physchem=compute_physchem,
                 compute_vina=compute_vina,
-                use_bond_predictor=use_bond_predictor,
                 molecule_pipeline=molecule_pipeline,
+                reference_smiles=reference_smiles,
+                use_bond_predictor=use_bond_predictor,
+                use_sdf=use_sdf,
             )
         finally:
             # Always restore the low-level streams back to the terminal
@@ -748,17 +795,22 @@ def eval_worker(
 def evaluate(args: argparse.Namespace) -> None:
     params = load_evaluation_config(args.config_file)
 
+    compute_drugflow_clashes = bool(params.get("compute_drugflow_clashes", False))
     compute_edm = bool(params.get("compute_edm", False))
     compute_novelty = bool(params.get("compute_novelty", False))
     compute_posebusters = bool(params.get("compute_posebusters", False))
     compute_posecheck = bool(params.get("compute_posecheck", False))
-    compute_scores = bool(params.get("compute_scores", False))
-    compute_drugflow = bool(params.get("compute_drugflow", False))
+    compute_physchem = bool(params.get("compute_physchem", False))
     compute_vina = bool(params.get("compute_vina", False))
     use_bond_predictor = params.get("bond_predictor_path") is not None
+    use_sdf = bool(params.get("use_sdf", False))
     molecule_pipeline = molecule_pipeline_label(
         params, use_bond_predictor=use_bond_predictor
     )
+
+    if use_sdf:
+        compute_edm = False
+        print("EDM metrics are not supported for SDF files. Setting compute_edm to False.")
 
     if compute_novelty:
         reference_smiles = load_reference_smiles(params)
@@ -776,57 +828,52 @@ def evaluate(args: argparse.Namespace) -> None:
         worker_func = partial(
             eval_worker,
             params=params,
-            reference_smiles=reference_smiles,
+            compute_drugflow_clashes=compute_drugflow_clashes,
             compute_edm=compute_edm,
             compute_novelty=compute_novelty,
             compute_posebusters=compute_posebusters,
             compute_posecheck=compute_posecheck,
-            compute_scores=compute_scores,
-            compute_drugflow=compute_drugflow,
+            compute_physchem=compute_physchem,
             compute_vina=compute_vina,
-            use_bond_predictor=use_bond_predictor,
             molecule_pipeline=molecule_pipeline,
+            reference_smiles=reference_smiles,
+            use_bond_predictor=use_bond_predictor,
+            use_sdf=use_sdf,
         )
-        # with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        #     # executor.map automatically distributes the subdirs across the 4 workers
-        #     runs = list(executor.map(worker_func, subdirs))
-        # 2. Switch to executor.submit and as_completed for the progress bar
         runs_dict = {}
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            # Submit all jobs to the executor immediately
             futures = {
                 executor.submit(worker_func, subdir): i
                 for i, subdir in enumerate(subdirs)
             }
 
-            # Wrap as_completed with tqdm to get a live updating progress bar
             for future in tqdm(
                 as_completed(futures),
                 total=len(futures),
-                desc="Evaluating Subdirectories",
+                desc="Evaluating subdirectories",
             ):
-                # Store the result mapped to its original index to preserve order
                 original_index = futures[future]
                 runs_dict[original_index] = future.result()
 
-        # 3. Sort by original index to ensure 'runs' matches the input 'subdirs' order
         runs = [runs_dict[i] for i in sorted(runs_dict.keys())]
+    
     else:
         for subdir in iter_result_subdirs(data_path):
             print(f"Evaluating {subdir.name}...")
             run = evaluate_subdirectory(
                 subdir,
                 params,
-                reference_smiles,
+                compute_drugflow_clashes=compute_drugflow_clashes,
                 compute_edm=compute_edm,
                 compute_novelty=compute_novelty,
                 compute_posebusters=compute_posebusters,
                 compute_posecheck=compute_posecheck,
-                compute_scores=compute_scores,
-                compute_drugflow=compute_drugflow,
+                compute_physchem=compute_physchem,
                 compute_vina=compute_vina,
-                use_bond_predictor=use_bond_predictor,
                 molecule_pipeline=molecule_pipeline,
+                reference_smiles=reference_smiles,
+                use_bond_predictor=use_bond_predictor,
+                use_sdf=use_sdf,
             )
             runs.append(run)
 
@@ -837,12 +884,12 @@ def evaluate(args: argparse.Namespace) -> None:
         data_path,
         params,
         aggregate,
+        compute_drugflow_clashes=compute_drugflow_clashes,
         compute_edm=compute_edm,
         compute_novelty=compute_novelty,
         compute_posebusters=compute_posebusters,
         compute_posecheck=compute_posecheck,
-        compute_scores=compute_scores,
-        compute_drugflow=compute_drugflow,
+        compute_physchem=compute_physchem,
         compute_vina=compute_vina,
         molecule_pipeline=molecule_pipeline,
     )
