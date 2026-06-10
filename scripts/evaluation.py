@@ -94,7 +94,12 @@ def save_2d_molecules_visualizations_to_png(subdir: Path, mols: list) -> None:
 
     for mol in subset:
         if mol is not None:
-            rdDepictor.Compute2DCoords(mol)
+            try:
+                rdDepictor.Compute2DCoords(mol)
+            except Exception as e:
+                print(f"Warning: Failed to compute 2D coordinates for a molecule: {e}")
+                # If 2D coordinates computation fails, we can skip this molecule or handle it as needed.
+                continue
 
     img = Draw.MolsToGridImage(
         subset,
@@ -109,7 +114,11 @@ def save_2d_molecules_visualizations_to_png(subdir: Path, mols: list) -> None:
             mols_2d_no_h.append(None)
             continue
         mol_no_h = AllChem.RemoveHs(mol)
-        rdDepictor.Compute2DCoords(mol_no_h)
+        try:
+            rdDepictor.Compute2DCoords(mol_no_h)
+        except Exception as e:
+            print(f"Warning: Failed to compute 2D coordinates for a molecule: {e}")
+            continue
         mols_2d_no_h.append(mol_no_h)
 
     img_2d = Draw.MolsToGridImage(
