@@ -183,7 +183,7 @@ def compute_validity_uniqueness_novelty(
     for mol in mols:
         if mol is not None:
             mol_copy = copy.deepcopy(mol)
-            sanitization_flag = SanitizeMol(mol_copy)
+            sanitization_flag = SanitizeMol(mol_copy, catchErrors=True)
             if int(sanitization_flag) != 0:
                 continue
             smile = MolToSmiles(mol, canonical=True)
