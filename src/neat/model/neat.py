@@ -14,7 +14,9 @@ from torch.optim import Optimizer
 from torch_geometric.data import Batch, Data
 from torch_geometric.nn.pool import global_mean_pool
 from tqdm import tqdm
+from rdkit import Chem
 
+from ..dataset.dataset_crossdocked import LIGAND_VOCABULARY
 from ..dataset.augmentation import RandomRotationAugmentation
 from .attention import BidirectionalAttentionBlock
 from .positional_encoding import FourierPositionEncoding
@@ -35,6 +37,7 @@ class NEAT(LightningModule):
         self.hparams.setdefault("cross_attn_with_null_token", False)
         self.hparams.setdefault("residue_pooling", "sum")
         self.hparams.setdefault("pocket_n_layer_atom_level", 1)
+        self.hparams.setdefault("clash_penalty", False)
 
         self.save_hyperparameters()
 
@@ -315,6 +318,15 @@ class NEAT(LightningModule):
                 "pocket_residue_type": data.pocket_residue_type,
                 "pocket_batch": data.pocket_pos_batch,
             }
+        else:
+            pocket_info = None
+            
+        # Create mask for CFG dropout
+        cfg_dropout = self.hparams.get("cfg_dropout", None)
+        if self.training and pocket_info is not None and cfg_dropout is not None:
+            cfg_mask = torch.rand(batch_size, device=device) < cfg_dropout
+        else:
+            cfg_mask = None
 
         source_set_representation = self.compute_source_set_representation(
             data.x[data.source_ptr],
@@ -323,6 +335,7 @@ class NEAT(LightningModule):
             batch_size,
             device,
             pocket_info if self.enable_cross_attention else None,
+            cfg_mask=cfg_mask,
         )  # [batch_size, n_embd]
 
         # (2) Compute the logits for the atom type prediction
@@ -340,7 +353,7 @@ class NEAT(LightningModule):
         )
 
         # (4) Calculate a flow matching loss for the target atom positions
-        loss_fm = self.compute_flow_matching_loss(
+        loss_fm, clash_penalty = self.compute_flow_matching_loss(
             data.x[data.target_ptr],
             data.pos[data.target_ptr],
             data.pos_random,
@@ -348,13 +361,19 @@ class NEAT(LightningModule):
             source_set_representation,
             data.start_token_mask,
             device,
+            pocket_info,
+            cfg_mask=cfg_mask,
         )
 
-        # (5) Add the two losses together
-        # Note that these two objectives are disentangled and independent of each other.
-        loss = loss_ce + loss_fm
+        # (5) Add the losses together
+        if clash_penalty is not None:
+            loss = loss_ce + loss_fm + clash_penalty
 
-        return loss, loss_ce, loss_fm
+            return loss, loss_ce, loss_fm, clash_penalty
+        else:
+            loss = loss_ce + loss_fm
+
+            return loss, loss_ce, loss_fm, None
 
     def compute_source_set_representation(
         self,
@@ -364,6 +383,7 @@ class NEAT(LightningModule):
         batch_size: int,
         device: torch.device,
         pocket_info: dict[str, Tensor] | None = None,
+        cfg_mask: Tensor | None = None,
     ) -> Tensor:
         """Compute the representation of the source atom sets.
 
@@ -463,13 +483,6 @@ class NEAT(LightningModule):
         attn_mask = attn_mask.unsqueeze(1).expand(
             -1, self.hparams.n_head, -1, -1
         )  # [batch_size, n_head, max_atom_count, max_atom_count]
-
-        # (11) Create mask for CFG dropout
-        cfg_dropout = self.hparams.get("cfg_dropout", None)
-        if self.training and pocket_info is not None and cfg_dropout is not None:
-            cfg_mask = torch.rand(x.shape[0]) < cfg_dropout
-        else:
-            cfg_mask = None
 
         if pocket_info is not None:
             # (9) Encode the pocket residues with a lightweight transformer
@@ -785,6 +798,8 @@ class NEAT(LightningModule):
         source_set_representation: Tensor,
         start_token_mask: Tensor,
         device: torch.device,
+        pocket_info: dict[str, Tensor] | None = None,
+        cfg_mask: Tensor | None = None,
         resampling=4,
     ) -> Tensor:
         """Compute the flow matching loss.
@@ -869,8 +884,57 @@ class NEAT(LightningModule):
         loss_fm = torch.mean((output_fm - interpolation) ** 2, dim=1)  # [n_paths * k]
         loss_fm = loss_fm * scaling_factor  # [n_paths * k]
 
-        # (9) Return the mean loss over all paths and time steps.
-        return loss_fm.mean()  # [1]
+        def batch_to_dense(x: Tensor, batch: Tensor, batch_size: int, n_embd: int) -> tuple[Tensor, Tensor]:
+            atom_count_source = torch.bincount(
+                batch, minlength=batch_size
+            )  # [batch_size]
+            dim = [len(atom_count_source), atom_count_source.max(), n_embd]
+            dense = torch.zeros(dim, device=device)  # [batch_size, max_atom_count, n_embd]
+            context_range = torch.arange(
+                atom_count_source.max(), device=atom_count_source.device
+            ).unsqueeze(0)
+            atom_mask = context_range < atom_count_source.unsqueeze(
+                1
+            )  # [batch_size, max_atom_count]
+            dense[atom_mask] = x  # [batch_size, max_atom_count, n_embd]
+            return dense, atom_mask
+
+        if pocket_info is not None and cfg_mask is not None and self.hparams.clash_penalty:
+            # Prepare pocket information
+            _periodic_table = Chem.GetPeriodicTable()
+            atom_types = list(LIGAND_VOCABULARY.keys())
+            atom_radii = torch.tensor([_periodic_table.GetRvdw(atom_type) for atom_type in atom_types], device=device)
+            pocket_x = torch.cat([pocket_info["pocket_x"] for _ in range(resampling)], dim=0)
+            pocket_pos = torch.cat([pocket_info["pocket_pos"] for _ in range(resampling)], dim=0)
+            batch_size = pocket_info["pocket_batch"].max().item() + 1
+            pocket_batch = torch.cat([pocket_info["pocket_batch"] + i * batch_size for i in range(resampling)], dim=0)
+            batch_target = torch.cat([batch_target + i * batch_size for i in range(resampling)], dim=0)
+            cfg_mask = torch.cat([cfg_mask for _ in range(resampling)], dim=0)
+            
+            # Compute the projected positions of the target atoms at the sampled time steps
+            pos_projected = interpolation + output_fm * (1 - time_step).unsqueeze(1)
+            pocket_atom_radii = atom_radii[pocket_x - 1]
+            x_next_atom_radii = atom_radii[x_target - 1]
+            
+            # For computing the distances, we need to convert to dense format
+            pos_projected_dense, _ = batch_to_dense(pos_projected, batch_target, batch_size*4, 3)
+            pos_pocket_dense, _ = batch_to_dense(pocket_pos, pocket_batch, batch_size*4, 3)
+            dist = (pos_projected_dense.unsqueeze(1) - pos_pocket_dense.unsqueeze(2)).norm(dim=3)
+            
+            # We also need to compute the pairwise sum of vdw radii
+            x_next_atom_radii_dense, _ = batch_to_dense(x_next_atom_radii.unsqueeze(1), batch_target, batch_size*4, 1)
+            pocket_atom_radii_dense, _ = batch_to_dense(pocket_atom_radii.unsqueeze(1), pocket_batch, batch_size*4, 1)
+            vdw_radii_sum = (x_next_atom_radii_dense.unsqueeze(1) + pocket_atom_radii_dense.unsqueeze(2) + 1.2).squeeze(-1)
+            
+            # Now we can compute the penalty for steric clashes
+            penalty = torch.clamp(vdw_radii_sum - dist, min=0.0)
+            penalty = penalty[~cfg_mask]
+            penalty = penalty.mean()
+            
+            return loss_fm.mean(), penalty
+        else:
+            # (9) Return the mean loss over all paths and time steps.
+            return loss_fm.mean(), None  
 
     def sample_timesteps_uniform(
         self, num_samples: int, device: torch.device
@@ -1030,9 +1094,9 @@ class NEAT(LightningModule):
 
     def shared_step(self, batch: Data, batch_idx: int) -> Tensor:
         """Shared step for training and validation"""
-        loss, loss_ce, loss_fm = self(batch)
+        loss, loss_ce, loss_fm, clash_penalty = self(batch)
 
-        return loss, loss_ce, loss_fm
+        return loss, loss_ce, loss_fm, clash_penalty
 
     def on_train_start(self) -> None:
         """Initialization of the logger"""
@@ -1043,7 +1107,7 @@ class NEAT(LightningModule):
 
     def training_step(self, batch: Data, batch_idx: int) -> Tensor:
         """Training step and logging"""
-        loss, loss_ce, loss_fm = self.shared_step(batch, batch_idx)
+        loss, loss_ce, loss_fm, clash_penalty = self.shared_step(batch, batch_idx)
 
         self.log(
             "train/train_loss",
@@ -1072,12 +1136,22 @@ class NEAT(LightningModule):
             batch_size=len(batch),
             reduce_fx="mean",
         )
+        if clash_penalty is not None:
+            self.log(
+                "train/clash_penalty",
+                clash_penalty,
+                prog_bar=True,
+                on_step=True,
+                on_epoch=False,
+                batch_size=len(batch),
+                reduce_fx="mean",
+            )
 
         return loss
 
     def validation_step(self, batch: Data, batch_idx: int) -> Tensor:
         """Validation step and logging"""
-        loss, loss_ce, loss_fm = self.shared_step(batch, batch_idx)
+        loss, loss_ce, loss_fm, clash_penalty = self.shared_step(batch, batch_idx)
 
         self.log(
             "val/val_loss",
@@ -1103,6 +1177,15 @@ class NEAT(LightningModule):
             on_epoch=True,
             batch_size=len(batch),
         )
+        if clash_penalty is not None:
+            self.log(
+                "val/clash_penalty",
+                clash_penalty,
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+                batch_size=len(batch),
+            )
 
         return loss
 
