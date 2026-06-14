@@ -1,5 +1,5 @@
-accumulate_grad_batches: 4
-batch_size: 64
+accumulate_grad_batches: 8
+batch_size: 32
 bias: true
 cfg_dropout: 0.2
 cross_attn_with_null_token: true
@@ -27,3 +27,4 @@ rope: false
 time_step_resampling: 4
 time_step_sampling: logit_normal
 weight_decay: 1.0e-06
+clash_penalty: true
