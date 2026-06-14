@@ -37,7 +37,7 @@ class NEAT(LightningModule):
         self.hparams.setdefault("cross_attn_with_null_token", False)
         self.hparams.setdefault("residue_pooling", "sum")
         self.hparams.setdefault("pocket_n_layer_atom_level", 1)
-        self.hparams.setdefault("clash_penalty", False)
+        self.hparams.setdefault("clash_penalty", 0)
 
         self.save_hyperparameters()
 
@@ -899,7 +899,7 @@ class NEAT(LightningModule):
             dense[atom_mask] = x  # [batch_size, max_atom_count, n_embd]
             return dense, atom_mask
 
-        if pocket_info is not None and cfg_mask is not None and self.hparams.clash_penalty:
+        if pocket_info is not None and cfg_mask is not None and self.hparams.clash_penalty > 0:
             # Prepare pocket information
             _periodic_table = Chem.GetPeriodicTable()
             atom_types = list(LIGAND_VOCABULARY.keys())
@@ -929,7 +929,7 @@ class NEAT(LightningModule):
             # Now we can compute the penalty for steric clashes
             penalty = torch.clamp(vdw_radii_sum - dist, min=0.0)
             penalty = penalty[~cfg_mask]
-            penalty = penalty.mean()
+            penalty = penalty.mean() * self.hparams.clash_penalty
             
             return loss_fm.mean(), penalty
         else:
