@@ -38,6 +38,7 @@ class NEAT(LightningModule):
         self.hparams.setdefault("residue_pooling", "sum")
         self.hparams.setdefault("pocket_n_layer_atom_level", 1)
         self.hparams.setdefault("clash_penalty", 0)
+        self.hparams.setdefault("clash_penalty_margin", 1.2)
 
         self.save_hyperparameters()
 
@@ -912,23 +913,30 @@ class NEAT(LightningModule):
             cfg_mask = torch.cat([cfg_mask for _ in range(resampling)], dim=0)
             
             # Compute the projected positions of the target atoms at the sampled time steps
-            pos_projected = interpolation + output_fm * (1 - time_step).unsqueeze(1)
+            pos_projected = interpolated_pos + output_fm * (1 - time_step).unsqueeze(1)
             pocket_atom_radii = atom_radii[pocket_x - 1]
             x_next_atom_radii = atom_radii[x_target - 1]
             
             # For computing the distances, we need to convert to dense format
-            pos_projected_dense, _ = batch_to_dense(pos_projected, batch_target, batch_size*4, 3)
-            pos_pocket_dense, _ = batch_to_dense(pocket_pos, pocket_batch, batch_size*4, 3)
+            pos_projected_dense, _ = batch_to_dense(pos_projected, batch_target, batch_size*resampling, 3)
+            pos_pocket_dense, _ = batch_to_dense(pocket_pos, pocket_batch, batch_size*resampling, 3)
             dist = (pos_projected_dense.unsqueeze(1) - pos_pocket_dense.unsqueeze(2)).norm(dim=3)
             
             # We also need to compute the pairwise sum of vdw radii
-            x_next_atom_radii_dense, _ = batch_to_dense(x_next_atom_radii.unsqueeze(1), batch_target, batch_size*4, 1)
-            pocket_atom_radii_dense, _ = batch_to_dense(pocket_atom_radii.unsqueeze(1), pocket_batch, batch_size*4, 1)
-            vdw_radii_sum = (x_next_atom_radii_dense.unsqueeze(1) + pocket_atom_radii_dense.unsqueeze(2) + 1.2).squeeze(-1)
+            margin = self.hparams.clash_penalty_margin
+            x_next_atom_radii_dense, atom_mask = batch_to_dense(x_next_atom_radii.unsqueeze(1), batch_target, batch_size*resampling, 1)
+            pocket_atom_radii_dense, pocket_mask = batch_to_dense(pocket_atom_radii.unsqueeze(1), pocket_batch, batch_size*resampling, 1)
+            vdw_radii_sum = (x_next_atom_radii_dense.unsqueeze(1) + pocket_atom_radii_dense.unsqueeze(2) + margin).squeeze(-1)
+            mask = (atom_mask.unsqueeze(1) & pocket_mask.unsqueeze(2)).squeeze(-1)
             
             # Now we can compute the penalty for steric clashes
-            penalty = torch.clamp(vdw_radii_sum - dist, min=0.0)
-            penalty = penalty[~cfg_mask]
+            penalty = torch.clamp(vdw_radii_sum - dist, min=0.0)**2
+            penalty[~mask] = 0.0  # Ignore distances that are not valid (i.e., where there is no atom)
+            penalty = penalty.sum(dim=1) # Add up contributions per atom
+            penalty = penalty[atom_mask]
+            non_masked_idx = torch.nonzero(~cfg_mask).flatten()
+            final_mask = torch.isin(batch_target, non_masked_idx)
+            penalty = penalty[final_mask]
             penalty = penalty.mean() * self.hparams.clash_penalty
             
             return loss_fm.mean(), penalty
