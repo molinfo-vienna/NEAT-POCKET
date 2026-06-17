@@ -12,6 +12,7 @@ import torch
 import random
 from Bio.PDB import PDBParser
 from Bio.PDB.Polypeptide import is_aa
+from openbabel import openbabel
 from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem
 from torch_geometric.data import Data, InMemoryDataset
@@ -113,12 +114,39 @@ def _encode_pocket_atom(symbol: str | None, vocabulary: dict[int, int]) -> int:
     return int(vocabulary.get(n, 0))
 
 
-def _add_hydrogens(mol: Chem.Mol, max_attempts: int = 50) -> Chem.Mol:
+def _add_hydrogens_with_rdkit(mol: Chem.Mol, max_attempts: int = 50) -> Chem.Mol:
     try:
         mol_h = Chem.AddHs(mol)
         AllChem.ConstrainedEmbed(mol_h, mol, maxAttempts=max_attempts)
         return mol_h
     except Exception as e:
+        return None
+
+
+def _add_hydrogens_with_openbabel(mol: Chem.Mol) -> Chem.Mol:
+
+    try:
+        # Convert RDKit molecule to OpenBabel molecule
+        ob_conversion = openbabel.OBConversion()
+        ob_conversion.SetInFormat("mol")
+        ob_conversion.SetOutFormat("mol")
+        
+        # Generate a temporary MOL file from RDKit molecule
+        mol_block = Chem.MolToMolBlock(mol)
+        ob_mol = openbabel.OBMol()
+        ob_conversion.ReadString(ob_mol, mol_block)
+        
+        # Add hydrogens using OpenBabel
+        ob_mol.AddHydrogens()
+        
+        # Convert OpenBabel molecule back to RDKit molecule
+        updated_mol_block = ob_conversion.WriteString(ob_mol)
+        updated_rdkit_mol = Chem.MolFromMolBlock(updated_mol_block, removeHs=False)
+        
+        # Return the updated RDKit molecule
+        return updated_rdkit_mol
+    
+    except Exception:
         return None
 
 
@@ -257,7 +285,7 @@ def _process_pair(
             return None
 
     if add_hydrogens:
-        rdmol = _add_hydrogens(rdmol)
+        rdmol = _add_hydrogens_with_openbabel(rdmol)
 
     if rdmol is None:
         logger.warning(
@@ -478,10 +506,12 @@ class CrossDockedDataSet(InMemoryDataset):
         data_list: list[Data] = []
         failed: int = 0
 
-        if split_name == "test":
-            add_hydrogens = False
-        else:
-            add_hydrogens = True
+        # if split_name == "test":
+        #     add_hydrogens = False
+        # else:
+        #     add_hydrogens = True
+
+        add_hydrogens = True
 
         if num_workers is None or num_workers <= 1:
             pbar = tqdm(pairs)
@@ -592,3 +622,11 @@ class CrossDockedDataSet(InMemoryDataset):
         ][0]
         pdb_file = os.path.join(self.raw_paths[2], pocket_path)
         return pdb_file
+
+    def get_ligand_path_from_data_point(self, data_point):
+        name = data_point.name.split("__")[0]
+        ligand_path = [
+            split_name[1] for split_name in self.split_names if name in split_name[0]
+        ][0]
+        sdf_file = os.path.join(self.raw_paths[2], ligand_path)
+        return sdf_file
