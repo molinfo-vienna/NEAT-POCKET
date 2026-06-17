@@ -661,7 +661,7 @@ def evaluate_subdirectory(
     result = SubdirRunResult()
 
     if use_sdf:
-        supplier = SDMolSupplier(str(subdir / "generated_mols.sdf"))
+        supplier = SDMolSupplier(str(subdir / "generated_mols.sdf"), removeHs=False, sanitize=False)
         mols = [mol for mol in supplier]
     else:
         builder = MoleculeBuilder(vocab=params["data_set"])
