@@ -27,5 +27,6 @@ rope: false
 time_step_resampling: 4
 time_step_sampling: logit_normal
 weight_decay: 1.0e-06
-clash_penalty: 0.5
-clash_penalty_margin: 1.2
+clash_penalty: 4.0
+clash_penalty_margin: 0.0
+freeze_pretrained: true

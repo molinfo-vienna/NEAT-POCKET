@@ -39,6 +39,7 @@ class NEAT(LightningModule):
         self.hparams.setdefault("pocket_n_layer_atom_level", 1)
         self.hparams.setdefault("clash_penalty", 0)
         self.hparams.setdefault("clash_penalty_margin", 1.2)
+        self.hparams.setdefault("freeze_pretrained", False)
 
         self.save_hyperparameters()
 
@@ -247,44 +248,28 @@ class NEAT(LightningModule):
 
         print(f"Successfully transferred {len(matched_keys)} parameter tensors.")
 
-        # 3. Freeze pretrained blocks
-        # unfrozen_layers = [
-        #     "atom_type_embedding_layer_pocket",
-        #     "fourier_embedding_layer_pocket",
-        #     "atom_level_pocket_transformer_blocks",
-        #     "residue_level_pocket_transformer_blocks",
-        #     "layer_norm_after_atom_level_pocket_transformer_blocks",
-        #     "layer_norm_after_residue_level_pocket_transformer_blocks",
-        #     "null_condition_embedding",
-        #     "global_condition_projection",
-        #     "pocket_residue_type_embedding_layer",
-        #     "attn_cross",
-        #     "ln_2",
-        #     "scale_shift",
-        # ]
-        # for name, param in self.named_parameters():
-        #     is_new_layer = any(layer in name for layer in unfrozen_layers)
-        # unfrozen_layers = [
-        #     "atom_type_embedding_layer_pocket",
-        #     "fourier_embedding_layer_pocket",
-        #     "atom_level_pocket_transformer_blocks",
-        #     "residue_level_pocket_transformer_blocks",
-        #     "layer_norm_after_atom_level_pocket_transformer_blocks",
-        #     "layer_norm_after_residue_level_pocket_transformer_blocks",
-        #     "null_condition_embedding",
-        #     "global_condition_projection",
-        #     "pocket_residue_type_embedding_layer",
-        #     "attn_cross",
-        #     "ln_2",
-        #     "scale_shift",
-        # ]
-        # for name, param in self.named_parameters():
-        #     is_new_layer = any(layer in name for layer in unfrozen_layers)
+        if self.hparams.freeze_pretrained:
+            unfrozen_layers = [
+                "atom_type_embedding_layer_pocket",
+                "fourier_embedding_layer_pocket",
+                "atom_level_pocket_transformer_blocks",
+                "residue_level_pocket_transformer_blocks",
+                "layer_norm_after_atom_level_pocket_transformer_blocks",
+                "layer_norm_after_residue_level_pocket_transformer_blocks",
+                "null_condition_embedding",
+                "global_condition_projection",
+                "pocket_residue_type_embedding_layer",
+                "attn_cross",
+                "ln_2",
+                "scale_shift",
+            ]
+            for name, param in self.named_parameters():
+                is_new_layer = any(layer in name for layer in unfrozen_layers)
 
-        #     if is_new_layer:
-        #         param.requires_grad = True
-        #     else:
-        #         param.requires_grad = False
+                if is_new_layer:
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
 
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         frozen_params = sum(p.numel() for p in self.parameters() if not p.requires_grad)
