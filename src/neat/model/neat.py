@@ -1195,6 +1195,7 @@ class NEAT(LightningModule):
         integration_method: str = "euler_maruyama",
         cfg_factor: float = 0.0,
         pocket_info: dict | None = None,
+        temperature: float = 1.0,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Generate a molecule using the flow matching network.
 
@@ -1341,6 +1342,8 @@ class NEAT(LightningModule):
                 logits = self.atom_type_prediction_head(
                     source_set_representation
                 )  # [active_mol_count, vocab_size]
+                
+                logits = logits / temperature  # Apply temperature scaling to logits
 
                 # (6.3) Compute probabilities
                 probabilities = F.softmax(
@@ -1382,7 +1385,7 @@ class NEAT(LightningModule):
                 # (6.9) If using pocket information, the source set representations are
                 # conditioned on the pocket. For CFG, we also need unconditioned source
                 # set representations. These are computed here.
-                if pocket_info is not None:
+                if pocket_info is not None and cfg_factor > 0.0:
                     source_set_representation_unconditioned_for_cfg = (
                         self.compute_source_set_representation(
                             masked_x,
@@ -1434,7 +1437,7 @@ class NEAT(LightningModule):
             pos = pos - pocket_center[batch_source]
 
         return Batch(x=x, pos=pos, batch=batch_source)
-
+    
     def update_batch_with_new_atoms(
         self,
         x: Tensor,
@@ -1446,47 +1449,29 @@ class NEAT(LightningModule):
         batch_size: int,
         device: torch.device,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        # (6.10) Update the x, pos, and batch source tensors
-        updated_x = []
-        updated_pos = []
-        updated_batch = []
-        for idx in range(batch_size):
-            if idx in active_mol_idx:
-                active_idx = torch.where(active_mol_idx == idx)[0]
-                updated_x.append(
-                    torch.cat(
-                        (x[batch_source == idx], x_next[active_idx].view(1)),
-                        dim=0,
-                    )
-                )  # [num_atoms+1]
-                updated_pos.append(
-                    torch.cat(
-                        (
-                            pos[batch_source == idx],
-                            pos_next[active_idx].view(1, 3),
-                        ),
-                        dim=0,
-                    )
-                )  # [num_atoms+1, 3]
-                updated_batch.append(
-                    torch.cat(
-                        (
-                            batch_source[batch_source == idx],
-                            torch.tensor(idx, device=device).view(1),
-                        ),
-                        dim=0,
-                    )
-                )  # [num_atoms+1]
-            else:
-                updated_x.append(x[batch_source == idx])
-                updated_pos.append(pos[batch_source == idx])
-                updated_batch.append(batch_source[batch_source == idx])
+        
+        # 1. Prepare the new elements
+        # Reshape x_next and batch assignments for the new atoms to ensure correct dimensions
+        x_next_flat = x_next.view(-1)
+        pos_next_flat = pos_next.view(-1, 3)
+        new_batch_elements = active_mol_idx.view(-1)
 
-        x = torch.cat(updated_x, dim=0)  # [batch_size]
-        pos = torch.cat(updated_pos, dim=0)  # [batch_size, 3]
-        batch_source = torch.cat(updated_batch, dim=0)  # [batch_size]
+        # 2. Compute sorting indices to group everything correctly by molecule ID
+        # Combine the existing batch assignments with the new ones
+        combined_batch = torch.cat([batch_source, new_batch_elements], dim=0)
+        
+        # argsort is highly optimized on GPU. It brings all elements of molecule 0 together, 
+        # then molecule 1, etc., perfectly preserving or re-ordering them cleanly.
+        sort_indices = torch.argsort(combined_batch, stable=True)
 
-        return x, pos, batch_source
+        # 3. Concatenate existing data with new data and apply the sorted order
+        updated_x = torch.cat([x, x_next_flat], dim=0)[sort_indices]
+        updated_pos = torch.cat([pos, pos_next_flat], dim=0)[sort_indices]
+        updated_batch = combined_batch[sort_indices]
+
+        return updated_x, updated_pos, updated_batch
+
+
 
     def calculate_positions(
         self,
