@@ -31,6 +31,7 @@ from rdkit.Chem import (
     QED,
     rdDepictor,
     SanitizeMol,
+    SanitizeFlags,
     SDMolSupplier,
     SDWriter,
 )
@@ -663,6 +664,7 @@ def evaluate_subdirectory(
     if use_sdf:
         supplier = SDMolSupplier(str(subdir / "generated_mols.sdf"), removeHs=False, sanitize=False)
         mols = [mol for mol in supplier]
+        [SanitizeMol(mol, sanitizeOps=SanitizeFlags.SANITIZE_SETAROMATICITY) for mol in mols]
     else:
         builder = MoleculeBuilder(vocab=params["data_set"])
         x, pos, batch = builder.load_tensor_from_file(subdir)
@@ -680,6 +682,8 @@ def evaluate_subdirectory(
             mols = builder.generate_rdkit_molecules_via_xyz2mol(
                 x, pos, batch, progress_bar=True
             )
+
+        [SanitizeMol(mol, sanitizeOps=SanitizeFlags.SANITIZE_SETAROMATICITY) for mol in mols]
 
         save_molecules_to_sdf(mols, subdir / "generated_mols.sdf")
 

@@ -8,6 +8,7 @@ import numpy as np
 import pickle
 import matplotlib.pyplot as plt
 from pathlib import Path
+from scipy.spatial.distance import jensenshannon
 
 plt.rcParams["font.size"] = 12
 
@@ -167,9 +168,12 @@ def get_mols(path):
     mols = []
     for dir in os.listdir(path):
         if os.path.isdir(os.path.join(path, dir)):
-            generated_mols_file = os.path.join(path, dir, "generated_mols.sdf")
+            if os.path.exists(os.path.join(path, dir, "generated_mols.sdf")):
+                mols_file = os.path.join(path, dir, "generated_mols.sdf")
+            else:
+                mols_file = os.path.join(path, dir, "ligands.sdf")
             supplier = SDMolSupplier(
-                generated_mols_file, removeHs=False, sanitize=False
+                mols_file, removeHs=False, sanitize=False
             )
             mols.extend([mol for mol in supplier])
     # Set aromaticity flags (SanitizeMol in place)
@@ -231,6 +235,15 @@ def ranks_by_closeness(abs_devs_by_method):
     return {COMPARE_METHODS[idx]: rank for rank, idx in enumerate(order, start=1)}
 
 
+def js_divergence(reference, samples, bin_edges):
+    """Jensen-Shannon divergence between two 1D sample distributions (base 2, in [0, 1])."""
+    hist_ref, _ = np.histogram(reference, bins=bin_edges, density=False)
+    hist_samp, _ = np.histogram(samples, bins=bin_edges, density=False)
+    p = hist_ref / hist_ref.sum()
+    q = hist_samp / hist_samp.sum()
+    return float(jensenshannon(p, q, base=2) ** 2)
+
+
 def readFragmentScores(name=FPSCORES_PATH):
 
     data = pickle.load(gzip.open(name))
@@ -243,7 +256,7 @@ def readFragmentScores(name=FPSCORES_PATH):
 
 ### Load data ###
 
-crossdocked_path = ROOT / "output" / "crossdocked_test" / "conditional"
+crossdocked_path = ROOT / "output" / "crossdocked_all_ligands"
 mols_crossdocked = get_mols(crossdocked_path)
 
 pocket2mol_path = ROOT / "output" / "pocket2mol" / "conditional"
@@ -361,6 +374,32 @@ logging.info(
 logging.info(
     f"\tNEAT: {fragment_scores_neat.min()}, {fragment_scores_neat.mean()}, {fragment_scores_neat.max()}"
 )
+
+fragment_scores_by_method = {
+    "CrossDocked": fragment_scores_crossdocked,
+    "Pocket2Mol": fragment_scores_pocket2mol,
+    "TargetDiff": fragment_scores_targetdiff,
+    "DiffSBDD": fragment_scores_diffsbdd,
+    "DrugFlow": fragment_scores_drugflow,
+    "NEAT": fragment_scores_neat,
+}
+all_fragment_scores = np.concatenate(list(fragment_scores_by_method.values()))
+fragment_score_bin_edges = np.histogram_bin_edges(all_fragment_scores, bins=100)
+fragment_score_js = {
+    method: js_divergence(
+        fragment_scores_crossdocked,
+        fragment_scores_by_method[method],
+        fragment_score_bin_edges,
+    )
+    for method in COMPARE_METHODS
+}
+
+logging.info(
+    "\nFragment score Jensen-Shannon divergence from CrossDocked "
+    "(base 2, 0 = identical, 1 = maximally different):"
+)
+for method, js in sorted(fragment_score_js.items(), key=lambda x: x[1]):
+    logging.info(f"\t{method}: {js:.6f}")
 
 ### Plot statistics ###
 
