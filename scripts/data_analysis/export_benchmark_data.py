@@ -14,9 +14,13 @@ import torch
 from rdkit import Chem
 from torch_geometric.data import Batch
 
-from neat.dataset.dataset_crossdocked import _add_hydrogens_with_openbabel
+from neat.dataset.dataset_crossdocked import _add_hydrogens
 
-ROOT = os.path.join(os.getcwd(), "data", "BENCHMARK")
+ROOT = os.getcwd()
+IN_DIR = os.path.join(ROOT, "data", "BENCHMARK")
+OUT_DIR = os.path.join(ROOT, "output")
+
+os.makedirs(OUT_DIR, exist_ok=True)
 
 MODEL1 = "diffsbdd"
 MODEL2 = "drugflow"
@@ -62,37 +66,40 @@ for i, (pocket_name, ligand_name) in enumerate(split["test"]):
 
 for MODEL in [MODEL1, MODEL2, MODEL3, MODEL4]:
 
-    logging_filename = os.path.join(os.getcwd(), "output", MODEL, "conditional", "export_benchmark_data.log")
+    os.makedirs(os.path.join(OUT_DIR, MODEL, "conditional"), exist_ok=True)
+
+    logging_filename = os.path.join(OUT_DIR, MODEL, "conditional", "export_benchmark_data.log")
     logger = setup_looger(MODEL, logging_filename)
     logger.info(f"Exporting {MODEL} benchmark data...")
 
     DIR = MODEL + "_samples"
     num_total_ligands = 0
-    num_failed_ligands = 0
+    num_failed_ligands_reading = 0
+    num_failed_ligands_hydrogenating = 0
 
-    reference_ligands_folder = os.path.join(os.getcwd(), "output", "crossdocked_test", "conditional")
+    reference_ligands_folder = os.path.join(OUT_DIR, "crossdocked_test", "conditional")
 
-    for i, pocket_dir in enumerate(os.listdir(os.path.join(ROOT, DIR))):
+    for i, pocket_dir in enumerate(os.listdir(os.path.join(IN_DIR, DIR))):
         # For each pocket directory, check if it exists
-        if not os.path.isdir(os.path.join(ROOT, DIR, pocket_dir)):
+        if not os.path.isdir(os.path.join(IN_DIR, DIR, pocket_dir)):
             continue
 
         # Load the first pocket file (they are all the same)
-        pocket_file = os.path.join(ROOT, DIR, pocket_dir, "0_pocket.pdb")
+        pocket_file = os.path.join(IN_DIR, DIR, pocket_dir, "0_pocket.pdb")
 
         # Load and hydrogenate the generated molecules
         generated_mols = []
-        for file in os.listdir(os.path.join(ROOT, DIR, pocket_dir)):
+        for file in os.listdir(os.path.join(IN_DIR, DIR, pocket_dir)):
             if file.endswith(".sdf"):
                 num_total_ligands += 1
-                generated_mol_file = os.path.join(ROOT, DIR, pocket_dir, file)
+                generated_mol_file = os.path.join(IN_DIR, DIR, pocket_dir, file)
                 generated_mol = Chem.SDMolSupplier(generated_mol_file)[0]
-                generated_mol = _add_hydrogens_with_openbabel(generated_mol)
+                generated_mol = _add_hydrogens(generated_mol)
                 generated_mols.append(generated_mol)
         
         # Make the output directory
         pocket_id = pocket_name_id_mapping[pocket_dir]
-        output_dir = os.path.join(os.getcwd(), "output", MODEL, "conditional", f"pocket_{pocket_id}")
+        output_dir = os.path.join(OUT_DIR, MODEL, "conditional", f"pocket_{pocket_id}")
         os.makedirs(output_dir, exist_ok=True)
 
         # Copy the pocket file to the output directory and rename it to pocket.pdb
@@ -103,11 +110,14 @@ for MODEL in [MODEL1, MODEL2, MODEL3, MODEL4]:
         writer = Chem.SDWriter(os.path.join(output_dir, "generated_mols.sdf"))
         for mol in generated_mols:
             if mol is not None:
-                # Set aromaticity flags (SanitizeMol in place)
+                # Set aromaticity flags; careful: SanitizeMol is in place
                 Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_SETAROMATICITY)
+                if mol is None:
+                    num_failed_ligands_hydrogenating += 1
+                    continue
                 writer.write(mol)
             else:
-                num_failed_ligands += 1
+                num_failed_ligands_reading += 1
                 print("Warning: None molecule found in pocket", i)
         writer.close()
 
@@ -138,5 +148,6 @@ for MODEL in [MODEL1, MODEL2, MODEL3, MODEL4]:
         torch.save(generated_mols, os.path.join(output_dir, "generated_mols.pt"))
 
     logger.info(f"{num_total_ligands} ligands found across all pockets.")
-    logger.info(f"{num_failed_ligands} ligands failed to load across all pockets.")
-    logger.info(f"{num_total_ligands - num_failed_ligands} ligands successfully loaded across all pockets.")
+    logger.info(f"{num_failed_ligands_reading} ligands failed to load across all pockets.")
+    logger.info(f"{num_failed_ligands_hydrogenating} ligands failed to hydrogenate across all pockets.")
+    logger.info(f"{num_total_ligands - num_failed_ligands_reading - num_failed_ligands_hydrogenating} ligands successfully loaded across all pockets.")

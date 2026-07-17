@@ -3,10 +3,9 @@ import os
 
 import torch
 from rdkit import Chem
-from rdkit.Chem.MolStandardize.rdMolStandardize import TautomerEnumerator
 from tqdm import tqdm
 
-from neat.dataset.dataset_crossdocked import _add_hydrogens_with_openbabel, _add_hydrogens_with_rdkit
+from neat.dataset.dataset_crossdocked import _add_hydrogens
 
 ROOT = os.getcwd()
 INPUT_PATH = os.path.join(ROOT, "data", "CROSSDOCKED", "raw", "crossdocked_pocket10")
@@ -44,15 +43,7 @@ canonical_smiles = [Chem.MolToSmiles(ligand, isomericSmiles=True, canonical=True
 ligands_unique = [ligands[i] for i in range(len(ligands)) if canonical_smiles[i] not in canonical_smiles[:i]]
 print("Number of unique ligands:", len(set(ligands_unique)))
 
-ligands_unique_hydrogens = []
-for ligand in tqdm(ligands_unique):
-    te = TautomerEnumerator()
-    ligand = te.Canonicalize(ligand)
-    ligand_copy = copy.deepcopy(ligand)
-    ligand = _add_hydrogens_with_rdkit(ligand)
-    if ligand is None:
-        ligand = _add_hydrogens_with_openbabel(ligand_copy)
-    ligands_unique_hydrogens.append(ligand)
+ligands_unique_hydrogens = [_add_hydrogens(ligand) for ligand in ligands_unique]
 
 output_path = os.path.join(OUTPUT_DIR, OUTPUT_SUBDIR)
 os.makedirs(output_path, exist_ok=True)

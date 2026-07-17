@@ -151,6 +151,15 @@ def _add_hydrogens_with_openbabel(mol: Chem.Mol) -> Chem.Mol:
     except Exception:
         return None
 
+    
+def _add_hydrogens(mol: Chem.Mol) -> Chem.Mol:
+    te = TautomerEnumerator()
+    mol = te.Canonicalize(mol)
+    mol_hydrogenated = _add_hydrogens_with_rdkit(mol)
+    if mol_hydrogenated is None:
+        mol_hydrogenated = _add_hydrogens_with_openbabel(mol)
+    return mol_hydrogenated
+
 
 def _ligand_features(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
     logger = logging.getLogger(__name__)
@@ -287,27 +296,12 @@ def _process_pair(
             return None
 
     if add_hydrogens:
-        # We need to compute tautomers first to avoid mistakes when adding hydrogens.
-        # If not tautomer canonicalization, OpenBabel puts hydrogens on the wrong atom in some cases.
-        # For instance, the FEG ligand (see PDB).
-        te = TautomerEnumerator()
-        rdmol = te.Canonicalize(rdmol)
-        rdmol_copy = copy.deepcopy(rdmol)
-
-        rdmol = _add_hydrogens_with_rdkit(rdmol)
-
+        rdmol = _add_hydrogens(rdmol)
         if rdmol is None:
             logger.warning(
-                f"Ligand {ligand_path}: embedding hydrogen atoms with RDKit UFF failed or timed out."
+                f"Ligand {ligand_path}: embedding hydrogen atoms with RDKit or OpenBabel failed."
             )
-
-            rdmol = _add_hydrogens_with_openbabel(rdmol_copy)
-
-            if rdmol is None:
-                logger.warning(
-                    f"Ligand {ligand_path}: embedding hydrogen atoms with OpenBabel failed or timed out."
-                )
-                return None
+            return None
 
     ### Process ligand into graph ###
 
