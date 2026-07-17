@@ -15,10 +15,11 @@ import torch
 from Bio.PDB import PDBParser
 from rdkit import Chem
 from rdkit.Chem import SDWriter
+from rdkit.Chem.MolStandardize.rdMolStandardize import TautomerEnumerator
 from torch_geometric.data import Batch
 
 from neat.dataset import DataModule
-from neat.dataset.dataset_crossdocked import _add_hydrogens_with_openbabel, _ligand_features
+from neat.dataset.dataset_crossdocked import _add_hydrogens_with_openbabel, _add_hydrogens_with_rdkit, _ligand_features
 from neat.utils import center_pdb
 
 ROOT = os.getcwd()
@@ -32,7 +33,10 @@ def load_ligand_with_hydrogens(ligand_path: str) -> Chem.Mol | None:
     if suppl is None or len(suppl) == 0:
         return None
     mol = suppl[0]
-    return _add_hydrogens_with_openbabel(mol)
+    te = TautomerEnumerator()
+    mol = te.Canonicalize(mol)
+    mol = _add_hydrogens_with_rdkit(mol)
+    return mol
 
 
 def pocket_geometric_center(pdb_path: str) -> np.ndarray:

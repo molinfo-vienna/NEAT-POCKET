@@ -15,6 +15,7 @@ from Bio.PDB.Polypeptide import is_aa
 from openbabel import openbabel
 from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem
+from rdkit.Chem.MolStandardize.rdMolStandardize import TautomerEnumerator
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
 from dask.distributed import Client, LocalCluster, as_completed
@@ -285,7 +286,12 @@ def _process_pair(
             return None
 
     if add_hydrogens:
-        rdmol = _add_hydrogens_with_openbabel(rdmol)
+        # We need to compute tautomers first to avoid mistakes when adding hydrogens.
+        # If not tautomer canonicalization, OpenBabel puts hydrogens on the wrong atom in some cases.
+        # For instance, the FEG ligand (see PDB).
+        te = TautomerEnumerator()
+        rdmol = te.Canonicalize(rdmol)
+        rdmol = _add_hydrogens_with_rdkit(rdmol)
 
     if rdmol is None:
         logger.warning(
