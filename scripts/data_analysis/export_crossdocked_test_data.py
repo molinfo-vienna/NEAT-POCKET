@@ -7,6 +7,7 @@ Creates one folder per test pocket with the same layout as generation_conditiona
     pocket_{idx}/generated_mols.sdf - reference ligand with hydrogens as an SD file (for visualization)
 """
 
+import copy
 import os
 from datetime import datetime
 
@@ -35,7 +36,10 @@ def load_ligand_with_hydrogens(ligand_path: str) -> Chem.Mol | None:
     mol = suppl[0]
     te = TautomerEnumerator()
     mol = te.Canonicalize(mol)
+    mol_copy = copy.deepcopy(mol)
     mol = _add_hydrogens_with_rdkit(mol)
+    if mol is None:
+        mol = _add_hydrogens_with_openbabel(mol_copy)
     return mol
 
 

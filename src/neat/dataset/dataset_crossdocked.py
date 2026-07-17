@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import tarfile
@@ -291,13 +292,22 @@ def _process_pair(
         # For instance, the FEG ligand (see PDB).
         te = TautomerEnumerator()
         rdmol = te.Canonicalize(rdmol)
+        rdmol_copy = copy.deepcopy(rdmol)
+
         rdmol = _add_hydrogens_with_rdkit(rdmol)
 
-    if rdmol is None:
-        logger.warning(
-            f"Ligand {ligand_path}: embedding hydrogen atoms with UFF failed or timed out."
-        )
-        return None
+        if rdmol is None:
+            logger.warning(
+                f"Ligand {ligand_path}: embedding hydrogen atoms with RDKit UFF failed or timed out."
+            )
+
+            rdmol = _add_hydrogens_with_openbabel(rdmol_copy)
+
+            if rdmol is None:
+                logger.warning(
+                    f"Ligand {ligand_path}: embedding hydrogen atoms with OpenBabel failed or timed out."
+                )
+                return None
 
     ### Process ligand into graph ###
 
