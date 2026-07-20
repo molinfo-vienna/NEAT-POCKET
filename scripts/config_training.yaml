@@ -30,3 +30,4 @@ weight_decay: 1.0e-06
 clash_penalty: 4.0
 clash_penalty_margin: 0.0
 freeze_pretrained: true
+unfreeze_epoch: 150
