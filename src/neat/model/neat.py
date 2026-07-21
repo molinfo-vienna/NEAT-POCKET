@@ -16,7 +16,7 @@ from torch_geometric.nn.pool import global_mean_pool
 from tqdm import tqdm
 from rdkit import Chem
 
-from ..dataset.dataset_crossdocked import LIGAND_VOCABULARY
+from ..dataset.dataset_crossdocked import ATOM_VOCABULARY
 from ..dataset.augmentation import RandomRotationAugmentation
 from .attention import BidirectionalAttentionBlock
 from .positional_encoding import FourierPositionEncoding
@@ -888,7 +888,7 @@ class NEAT(LightningModule):
         if pocket_info is not None and cfg_mask is not None and self.hparams.clash_penalty > 0:
             # Prepare pocket information
             _periodic_table = Chem.GetPeriodicTable()
-            atom_types = list(LIGAND_VOCABULARY.keys())
+            atom_types = list(ATOM_VOCABULARY.keys())
             atom_radii = torch.tensor([_periodic_table.GetRvdw(atom_type) for atom_type in atom_types], device=device)
             pocket_x = torch.cat([pocket_info["pocket_x"] for _ in range(resampling)], dim=0)
             pocket_pos = torch.cat([pocket_info["pocket_pos"] for _ in range(resampling)], dim=0)
@@ -1239,7 +1239,7 @@ class NEAT(LightningModule):
             pos = rotation_augmentation.rotate_molecule_randomly(pos, batch_source)
 
         else:
-            # (1) Sample initial atoms from the prior distribution of atom types in QM9
+            # (1) Sample initial atoms from the prior distribution of atom types
             if self.hparams.data_set == "QM9":
                 dist = torch.tensor(
                     [0.0000, 0.5109, 0.3517, 0.0580, 0.0780, 0.0014], device=device
@@ -1352,11 +1352,11 @@ class NEAT(LightningModule):
 
                 # (6.4) Sample next atom types from the resulting distribution
                 x_next = torch.argmax(probabilities, dim=1)
-                x_next_0_mask = x_next == 0
-                x_next_1_mask = x_next == 1
-                x_next = torch.multinomial(probabilities, num_samples=1).squeeze(1)
-                x_next[x_next_0_mask] = 0
-                x_next[x_next_1_mask] = 1
+                # x_next_0_mask = x_next == 0
+                # x_next_1_mask = x_next == 1
+                # x_next = torch.multinomial(probabilities, num_samples=1).squeeze(1)
+                # x_next[x_next_0_mask] = 0
+                # x_next[x_next_1_mask] = 1
 
                 # (6.5) Create a mask on the active molecules given the newly predicted atom types
                 x_next_mask = x_next == 0  # [active_mol_count]

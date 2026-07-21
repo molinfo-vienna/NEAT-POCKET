@@ -28,7 +28,7 @@ ROOT = os.getcwd()
 
 
 def generate(args: argparse.Namespace) -> None:
-    """Generate molecules using the NEAT model.
+    """Generate molecules conditioned on a protein pocket using the NEAT model.
 
     Args:
         args (argparse.Namespace): Command line arguments.
@@ -36,6 +36,8 @@ def generate(args: argparse.Namespace) -> None:
     Returns:
         None
     """
+
+    # Load config file
     if args.config_file is not None:
         CONFIG_FILE_PATH = args.config_file
         print(f"Using config file: {CONFIG_FILE_PATH}")
@@ -50,6 +52,7 @@ def generate(args: argparse.Namespace) -> None:
         Loader=yaml.FullLoader,
     )
 
+    # Load checkpoint file
     checkpoints_dir = os.path.join(ROOT, params["checkpoints_path"], "checkpoints")
     pt_files = [
         f
@@ -62,9 +65,11 @@ def generate(args: argparse.Namespace) -> None:
     checkpoints_path = os.path.join(checkpoints_dir, pt_files[0])
     print(f"Using checkpoint file: {checkpoints_path}")
 
+    # Load model from checkpoint
     MODEL = NEAT
     model = MODEL.load_from_checkpoint(checkpoints_path, map_location=DEVICE)
 
+    # Load test data
     datamodule = DataModule(
         os.path.join(ROOT, "data"),
         params["data_set"].upper(),
@@ -72,6 +77,7 @@ def generate(args: argparse.Namespace) -> None:
     datamodule.setup()
     test_data = datamodule.test_data
 
+    # Generate molecules conditioned on a protein pocket
     num_molecules = params["num_molecules"]
     chunk_size = params["chunk_size"]
 
@@ -97,31 +103,36 @@ def generate(args: argparse.Namespace) -> None:
         for data_idx_in_chunk, data_idx in enumerate(
             range(chunk_start_idx, min(chunk_start_idx + chunk_size, len(test_data)))
         ):
+
+            pdb_code = test_data.get_pdb_code_from_data_point(test_data[data_idx])
+
             out_dir = os.path.join(
-                ROOT, params["output_path"], "conditional", f"pocket_{data_idx}"
+                ROOT, params["output_path"], "conditional", f"pocket_{pdb_code}"
             )
             if not os.path.exists(out_dir):
                 os.makedirs(out_dir)
-
+            
+            # Load pocket file, center pocket, and save centered pocket to out_dir
             in_pdb_file = test_data.get_pocket_path_from_data_point(test_data[data_idx])
             out_pdb_file = os.path.join(out_dir, "pocket.pdb")
             pocket_center = center_pdb(in_pdb_file, out_pdb_file, return_center=True)
+            
+            # Load ligand file, center ligand, and save centered ligand to out_dir
             in_sdf_file = in_pdb_file.replace("_pocket10.pdb", ".sdf")
             out_sdf_file = os.path.join(out_dir, "ligand.sdf")
-            supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False)
+            supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False, sanitize=False)
             mol = supplier[0]
             conformer = mol.GetConformer()
             for i in range(mol.GetNumAtoms()):
                 pos = conformer.GetAtomPosition(i)
-                # Convert Point3D to numpy array, subtract center, and update
                 new_pos = np.array([pos.x, pos.y, pos.z]) - pocket_center
                 conformer.SetAtomPosition(i, new_pos)
-
-            # 4. Save the modified molecule back to an SDF file
             writer = Chem.SDWriter(out_sdf_file)
             writer.write(mol)
             writer.close()
 
+            # Subset generated molecules to the current chunk and save to out_dir as a PyTorch tensor
+            # SD files are generated and saved in the evaluation.py script
             subset_mask = torch.isin(
                 generated_mols.batch,
                 torch.arange(

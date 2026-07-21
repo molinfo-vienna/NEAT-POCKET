@@ -13,10 +13,8 @@ import torch
 import random
 from Bio.PDB import PDBParser
 from Bio.PDB.Polypeptide import is_aa
-from openbabel import openbabel
 from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem
-from rdkit.Chem.MolStandardize.rdMolStandardize import TautomerEnumerator
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
 from dask.distributed import Client, LocalCluster, as_completed
@@ -32,27 +30,27 @@ RDKIT_BOND_TO_ID = {
     Chem.rdchem.BondType.AROMATIC: 4,
 }
 
-LIGAND_VOCABULARY = {
+ATOM_VOCABULARY = {
     1: 1,  # H
     5: 2,  # B
     6: 3,  # C
     7: 4,  # N
     8: 5,  # O
     9: 6,  # F
-    13: 7,  # Al ?
-    14: 8,  # Si ?
+    13: 7,  # Al
+    14: 8,  # Si
     15: 9,  # P
     16: 10,  # S
     17: 11,  # Cl
-    33: 12,  # As ?
+    33: 12,  # As
     35: 13,  # Br
     53: 14,  # I
-    80: 15,  # Hg ?
-    83: 16,  # Bi ?
+    80: 15,  # Hg
+    83: 16,  # Bi
 }
 
 # Standard 20 amino acids + unknown
-AA_3_TO_IDX = {
+AA_VOCABULARY = {
     "ALA": 0,
     "ARG": 1,
     "ASN": 2,
@@ -74,7 +72,7 @@ AA_3_TO_IDX = {
     "TYR": 18,
     "VAL": 19,
 }
-AA_UNK_IDX = 20
+AA_VOCABULARY_UNK = 20
 
 
 def _largest_fragment(mol: Chem.Mol) -> Chem.Mol | None:
@@ -125,40 +123,31 @@ def _add_hydrogens_with_rdkit(mol: Chem.Mol, max_attempts: int = 50) -> Chem.Mol
         return None
 
 
-def _add_hydrogens_with_openbabel(mol: Chem.Mol) -> Chem.Mol:
+# def _add_hydrogens_with_openbabel(mol: Chem.Mol) -> Chem.Mol:
 
-    try:
-        # Convert RDKit molecule to OpenBabel molecule
-        ob_conversion = openbabel.OBConversion()
-        ob_conversion.SetInFormat("mol")
-        ob_conversion.SetOutFormat("mol")
+#     try:
+#         # Convert RDKit molecule to OpenBabel molecule
+#         ob_conversion = openbabel.OBConversion()
+#         ob_conversion.SetInFormat("mol")
+#         ob_conversion.SetOutFormat("mol")
         
-        # Generate a temporary MOL file from RDKit molecule
-        mol_block = Chem.MolToMolBlock(mol)
-        ob_mol = openbabel.OBMol()
-        ob_conversion.ReadString(ob_mol, mol_block)
+#         # Generate a temporary MOL file from RDKit molecule
+#         mol_block = Chem.MolToMolBlock(mol)
+#         ob_mol = openbabel.OBMol()
+#         ob_conversion.ReadString(ob_mol, mol_block)
         
-        # Add hydrogens using OpenBabel
-        ob_mol.AddHydrogens()
+#         # Add hydrogens using OpenBabel
+#         ob_mol.AddHydrogens()
         
-        # Convert OpenBabel molecule back to RDKit molecule
-        updated_mol_block = ob_conversion.WriteString(ob_mol)
-        updated_rdkit_mol = Chem.MolFromMolBlock(updated_mol_block, removeHs=False)
+#         # Convert OpenBabel molecule back to RDKit molecule
+#         updated_mol_block = ob_conversion.WriteString(ob_mol)
+#         updated_rdkit_mol = Chem.MolFromMolBlock(updated_mol_block, removeHs=False)
         
-        # Return the updated RDKit molecule
-        return updated_rdkit_mol
+#         # Return the updated RDKit molecule
+#         return updated_rdkit_mol
     
-    except Exception:
-        return None
-
-    
-def _add_hydrogens(mol: Chem.Mol) -> Chem.Mol:
-    te = TautomerEnumerator()
-    mol = te.Canonicalize(mol)
-    mol_hydrogenated = _add_hydrogens_with_rdkit(mol)
-    if mol_hydrogenated is None:
-        mol_hydrogenated = _add_hydrogens_with_openbabel(mol)
-    return mol_hydrogenated
+#     except Exception:
+#         return None
 
 
 def _ligand_features(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
@@ -166,7 +155,7 @@ def _ligand_features(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
     try:
         n = mol.GetNumAtoms()
         x = torch.tensor(
-            [LIGAND_VOCABULARY[a.GetAtomicNum()] for a in mol.GetAtoms()],
+            [ATOM_VOCABULARY[a.GetAtomicNum()] for a in mol.GetAtoms()],
             dtype=torch.long,
         )
         conf = mol.GetConformer()
@@ -222,7 +211,7 @@ def _pocket_features(
                 if not is_aa(residue.get_resname(), standard=True):
                     continue
                 resname = residue.get_resname().strip().upper()
-                residue_type = AA_3_TO_IDX.get(resname, AA_UNK_IDX)
+                residue_type = AA_VOCABULARY.get(resname, AA_VOCABULARY_UNK)
 
                 heavy = [
                     a
@@ -235,7 +224,7 @@ def _pocket_features(
                 for atom in heavy:
                     atom_type = _pdb_heavy_element_symbol(atom)
                     atom_type_encoded = _encode_pocket_atom(
-                        atom_type, LIGAND_VOCABULARY
+                        atom_type, ATOM_VOCABULARY
                     )
                     atom_coords = np.asarray(atom.get_coord(), dtype=np.float32)
                     selected.append(
@@ -284,22 +273,21 @@ def _process_pair(
 
     if rdmol.GetNumAtoms() < 1:
         logger.warning(f"Ligand {ligand_path}: number of atoms is less than 1.")
-        # )
         return None
 
     for atom in rdmol.GetAtoms():
         z = atom.GetAtomicNum()
-        if z not in LIGAND_VOCABULARY:
+        if z not in ATOM_VOCABULARY:
             logger.warning(
                 f"Ligand {ligand_path}: atomic number {z} not in vocabulary."
             )
             return None
 
     if add_hydrogens:
-        rdmol = _add_hydrogens(rdmol)
+        rdmol = _add_hydrogens_with_rdkit(rdmol)
         if rdmol is None:
             logger.warning(
-                f"Ligand {ligand_path}: embedding hydrogen atoms with RDKit or OpenBabel failed."
+                f"Ligand {ligand_path}: embedding hydrogen atoms with RDKit failed."
             )
             return None
 
@@ -624,6 +612,11 @@ class CrossDockedDataSet(InMemoryDataset):
             "pocket_batch": pocket_batch,
         }
         return pocket_info
+
+    def get_pdb_code_from_data_point(self, data_point):
+        name = data_point.name.split("__")[0]
+        pdb_code = name.split("_")[0].upper()
+        return pdb_code
 
     def get_pocket_path_from_data_point(self, data_point):
         name = data_point.name.split("__")[0]

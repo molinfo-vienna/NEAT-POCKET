@@ -5,7 +5,7 @@ from typing import Optional
 
 import torch
 from rdkit import Chem
-from rdkit.Chem import Mol, MolToSmiles, rdDetermineBonds, rdmolfiles
+from rdkit.Chem import Mol, rdDetermineBonds, rdmolfiles
 from tqdm import tqdm
 
 from neat.model import BondPredictor
