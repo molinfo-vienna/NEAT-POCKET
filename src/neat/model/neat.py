@@ -1195,6 +1195,7 @@ class NEAT(LightningModule):
         integration_method: str = "euler_maruyama",
         cfg_factor: float = 0.0,
         pocket_info: dict | None = None,
+        fragment_info: dict | None = None,
         temperature: float = 1.0,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Generate a molecule using the flow matching network.
@@ -1211,6 +1212,7 @@ class NEAT(LightningModule):
             cfg_factor (float): Factor for conditional generation (CrossDocked only).
             pocket_info: For CrossDocked, dict with pocket_x, pocket_pos, pocket_residue_id,
                 pocket_residue_type, pocket_batch. Ignored for QM9 and GEOM.
+            fragment_info: For CrossDocked, dict with fragment_x, fragment_pos, fragment_batch.
         Returns:
             tuple[Tensor, Tensor, Tensor]: The atom types, their positions, and the batch indices of the generated molecules.
         """
@@ -1237,6 +1239,19 @@ class NEAT(LightningModule):
 
             rotation_augmentation = RandomRotationAugmentation()
             pos = rotation_augmentation.rotate_molecule_randomly(pos, batch_source)
+        
+        elif fragment_info is not None:
+            x = fragment_info["fragment_x"].to(device)
+            pos = fragment_info["fragment_pos"].to(device)
+            batch_source = fragment_info["fragment_batch"].to(device)
+            mean_pos = global_mean_pool(pos, batch_source)
+            pos = pos - mean_pos[batch_source]
+            if pocket_info is not None:
+                pocket_info["pocket_pos"] = (
+                    pocket_info["pocket_pos"]
+                    - mean_pos[pocket_info["pocket_batch"]]
+                )
+            
 
         else:
             # (1) Sample initial atoms from the prior distribution of atom types
