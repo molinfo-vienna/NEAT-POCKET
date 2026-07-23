@@ -15,6 +15,7 @@ from tqdm import tqdm
 import logging
 
 import numpy as np
+import pandas as pd
 import py3Dmol
 import rdkit
 import yaml
@@ -93,7 +94,10 @@ def iter_result_subdirs(data_path: Path) -> Iterator[Path]:
 # ---------------------------------------------------------------------------
 
 
-def save_2d_molecules_visualizations_to_png(subdir: Path, mols: list) -> None:
+def save_2d_molecules_visualizations_to_png(
+    subdir: Path, 
+    mols: list
+) -> None:
     subset = mols[:NUM_MOLECULES_PLOTTED]
 
     for mol in subset:
@@ -230,6 +234,35 @@ def molecule_pipeline_label(params: dict, *, use_bond_predictor: bool) -> str:
         return f"bond predictor ({params['bond_predictor_path']})"
     return "xyz2mol"
 
+
+def pb_validity_from_pb_reports(data_path: Path) -> float:
+    report = None
+
+    for pocket_dir in os.listdir(data_path):
+        if not os.path.isdir(os.path.join(data_path, pocket_dir)):
+            print(f"{pocket_dir} is not a directory.")
+            continue
+
+        report_file = os.path.join(data_path, pocket_dir, "posebusters_report.csv")
+        if not os.path.exists(report_file):
+            print(f"Pocket {pocket_dir} does not have a posebusters report.")
+            continue
+
+        report_ = pd.read_csv(report_file)
+        report_["all"] = report_.all(axis=1)
+        report_["pocket"] = pocket_dir.split("_")[1]
+
+        if report is None:
+            report = report_
+        else:
+            report = pd.concat([report, report_], ignore_index=True)
+
+    stats = {}
+    for column in report.columns:
+        if column != "pocket":
+            stats[column] = report[column].sum() / len(report)
+
+    return stats["all"]
 
 # ---------------------------------------------------------------------------
 # I/O
@@ -449,6 +482,8 @@ def write_summary(
                 _write_aggregate_dict_metrics(
                     f, "PoseBusters metrics", aggregate.posebusters, as_percent=True
                 )
+                pb_validity = pb_validity_from_pb_reports(data_path)
+                f.write(f"PoseBusters validity: {pct(pb_validity)}\n")
             else:
                 f.write("PoseBusters metrics: No data available\n")
 
