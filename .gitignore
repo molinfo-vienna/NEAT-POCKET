@@ -1,6 +1,7 @@
 __pycache__/
 notebooks/
 build
+plotting
 data
 logs 
 output
