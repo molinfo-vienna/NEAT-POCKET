@@ -1,9 +1,10 @@
-checkpoints_path: logs/NEAT/version_72
-output_path: output/version_72
+checkpoints_path: logs/NEAT/version_121
+output_path: output/version_121
 data_set: CrossDocked
 num_molecules: 100
-chunk_size: 4
+chunk_size: 3
 max_atoms: 200
 num_time_steps: 60
 time_step_spacing: linear
 integration_method: euler_maruyama
+fbdd: true

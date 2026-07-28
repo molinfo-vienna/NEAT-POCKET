@@ -11,8 +11,11 @@ from pathlib import Path
 from typing import Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
+from rdkit import Chem
 from tqdm import tqdm
 import logging
+import tempfile
+
 
 import numpy as np
 import pandas as pd
@@ -42,6 +45,7 @@ from neat.model.molecule_builder import MoleculeBuilder
 from neat.utils.edm_metrics import compute_edm_metrics_from_tensors
 from neat.utils.pose_check_metrics import compute_pose_check_metrics_from_mols
 from neat.utils.sbdd_metrics import ClashEvaluator, GninaEvaluator
+from neat.dataset.dataset_crossdocked import _add_hydrogens_with_rdkit
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -121,8 +125,8 @@ def save_2d_molecules_visualizations_to_png(
         if mol is None:
             mols_2d_no_h.append(None)
             continue
-        mol_no_h = AllChem.RemoveHs(mol)
         try:
+            mol_no_h = AllChem.RemoveHs(mol)
             rdDepictor.Compute2DCoords(mol_no_h)
         except Exception as e:
             print(f"Warning: Failed to compute 2D coordinates for a molecule: {e}")
@@ -176,15 +180,18 @@ def save_3d_molecules_visualizations_to_html(
 def compute_validity_uniqueness_novelty(
     mols: list[Mol],
     reference_smiles: list[str] | None = None,
-) -> tuple[float, float, float | None]:
+) -> tuple[float, float, float | None, list[bool | None]]:
     """Return validity, uniqueness, and optional novelty ratios."""
 
     smiles: list[str] = []
     num_valid = 0
+    total_mols = len(mols)
 
     # Validity computed as number of valid molecules / total number of molecules
     # Valid molecules are those that are not None, can be sanitized, and can be converted to a canonical SMILES string
-    for mol in mols:
+    
+    validity_flag_list = [False] * total_mols
+    for i, mol in enumerate(mols):
         if mol is not None:
             mol_copy = copy.deepcopy(mol)
             sanitization_flag = SanitizeMol(mol_copy, catchErrors=True)
@@ -194,23 +201,24 @@ def compute_validity_uniqueness_novelty(
             if smiles is not None:
                 smiles.append(smile)
                 num_valid += 1
+                validity_flag_list[i] = True
 
-    p_valid = num_valid / len(mols)
+    p_valid = num_valid / total_mols
 
     # Uniqueness computed as number of unique canonical SMILES strings / total number of molecules
     unique_smiles = set[str](smiles)
-    p_valid_unique = len(unique_smiles) / len(mols)
+    p_valid_unique = len(unique_smiles) / total_mols
 
     # Novelty computed as number of unique canonical SMILES strings that are not in the reference set / total number of molecules
     if reference_smiles is None:
-        return p_valid, p_valid_unique, None
+        return p_valid, p_valid_unique, None, validity_flag_list
 
     ref_set = set(reference_smiles)
     num_novel = len(unique_smiles - ref_set)
 
-    p_valid_unique_novel = num_novel / len(mols)
+    p_valid_unique_novel = num_novel / total_mols
 
-    return p_valid, p_valid_unique, p_valid_unique_novel
+    return p_valid, p_valid_unique, p_valid_unique_novel, validity_flag_list
 
 
 def compute_mean_and_95_ci(data: list[float]) -> tuple[float, float]:
@@ -608,10 +616,10 @@ class AggregateResults:
 def _compute_rdkit_metrics(
     mols: list[Mol], reference_smiles: list[str] | None
 ) -> RdkitMetrics:
-    valid, valid_x_unique, valid_x_unique_x_novel = compute_validity_uniqueness_novelty(
+    valid, valid_x_unique, valid_x_unique_x_novel, validity_flag_list = compute_validity_uniqueness_novelty(
         mols, reference_smiles
     )
-    return RdkitMetrics(valid, valid_x_unique, valid_x_unique_x_novel)
+    return RdkitMetrics(valid, valid_x_unique, valid_x_unique_x_novel), validity_flag_list
 
 
 # ---------------------------------------------------------------------------
@@ -656,19 +664,16 @@ def compute_physchem_properties_from_mols(mols: list) -> dict[str, float] | None
     }
 
 
-def run_posebusters(subdir: Path) -> dict[str, float]:
+def run_posebusters(cond_file: Path, pred_file: Path) -> dict[str, float]:
     buster = PoseBusters(config="mol")
-    pred_file = Path(subdir / "generated_mols.sdf")
-    cond_file = None
-    for file in subdir.iterdir():
-        if file.name.endswith(".pdb"):
-            cond_file = Path(file)
-            break
-    if cond_file is not None:
+
+    
+    if os.path.exists(cond_file):
         buster = PoseBusters(config="dock")
     df = buster.bust(
         mol_pred=[pred_file], mol_true=None, mol_cond=cond_file, full_report=False
     )
+    subdir = cond_file.parent
     df.to_csv(subdir / "posebusters_report.csv", index=False)
     try:
         return {column: df[column].mean() for column in df.columns}
@@ -697,7 +702,19 @@ def evaluate_subdirectory(
 
     if use_sdf:
         supplier = SDMolSupplier(str(subdir / "generated_mols.sdf"), removeHs=False, sanitize=False)
-        mols = [mol for mol in supplier]
+        mols = []
+        for mol in supplier:
+            try:
+                Chem.SanitizeMol(mol)
+                mol = Chem.AddHs(mol, addCoords=True)
+                mols.append(mol)
+            except Exception as e:
+                print(f"Warning: Failed to sanitize a molecule: {e}")
+                continue
+        if len(mols) < 100:
+            mols += [None] * (100 - len(mols))  # Pad with None if fewer than 100 molecules
+        
+        save_molecules_to_sdf(mols, subdir / "generated_mols_with_hs.sdf")
     else:
         builder = MoleculeBuilder(vocab=params["data_set"])
         x, pos, batch = builder.load_tensor_from_file(subdir)
@@ -718,9 +735,6 @@ def evaluate_subdirectory(
 
         save_molecules_to_sdf(mols, subdir / "generated_mols.sdf")
 
-    result.rdkit = _compute_rdkit_metrics(
-        mols, reference_smiles
-    )
 
     if compute_edm:
         atom_stability, mol_stability, edm_valid, edm_unique, _ = (
@@ -733,11 +747,27 @@ def evaluate_subdirectory(
             valid_x_unique=edm_valid * edm_unique,
         )
 
+    result.rdkit, validity_flag_list = _compute_rdkit_metrics(
+        mols, reference_smiles
+    )
+    
+    mols = [mol for mol, is_valid in zip(mols, validity_flag_list) if is_valid]
+    
+    with tempfile.NamedTemporaryFile(suffix=".sdf", delete=False) as tmp:
+        mol_sdf_path = tmp.name
+        
+    writer = Chem.SDWriter(mol_sdf_path)
+    for mol in mols:
+        if mol is not None:
+            writer.write(mol)
+    writer.close()
+    
+    pocket_path = subdir / "pocket.pdb"
+    
     if compute_posebusters:
-        result.posebusters = run_posebusters(subdir)
+        result.posebusters = run_posebusters(pocket_path, mol_sdf_path)
 
     if compute_posecheck:
-        pocket_path = subdir / "pocket.pdb"
         result.posecheck = compute_pose_check_metrics_from_mols(mols, str(pocket_path))
 
     if compute_drugflow_clashes:
@@ -748,7 +778,6 @@ def evaluate_subdirectory(
     if compute_vina:
         gnina_evaluator = GninaEvaluator()
         pocket_path = subdir / "pocket.pdb"
-        mol_sdf_path = subdir / "generated_mols.sdf"
         ligand_sdf_path = subdir / "ligand.sdf"
         vina_results = gnina_evaluator.evaluate_mols(
             mol_sdf_path, str(pocket_path), str(ligand_sdf_path), minimize=True
@@ -862,6 +891,8 @@ def evaluate(args: argparse.Namespace) -> None:
         reference_smiles = None
 
     data_path = ROOT / params["data_path"] / params["data_subdir"]
+    #from pathlib import Path
+    #data_path = Path("/data/sharedXL/projects/Daniel/baselines/Pocket2Mol/outputs_pocket2mol")
     aggregate = AggregateResults()
 
     num_workers = params.get("num_workers", 1)
