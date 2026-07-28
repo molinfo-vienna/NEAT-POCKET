@@ -498,7 +498,7 @@ class NEAT(LightningModule):
             cross_attn_mask = cross_attn_mask.unsqueeze(1).expand(
                 -1, self.hparams.n_head, -1, -1
             )  # [batch_size, n_head, max_residue_count, max_atom_count]
-        else:
+        elif self.enable_cross_attention:
             x_residues = None
             cross_attn_mask = None
             ada_ln_condition = self.null_condition_embedding.expand(batch_size, -1)
@@ -516,6 +516,10 @@ class NEAT(LightningModule):
                 cross_attn_mask = cross_attn_mask.unsqueeze(1).expand(
                     -1, self.hparams.n_head, -1, -1
                 )  # [batch_size, n_head, max_residue_count, max_atom_count]
+        else:
+            x_residues = None
+            cross_attn_mask = None
+            ada_ln_condition = None
 
         if self.hparams.global_cond_proj:
             ada_ln_condition = self.global_condition_projection(
