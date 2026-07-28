@@ -12,7 +12,7 @@ from rdkit.Chem import (QED, SanitizeFlags, SanitizeMol, SDMolSupplier,
                         rdFingerprintGenerator, rdMolDescriptors)
 from scipy.spatial.distance import jensenshannon
 
-plt.rcParams["font.size"] = 16
+plt.rcParams["font.size"] = 18
 
 ROOT = Path(os.getcwd())
 FPSCORES_PATH = ROOT / "scripts" / "data_analysis" / "fpscores.pkl.gz"
@@ -41,7 +41,7 @@ METHODS = list(COLOR_SCHEME.keys())
 COLORS = list(COLOR_SCHEME.values())
 
 
-def bar_deviation_by_method(ax, values, methods=None, colors=None):
+def bar_relative_by_method(ax, values, methods=None, colors=None):
     """Bar plot of deviations from CrossDocked (baseline at y=0)."""
     methods = METHODS if methods is None else methods
     colors = COLORS if colors is None else colors
@@ -49,6 +49,15 @@ def bar_deviation_by_method(ax, values, methods=None, colors=None):
         ax.bar(method, value, color=color, label=method)
     ax.tick_params(axis="x", labelrotation=45)
     ax.axhline(0, color="black", linewidth=1, linestyle="-")
+
+
+def bar_absolute_by_method(ax, values, methods=None, colors=None):
+    """Bar plot of absolute values for each method."""
+    methods = METHODS if methods is None else methods
+    colors = COLORS if colors is None else colors
+    for method, value, color in zip(methods, values, colors):
+        ax.bar(method, value, color=color, label=method)
+    ax.tick_params(axis="x", labelrotation=45)
 
 
 def safe_fraction(numerator, denominator):
@@ -80,98 +89,222 @@ def compute_fragment_score(mol, fpscores):
     return safe_fraction(frag_score, num_frag_bits)
 
 
-def compute_general_stats(mol):
-    num_bonds = mol.GetNumBonds()
-    num_atoms = mol.GetNumAtoms()
-    num_heavy_atoms = rdMolDescriptors.CalcNumHeavyAtoms(mol)
-    frac_hetero_atoms = safe_fraction(
-        rdMolDescriptors.CalcNumHeteroatoms(mol), num_atoms
-    )
-    frac_halogen_atoms = safe_fraction(get_num_halogen_atoms(mol), num_atoms)
-    frac_rotatable_bonds = safe_fraction(
-        rdMolDescriptors.CalcNumRotatableBonds(mol), num_bonds
-    )
-    frac_chiral_centers = safe_fraction(
-        len(Chem.FindMolChiralCenters(mol, includeUnassigned=True)), num_atoms
-    )
-    frac_hba = safe_fraction(rdMolDescriptors.CalcNumHBA(mol), num_atoms)
-    frac_hbd = safe_fraction(rdMolDescriptors.CalcNumHBD(mol), num_atoms)
-    logp, _ = rdMolDescriptors.CalcCrippenDescriptors(mol)
-    tpsa = rdMolDescriptors.CalcTPSA(mol)
-    qed_score = QED.qed(mol)
-
-    return (
-        num_heavy_atoms,
-        frac_hetero_atoms,
-        frac_halogen_atoms,
-        frac_rotatable_bonds,
-        frac_chiral_centers,
-        frac_hba,
-        frac_hbd,
-        logp,
-        tpsa,
-        qed_score,
-    )
-
-
-def compute_ring_stats(mol):
-    num_atoms = mol.GetNumAtoms()
-    ring_info = mol.GetRingInfo()
-    num_rings = rdMolDescriptors.CalcNumRings(mol)
-    frac_aromatic_rings = safe_fraction(
-        rdMolDescriptors.CalcNumAromaticRings(mol), num_rings
-    )
-    frac_aliphatic_rings = safe_fraction(
-        rdMolDescriptors.CalcNumAliphaticRings(mol), num_rings
-    )
-    num_rings_3 = 0
-    num_rings_4 = 0
-    num_rings_5 = 0
-    num_rings_6 = 0
-    num_rings_7 = 0
-    num_rings_8 = 0
+def get_ring_counts(mol):
+    ring_counts = {size: 0 for size in range(3, 9)}
     num_macrocycles = 0
-    for x in ring_info.AtomRings():
-        if len(x) == 3:
-            num_rings_3 += 1
-        elif len(x) == 4:
-            num_rings_4 += 1
-        elif len(x) == 5:
-            num_rings_5 += 1
-        elif len(x) == 6:
-            num_rings_6 += 1
-        elif len(x) == 7:
-            num_rings_7 += 1
-        elif len(x) == 8:
-            num_rings_8 += 1
+    for ring in mol.GetRingInfo().AtomRings():
+        ring_size = len(ring)
+        if ring_size in ring_counts:
+            ring_counts[ring_size] += 1
         else:
             num_macrocycles += 1
-    frac_rings_3 = safe_fraction(num_rings_3, num_rings)
-    frac_rings_4 = safe_fraction(num_rings_4, num_rings)
-    frac_rings_5 = safe_fraction(num_rings_5, num_rings)
-    frac_rings_6 = safe_fraction(num_rings_6, num_rings)
-    frac_rings_7 = safe_fraction(num_rings_7, num_rings)
-    frac_rings_8 = safe_fraction(num_rings_8, num_rings)
-    frac_macrocycles = safe_fraction(num_macrocycles, num_rings)
-    frac_bridgeheads = safe_fraction(
-        rdMolDescriptors.CalcNumBridgeheadAtoms(mol), num_atoms
-    )
-    frac_spiro = safe_fraction(rdMolDescriptors.CalcNumSpiroAtoms(mol), num_atoms)
+    return ring_counts, num_macrocycles
 
-    return (
-        num_rings,
-        frac_aromatic_rings,
-        frac_aliphatic_rings,
-        frac_rings_3,
-        frac_rings_4,
-        frac_rings_5,
-        frac_rings_6,
-        frac_rings_7,
-        frac_rings_8,
-        frac_macrocycles,
-        frac_bridgeheads,
-        frac_spiro,
+
+GENERAL_STAT_FUNCS = [
+    ("molecular weight", lambda mol: rdMolDescriptors.CalcExactMolWt(mol)),
+    ("heavy atoms", lambda mol: rdMolDescriptors.CalcNumHeavyAtoms(mol)),
+    (
+        "fraction hetero atoms",
+        lambda mol: safe_fraction(
+            rdMolDescriptors.CalcNumHeteroatoms(mol), mol.GetNumAtoms()
+        ),
+    ),
+    (
+        "fraction halogen atoms",
+        lambda mol: safe_fraction(get_num_halogen_atoms(mol), mol.GetNumAtoms()),
+    ),
+    (
+        "fraction rotatable bonds",
+        lambda mol: safe_fraction(
+            rdMolDescriptors.CalcNumRotatableBonds(mol), mol.GetNumBonds()
+        ),
+    ),
+    (
+        "fraction chiral centers",
+        lambda mol: safe_fraction(
+            len(Chem.FindMolChiralCenters(mol, includeUnassigned=True)),
+            mol.GetNumAtoms(),
+        ),
+    ),
+    (
+        "fraction HBA",
+        lambda mol: safe_fraction(rdMolDescriptors.CalcNumHBA(mol), mol.GetNumAtoms()),
+    ),
+    (
+        "fraction HBD",
+        lambda mol: safe_fraction(rdMolDescriptors.CalcNumHBD(mol), mol.GetNumAtoms()),
+    ),
+    ("LogP", lambda mol: rdMolDescriptors.CalcCrippenDescriptors(mol)[0]),
+    ("QED", lambda mol: QED.qed(mol)),
+]
+
+RING_STAT_FUNCS = [
+    ("number of rings", lambda mol: rdMolDescriptors.CalcNumRings(mol)),
+    (
+        "fraction aromatic rings",
+        lambda mol: safe_fraction(
+            rdMolDescriptors.CalcNumAromaticRings(mol),
+            rdMolDescriptors.CalcNumRings(mol),
+        ),
+    ),
+    (
+        "fraction aliphatic rings",
+        lambda mol: safe_fraction(
+            rdMolDescriptors.CalcNumAliphaticRings(mol),
+            rdMolDescriptors.CalcNumRings(mol),
+        ),
+    ),
+    (
+        "fraction 3-rings",
+        lambda mol: safe_fraction(
+            get_ring_counts(mol)[0][3], rdMolDescriptors.CalcNumRings(mol)
+        ),
+    ),
+    (
+        "fraction 4-rings",
+        lambda mol: safe_fraction(
+            get_ring_counts(mol)[0][4], rdMolDescriptors.CalcNumRings(mol)
+        ),
+    ),
+    (
+        "fraction 5-rings",
+        lambda mol: safe_fraction(
+            get_ring_counts(mol)[0][5], rdMolDescriptors.CalcNumRings(mol)
+        ),
+    ),
+    (
+        "fraction 6-rings",
+        lambda mol: safe_fraction(
+            get_ring_counts(mol)[0][6], rdMolDescriptors.CalcNumRings(mol)
+        ),
+    ),
+    (
+        "fraction 7-rings",
+        lambda mol: safe_fraction(
+            get_ring_counts(mol)[0][7], rdMolDescriptors.CalcNumRings(mol)
+        ),
+    ),
+    (
+        "fraction 8-rings",
+        lambda mol: safe_fraction(
+            get_ring_counts(mol)[0][8], rdMolDescriptors.CalcNumRings(mol)
+        ),
+    ),
+    (
+        "fraction macrocycles",
+        lambda mol: safe_fraction(
+            get_ring_counts(mol)[1], rdMolDescriptors.CalcNumRings(mol)
+        ),
+    ),
+    (
+        "fraction bridgehead atoms",
+        lambda mol: safe_fraction(
+            rdMolDescriptors.CalcNumBridgeheadAtoms(mol), mol.GetNumAtoms()
+        ),
+    ),
+    (
+        "fraction spiro atoms",
+        lambda mol: safe_fraction(rdMolDescriptors.CalcNumSpiroAtoms(mol), mol.GetNumAtoms()),
+    ),
+]
+
+
+def describe_molecule(mol, mol_idx):
+    try:
+        smiles = Chem.MolToSmiles(mol)
+    except Exception:
+        smiles = "<SMILES unavailable>"
+    return f"molecule #{mol_idx} ({smiles})"
+
+
+def compute_property_list(mols, method_name, property_name, compute_fn):
+    values = []
+    for mol_idx, mol in enumerate(mols, start=1):
+        try:
+            values.append(compute_fn(mol))
+        except Exception as exc:
+            logging.warning(
+                "Skipping %s for %s %s: %s",
+                property_name,
+                method_name,
+                describe_molecule(mol, mol_idx),
+                exc,
+            )
+    return np.array(values, dtype=float)
+
+
+def compute_property_lists(mols, method_name, property_funcs):
+    return {
+        property_name: compute_property_list(mols, method_name, property_name, compute_fn)
+        for property_name, compute_fn in property_funcs
+    }
+
+
+def property_means(property_lists, property_names):
+    return np.array(
+        [
+            property_lists[property_name].mean()
+            if property_lists[property_name].size
+            else np.nan
+            for property_name in property_names
+        ]
     )
+
+
+def log_missing_property_counts(method_name, property_lists, total_molecules):
+    for property_name, values in property_lists.items():
+        missing_count = total_molecules - len(values)
+        if missing_count:
+            logging.info(
+                "\t%s: omitted %s/%s molecules for %s",
+                method_name,
+                missing_count,
+                total_molecules,
+                property_name,
+            )
+
+
+def format_distribution_summary(values):
+    if not values.size:
+        return "no valid values"
+    return f"{values.min()}, {values.mean()}, {values.max()}"
+
+
+def median_or_nan(values):
+    return np.median(values) if values.size else np.nan
+
+
+def mean_or_nan(values):
+    return values.mean() if values.size else np.nan
+
+
+def safe_draw_median(ax, values, color):
+    median = median_or_nan(values)
+    if not np.isnan(median):
+        ax.axvline(median, color=color, linestyle="--", linewidth=3)
+    return median
+
+
+def compute_js_divergence_by_method(reference_values, values_by_method):
+    valid_value_sets = [values for values in values_by_method.values() if values.size]
+    if not reference_values.size or not valid_value_sets:
+        return {method: np.nan for method in METHODS}
+
+    all_values = np.concatenate(valid_value_sets)
+    bin_edges = np.histogram_bin_edges(all_values, bins=100)
+    js_by_method = {}
+    for method in METHODS:
+        values = values_by_method[method]
+        if not values.size:
+            logging.warning(
+                "Skipping fragment score Jensen-Shannon divergence for %s: no valid values",
+                method,
+            )
+            js_by_method[method] = np.nan
+            continue
+        js_by_method[method] = js_divergence(reference_values, values, bin_edges)
+    return js_by_method
 
 
 def get_mols(path):
@@ -182,8 +315,11 @@ def get_mols(path):
                 mols_file = os.path.join(path, dir, "generated_mols.sdf")
             else:
                 mols_file = os.path.join(path, dir, "ligands.sdf")
+                # This is sued for the CrossDocked data
             supplier = SDMolSupplier(mols_file, removeHs=False, sanitize=False)
             mols.extend([mol for mol in supplier])
+    # Add hydrogens with the RDKit AddHs method
+    mols = [Chem.AddHs(mol, addCoords=True) for mol in mols if mol is not None]
     # Add aromaticity flags without sanitizing whole molecules
     [
         SanitizeMol(mol, sanitizeOps=SanitizeFlags.SANITIZE_SETAROMATICITY)
@@ -291,104 +427,159 @@ def main() -> None:
 
     ### Compute statistics ###
 
-    fragment_scores_crossdocked = np.array(
-        [compute_fragment_score(mol, fpscores) for mol in mols_crossdocked]
+    fragment_scores_crossdocked = compute_property_list(
+        mols_crossdocked,
+        "CrossDocked",
+        "fragment score",
+        lambda mol: compute_fragment_score(mol, fpscores),
     )
-    general_stats_crossdocked = np.array(
-        [compute_general_stats(mol) for mol in mols_crossdocked]
+    general_stats_crossdocked = compute_property_lists(
+        mols_crossdocked, "CrossDocked", GENERAL_STAT_FUNCS
     )
-    ring_stats_crossdocked = np.array(
-        [compute_ring_stats(mol) for mol in mols_crossdocked]
-    )
-
-    fragment_scores_pocket2mol = np.array(
-        [compute_fragment_score(mol, fpscores) for mol in mols_pocket2mol]
-    )
-    general_stats_pocket2mol = np.array(
-        [compute_general_stats(mol) for mol in mols_pocket2mol]
-    )
-    ring_stats_pocket2mol = np.array(
-        [compute_ring_stats(mol) for mol in mols_pocket2mol]
+    ring_stats_crossdocked = compute_property_lists(
+        mols_crossdocked, "CrossDocked", RING_STAT_FUNCS
     )
 
-    fragment_scores_targetdiff = np.array(
-        [compute_fragment_score(mol, fpscores) for mol in mols_targetdiff]
+    fragment_scores_pocket2mol = compute_property_list(
+        mols_pocket2mol,
+        "Pocket2Mol",
+        "fragment score",
+        lambda mol: compute_fragment_score(mol, fpscores),
     )
-    general_stats_targetdiff = np.array(
-        [compute_general_stats(mol) for mol in mols_targetdiff]
+    general_stats_pocket2mol = compute_property_lists(
+        mols_pocket2mol, "Pocket2Mol", GENERAL_STAT_FUNCS
     )
-    ring_stats_targetdiff = np.array(
-        [compute_ring_stats(mol) for mol in mols_targetdiff]
+    ring_stats_pocket2mol = compute_property_lists(
+        mols_pocket2mol, "Pocket2Mol", RING_STAT_FUNCS
     )
 
-    fragment_scores_diffsbdd = np.array(
-        [compute_fragment_score(mol, fpscores) for mol in mols_diffsbdd]
+    fragment_scores_targetdiff = compute_property_list(
+        mols_targetdiff,
+        "TargetDiff",
+        "fragment score",
+        lambda mol: compute_fragment_score(mol, fpscores),
     )
-    general_stats_diffsbdd = np.array(
-        [compute_general_stats(mol) for mol in mols_diffsbdd]
+    general_stats_targetdiff = compute_property_lists(
+        mols_targetdiff, "TargetDiff", GENERAL_STAT_FUNCS
     )
-    ring_stats_diffsbdd = np.array([compute_ring_stats(mol) for mol in mols_diffsbdd])
+    ring_stats_targetdiff = compute_property_lists(
+        mols_targetdiff, "TargetDiff", RING_STAT_FUNCS
+    )
 
-    fragment_scores_drugflow = np.array(
-        [compute_fragment_score(mol, fpscores) for mol in mols_drugflow]
+    fragment_scores_diffsbdd = compute_property_list(
+        mols_diffsbdd,
+        "DiffSBDD",
+        "fragment score",
+        lambda mol: compute_fragment_score(mol, fpscores),
     )
-    general_stats_drugflow = np.array(
-        [compute_general_stats(mol) for mol in mols_drugflow]
+    general_stats_diffsbdd = compute_property_lists(
+        mols_diffsbdd, "DiffSBDD", GENERAL_STAT_FUNCS
     )
-    ring_stats_drugflow = np.array([compute_ring_stats(mol) for mol in mols_drugflow])
+    ring_stats_diffsbdd = compute_property_lists(
+        mols_diffsbdd, "DiffSBDD", RING_STAT_FUNCS
+    )
 
-    fragment_scores_neat = np.array(
-        [compute_fragment_score(mol, fpscores) for mol in mols_neat]
+    fragment_scores_drugflow = compute_property_list(
+        mols_drugflow,
+        "DrugFlow",
+        "fragment score",
+        lambda mol: compute_fragment_score(mol, fpscores),
     )
-    general_stats_neat = np.array([compute_general_stats(mol) for mol in mols_neat])
-    ring_stats_neat = np.array([compute_ring_stats(mol) for mol in mols_neat])
+    general_stats_drugflow = compute_property_lists(
+        mols_drugflow, "DrugFlow", GENERAL_STAT_FUNCS
+    )
+    ring_stats_drugflow = compute_property_lists(
+        mols_drugflow, "DrugFlow", RING_STAT_FUNCS
+    )
+
+    fragment_scores_neat = compute_property_list(
+        mols_neat,
+        "NEAT",
+        "fragment score",
+        lambda mol: compute_fragment_score(mol, fpscores),
+    )
+    general_stats_neat = compute_property_lists(mols_neat, "NEAT", GENERAL_STAT_FUNCS)
+    ring_stats_neat = compute_property_lists(mols_neat, "NEAT", RING_STAT_FUNCS)
+
+    logging.info("\nOmitted molecule-property pairs:")
+    log_missing_property_counts(
+        "CrossDocked", general_stats_crossdocked, len(mols_crossdocked)
+    )
+    log_missing_property_counts("CrossDocked", ring_stats_crossdocked, len(mols_crossdocked))
+    log_missing_property_counts(
+        "Pocket2Mol", general_stats_pocket2mol, len(mols_pocket2mol)
+    )
+    log_missing_property_counts("Pocket2Mol", ring_stats_pocket2mol, len(mols_pocket2mol))
+    log_missing_property_counts(
+        "TargetDiff", general_stats_targetdiff, len(mols_targetdiff)
+    )
+    log_missing_property_counts("TargetDiff", ring_stats_targetdiff, len(mols_targetdiff))
+    log_missing_property_counts("DiffSBDD", general_stats_diffsbdd, len(mols_diffsbdd))
+    log_missing_property_counts("DiffSBDD", ring_stats_diffsbdd, len(mols_diffsbdd))
+    log_missing_property_counts("DrugFlow", general_stats_drugflow, len(mols_drugflow))
+    log_missing_property_counts("DrugFlow", ring_stats_drugflow, len(mols_drugflow))
+    log_missing_property_counts("NEAT", general_stats_neat, len(mols_neat))
+    log_missing_property_counts("NEAT", ring_stats_neat, len(mols_neat))
 
     ### Compute average statistics ###
 
-    avg_fragment_scores_crossdocked = fragment_scores_crossdocked.mean(axis=0)
-    avg_general_stats_crossdocked = general_stats_crossdocked.mean(axis=0)
-    avg_ring_stats_crossdocked = ring_stats_crossdocked.mean(axis=0)
+    general_stat_names = [name for name, _ in GENERAL_STAT_FUNCS]
+    ring_stat_names = [name for name, _ in RING_STAT_FUNCS]
 
-    avg_fragment_scores_pocket2mol = fragment_scores_pocket2mol.mean(axis=0)
-    avg_general_stats_pocket2mol = general_stats_pocket2mol.mean(axis=0)
-    avg_ring_stats_pocket2mol = ring_stats_pocket2mol.mean(axis=0)
+    avg_fragment_scores_crossdocked = mean_or_nan(fragment_scores_crossdocked)
+    avg_general_stats_crossdocked = property_means(
+        general_stats_crossdocked, general_stat_names
+    )
+    avg_ring_stats_crossdocked = property_means(ring_stats_crossdocked, ring_stat_names)
 
-    avg_fragment_scores_targetdiff = fragment_scores_targetdiff.mean(axis=0)
-    avg_general_stats_targetdiff = general_stats_targetdiff.mean(axis=0)
-    avg_ring_stats_targetdiff = ring_stats_targetdiff.mean(axis=0)
+    avg_fragment_scores_pocket2mol = mean_or_nan(fragment_scores_pocket2mol)
+    avg_general_stats_pocket2mol = property_means(
+        general_stats_pocket2mol, general_stat_names
+    )
+    avg_ring_stats_pocket2mol = property_means(ring_stats_pocket2mol, ring_stat_names)
 
-    avg_fragment_scores_diffsbdd = fragment_scores_diffsbdd.mean(axis=0)
-    avg_general_stats_diffsbdd = general_stats_diffsbdd.mean(axis=0)
-    avg_ring_stats_diffsbdd = ring_stats_diffsbdd.mean(axis=0)
+    avg_fragment_scores_targetdiff = mean_or_nan(fragment_scores_targetdiff)
+    avg_general_stats_targetdiff = property_means(
+        general_stats_targetdiff, general_stat_names
+    )
+    avg_ring_stats_targetdiff = property_means(ring_stats_targetdiff, ring_stat_names)
 
-    avg_fragment_scores_drugflow = fragment_scores_drugflow.mean(axis=0)
-    avg_general_stats_drugflow = general_stats_drugflow.mean(axis=0)
-    avg_ring_stats_drugflow = ring_stats_drugflow.mean(axis=0)
+    avg_fragment_scores_diffsbdd = mean_or_nan(fragment_scores_diffsbdd)
+    avg_general_stats_diffsbdd = property_means(
+        general_stats_diffsbdd, general_stat_names
+    )
+    avg_ring_stats_diffsbdd = property_means(ring_stats_diffsbdd, ring_stat_names)
 
-    avg_fragment_scores_neat = fragment_scores_neat.mean(axis=0)
-    avg_general_stats_neat = general_stats_neat.mean(axis=0)
-    avg_ring_stats_neat = ring_stats_neat.mean(axis=0)
+    avg_fragment_scores_drugflow = mean_or_nan(fragment_scores_drugflow)
+    avg_general_stats_drugflow = property_means(
+        general_stats_drugflow, general_stat_names
+    )
+    avg_ring_stats_drugflow = property_means(ring_stats_drugflow, ring_stat_names)
+
+    avg_fragment_scores_neat = mean_or_nan(fragment_scores_neat)
+    avg_general_stats_neat = property_means(general_stats_neat, general_stat_names)
+    avg_ring_stats_neat = property_means(ring_stats_neat, ring_stat_names)
 
     ### Log average statistics ###
 
     logging.info(f"\nFragment scores (min, mean, max):")
     logging.info(
-        f"\tCrossDocked: {fragment_scores_crossdocked.min()}, {fragment_scores_crossdocked.mean()}, {fragment_scores_crossdocked.max()}"
+        f"\tCrossDocked: {format_distribution_summary(fragment_scores_crossdocked)}"
     )
     logging.info(
-        f"\tPocket2Mol: {fragment_scores_pocket2mol.min()}, {fragment_scores_pocket2mol.mean()}, {fragment_scores_pocket2mol.max()}"
+        f"\tPocket2Mol: {format_distribution_summary(fragment_scores_pocket2mol)}"
     )
     logging.info(
-        f"\tTargetDiff: {fragment_scores_targetdiff.min()}, {fragment_scores_targetdiff.mean()}, {fragment_scores_targetdiff.max()}"
+        f"\tTargetDiff: {format_distribution_summary(fragment_scores_targetdiff)}"
     )
     logging.info(
-        f"\tDiffSBDD: {fragment_scores_diffsbdd.min()}, {fragment_scores_diffsbdd.mean()}, {fragment_scores_diffsbdd.max()}"
+        f"\tDiffSBDD: {format_distribution_summary(fragment_scores_diffsbdd)}"
     )
     logging.info(
-        f"\tDrugFlow: {fragment_scores_drugflow.min()}, {fragment_scores_drugflow.mean()}, {fragment_scores_drugflow.max()}"
+        f"\tDrugFlow: {format_distribution_summary(fragment_scores_drugflow)}"
     )
     logging.info(
-        f"\tNEAT: {fragment_scores_neat.min()}, {fragment_scores_neat.mean()}, {fragment_scores_neat.max()}"
+        f"\tNEAT: {format_distribution_summary(fragment_scores_neat)}"
     )
 
     ### Compute and log Jensen-Shannon divergence of fragment scores ###
@@ -401,27 +592,22 @@ def main() -> None:
         "DrugFlow": fragment_scores_drugflow,
         "NEAT": fragment_scores_neat,
     }
-    all_fragment_scores = np.concatenate(list(fragment_scores_by_method.values()))
-    fragment_score_bin_edges = np.histogram_bin_edges(all_fragment_scores, bins=100)
-    fragment_score_js = {
-        method: js_divergence(
-            fragment_scores_crossdocked,
-            fragment_scores_by_method[method],
-            fragment_score_bin_edges,
-        )
-        for method in METHODS
-    }
+    fragment_score_js = compute_js_divergence_by_method(
+        fragment_scores_crossdocked, fragment_scores_by_method
+    )
 
     logging.info(
         "\nFragment score Jensen-Shannon divergence from CrossDocked "
         "(base 2, 0 = identical, 1 = maximally different):"
     )
-    for method, js in sorted(fragment_score_js.items(), key=lambda x: x[1]):
+    for method, js in sorted(
+        fragment_score_js.items(), key=lambda x: np.inf if np.isnan(x[1]) else x[1]
+    ):
         logging.info(f"\t{method}: {js:.6f}")
 
     ### Plot statistics ###
 
-    # 1. General statistics
+    # 1. General statistics (absolute)
 
     avg_general_by_method = {
         "CrossDocked": avg_general_stats_crossdocked,
@@ -432,15 +618,73 @@ def main() -> None:
         "NEAT": avg_general_stats_neat,
     }
     general_ylabels = [
-        "Δ heavy atoms",
-        "Δ fraction hetero atoms",
-        "Δ fraction halogen atoms",
-        "Δ fraction rotatable bonds",
-        "Δ fraction chiral centers",
-        "Δ fraction HBA",
-        "Δ fraction HBD",
+        "Molecular weight",
+        "Number of heavy atoms",
+        "Fraction of hetero atoms",
+        "Fraction of halogen atoms",
+        "Fraction of rotatable bonds",
+        "Fraction of chiral centers",
+        "Fraction of HBA",
+        "Fraction of HBD",
+        "LogP",
+        "QED",
+    ]
+
+    avg_ring_by_method = {
+        "CrossDocked": avg_ring_stats_crossdocked,
+        "Pocket2Mol": avg_ring_stats_pocket2mol,
+        "TargetDiff": avg_ring_stats_targetdiff,
+        "DiffSBDD": avg_ring_stats_diffsbdd,
+        "DrugFlow": avg_ring_stats_drugflow,
+        "NEAT": avg_ring_stats_neat,
+    }
+    ring_stat_indices = [0, 1, 2, 10, 11]
+    ring_ylabels = [
+        "Number of rings",
+        "Fraction of aromatic rings",
+        "Fraction of aliphatic rings",
+        "Fraction of bridgehead atoms",
+        "Fraction of spiro atoms",
+    ]
+
+    fig, ax = plt.subplots(nrows=3, ncols=5, figsize=(30, 18))
+    for i, ylabel in enumerate(general_ylabels):
+        row, col = divmod(i, 5)
+        values = [avg_general_by_method[method][i] for method in METHODS]
+        bar_absolute_by_method(ax[row, col], values)
+        ax[row, col].set_ylabel(ylabel)
+
+    for i, (stat_idx, ylabel) in enumerate(zip(ring_stat_indices, ring_ylabels)):
+        values = [avg_ring_by_method[method][stat_idx] for method in METHODS]
+        bar_absolute_by_method(ax[2, i], values)
+        ax[2, i].set_ylabel(ylabel)
+
+    ax[0, 4].legend(loc="lower right")
+
+    plt.tight_layout()
+    plt.savefig(OUTPUT_PATH / "general_stats_absolute.png")
+    plt.show()
+
+    # 2. General statistics (relative)
+
+    avg_general_by_method = {
+        "CrossDocked": avg_general_stats_crossdocked,
+        "Pocket2Mol": avg_general_stats_pocket2mol,
+        "TargetDiff": avg_general_stats_targetdiff,
+        "DiffSBDD": avg_general_stats_diffsbdd,
+        "DrugFlow": avg_general_stats_drugflow,
+        "NEAT": avg_general_stats_neat,
+    }
+    general_ylabels = [
+        "Δ molecular weight",
+        "Δ number of heavy atoms",
+        "Δ fraction of hetero atoms",
+        "Δ fraction of halogen atoms",
+        "Δ fraction of rotatable bonds",
+        "Δ fraction of chiral centers",
+        "Δ fraction of HBA",
+        "Δ fraction of HBD",
         "Δ LogP",
-        "Δ TPSA",
         "Δ QED",
     ]
 
@@ -455,10 +699,10 @@ def main() -> None:
     ring_stat_indices = [0, 1, 2, 10, 11]
     ring_ylabels = [
         "Δ number of rings",
-        "Δ fraction aromatic rings",
-        "Δ fraction aliphatic rings",
-        "Δ fraction bridgehead atoms",
-        "Δ fraction spiro atoms",
+        "Δ fraction of aromatic rings",
+        "Δ fraction of aliphatic rings",
+        "Δ fraction of bridgehead atoms",
+        "Δ fraction of spiro atoms",
     ]
 
     fig, ax = plt.subplots(nrows=3, ncols=5, figsize=(30, 18))
@@ -466,7 +710,7 @@ def main() -> None:
         row, col = divmod(i, 5)
         baseline = avg_general_by_method["CrossDocked"][i]
         deviations = [avg_general_by_method[method][i] - baseline for method in METHODS]
-        bar_deviation_by_method(ax[row, col], deviations)
+        bar_relative_by_method(ax[row, col], deviations)
         ax[row, col].set_ylabel(ylabel)
 
     for i, (stat_idx, ylabel) in enumerate(zip(ring_stat_indices, ring_ylabels)):
@@ -474,16 +718,16 @@ def main() -> None:
         deviations = [
             avg_ring_by_method[method][stat_idx] - baseline for method in METHODS
         ]
-        bar_deviation_by_method(ax[2, i], deviations)
+        bar_relative_by_method(ax[2, i], deviations)
         ax[2, i].set_ylabel(ylabel)
 
-    ax[0, 4].legend(loc="upper right")
+    ax[0, 4].legend(loc="lower right")
 
     plt.tight_layout()
-    plt.savefig(OUTPUT_PATH / "general_stats.png")
+    plt.savefig(OUTPUT_PATH / "general_stats_relative.png")
     plt.show()
 
-    # 2. Ring size statistics
+    # 3. Ring size and fraction of atoms statistics (absolute)
 
     ring_size_labels = ["3", "4", "5", "6", "7", "8", "Macrocycle"]
     ring_size_indices = [3, 4, 5, 6, 7, 8, 9]
@@ -494,6 +738,53 @@ def main() -> None:
         }
         for method, avg_stats in avg_ring_by_method.items()
     }
+
+    mols_by_method = {
+        "CrossDocked": mols_crossdocked,
+        "Pocket2Mol": mols_pocket2mol,
+        "TargetDiff": mols_targetdiff,
+        "DiffSBDD": mols_diffsbdd,
+        "DrugFlow": mols_drugflow,
+        "NEAT": mols_neat,
+    }
+    atom_fractions_by_method = {
+        method: compute_atom_fractions(mols) for method, mols in mols_by_method.items()
+    }
+    periodic_table = Chem.GetPeriodicTable()
+    atom_types = sorted(
+        {
+            symbol
+            for fractions in atom_fractions_by_method.values()
+            for symbol in fractions
+        },
+        key=periodic_table.GetAtomicNumber,
+    )
+
+    fig, ax = plt.subplots(nrows=2, ncols=1, figsize=(30, 12))
+
+    grouped_bar_by_method(
+        ax[0], ring_size_labels, ring_sizes_by_method, methods=METHODS, colors=COLORS
+    )
+    ax[0].set_xlabel("Ring size")
+    ax[0].set_ylabel("Fraction of rings")
+
+    grouped_bar_by_method(
+        ax[1], atom_types, atom_fractions_by_method, methods=METHODS, colors=COLORS
+    )
+    ax[1].set_xlabel("Atom type")
+    ax[1].set_ylabel("Fraction of atoms")
+
+    ax[0].legend(loc="upper right")
+
+    plt.tight_layout()
+    plt.savefig(OUTPUT_PATH / "ring_sizes_and_atom_fractions_absolute.png")
+    plt.show()
+
+
+    # 4. Ring size and fraction of atoms statistics (relative)
+
+    ring_size_labels = ["3", "4", "5", "6", "7", "8", "Macrocycle"]
+    ring_size_indices = [3, 4, 5, 6, 7, 8, 9]
     ring_size_deviations_by_method = {
         method: {
             label: ring_sizes_by_method[method][label]
@@ -503,18 +794,100 @@ def main() -> None:
         for method in METHODS
     }
 
-    fig, ax = plt.subplots(figsize=(30, 12))
-    grouped_bar_deviation_by_method(
-        ax, ring_size_labels, ring_size_deviations_by_method
+    mols_by_method = {
+        "CrossDocked": mols_crossdocked,
+        "Pocket2Mol": mols_pocket2mol,
+        "TargetDiff": mols_targetdiff,
+        "DiffSBDD": mols_diffsbdd,
+        "DrugFlow": mols_drugflow,
+        "NEAT": mols_neat,
+    }
+    atom_fractions_by_method = {
+        method: compute_atom_fractions(mols) for method, mols in mols_by_method.items()
+    }
+    periodic_table = Chem.GetPeriodicTable()
+    atom_types = sorted(
+        {
+            symbol
+            for fractions in atom_fractions_by_method.values()
+            for symbol in fractions
+        },
+        key=periodic_table.GetAtomicNumber,
     )
-    ax.set_xlabel("Ring size (number of atoms)")
-    ax.set_ylabel("Δ fraction of rings")
-    ax.legend()
+
+    atom_fraction_deviations_by_method = {
+        method: {
+            symbol: atom_fractions_by_method[method].get(symbol, 0.0)
+            - atom_fractions_by_method["CrossDocked"].get(symbol, 0.0)
+            for symbol in atom_types
+        }
+        for method in METHODS
+    }
+
+    fig, ax = plt.subplots(nrows=2, ncols=1, figsize=(30, 12))
+
+    grouped_bar_by_method(
+        ax[0], ring_size_labels, ring_size_deviations_by_method, methods=METHODS, colors=COLORS
+    )
+    ax[0].set_xlabel("Ring size")
+    ax[0].set_ylabel("Δ fraction of rings")
+
+    grouped_bar_by_method(
+        ax[1], atom_types, atom_fraction_deviations_by_method, methods=METHODS, colors=COLORS
+    )
+    ax[1].set_xlabel("Atom type")
+    ax[1].set_ylabel("Δ fraction of atoms")
+
+    ax[0].legend(loc="lower right")
+
     plt.tight_layout()
-    plt.savefig(OUTPUT_PATH / "ring_size_stats.png")
+    plt.savefig(OUTPUT_PATH / "ring_sizes_and_atom_fractions_relative.png")
     plt.show()
 
-    # 3. Fragment score distribution
+    # 5. Rank methods by closeness to CrossDocked
+
+    ranks_per_stat = {}
+
+    for i, name in enumerate(general_stat_names):
+        baseline = avg_general_by_method["CrossDocked"][i]
+        abs_devs = {
+            method: abs(avg_general_by_method[method][i] - baseline)
+            for method in METHODS
+        }
+        ranks_per_stat[f"general/{name}"] = ranks_by_closeness(abs_devs)
+
+    for i, name in enumerate(ring_stat_names):
+        baseline = avg_ring_by_method["CrossDocked"][i]
+        abs_devs = {
+            method: abs(avg_ring_by_method[method][i] - baseline) for method in METHODS
+        }
+        ranks_per_stat[f"ring/{name}"] = ranks_by_closeness(abs_devs)
+
+    for symbol in atom_types:
+        abs_devs = {
+            method: abs(atom_fraction_deviations_by_method[method][symbol])
+            for method in METHODS
+        }
+        ranks_per_stat[f"atom/{symbol}"] = ranks_by_closeness(abs_devs)
+
+    avg_ranks = {
+        method: np.mean([ranks[method] for ranks in ranks_per_stat.values()])
+        for method in METHODS
+    }
+
+    logging.info(
+        f"\nMethod ranks by closeness to CrossDocked "
+        f"(1 = closest; {len(ranks_per_stat)} statistics):"
+    )
+    for stat_name, ranks in ranks_per_stat.items():
+        rank_str = ", ".join(f"{method}={ranks[method]}" for method in METHODS)
+        logging.info(f"\t{stat_name}: {rank_str}")
+
+    logging.info("\nAverage ranks (lower is better):")
+    for method, avg_rank in sorted(avg_ranks.items(), key=lambda x: x[1]):
+        logging.info(f"\t{method}: {avg_rank:.3f}")
+
+    # 6. Fragment score distribution
 
     fig, ax = plt.subplots(figsize=(30, 12))
 
@@ -564,25 +937,19 @@ def main() -> None:
         linewidth=3,
     )
 
-    mean_pocket2mol = np.median(fragment_scores_pocket2mol)
-    mean_targetdiff = np.median(fragment_scores_targetdiff)
-    mean_diffsbdd = np.median(fragment_scores_diffsbdd)
-    mean_drugflow = np.median(fragment_scores_drugflow)
-    mean_neat = np.median(fragment_scores_neat)
-
-    ax.axvline(
-        mean_pocket2mol, color=COLOR_SCHEME["Pocket2Mol"], linestyle="--", linewidth=3
+    mean_pocket2mol = safe_draw_median(
+        ax, fragment_scores_pocket2mol, COLOR_SCHEME["Pocket2Mol"]
     )
-    ax.axvline(
-        mean_targetdiff, color=COLOR_SCHEME["TargetDiff"], linestyle="--", linewidth=3
+    mean_targetdiff = safe_draw_median(
+        ax, fragment_scores_targetdiff, COLOR_SCHEME["TargetDiff"]
     )
-    ax.axvline(
-        mean_diffsbdd, color=COLOR_SCHEME["DiffSBDD"], linestyle="--", linewidth=3
+    mean_diffsbdd = safe_draw_median(
+        ax, fragment_scores_diffsbdd, COLOR_SCHEME["DiffSBDD"]
     )
-    ax.axvline(
-        mean_drugflow, color=COLOR_SCHEME["DrugFlow"], linestyle="--", linewidth=3
+    mean_drugflow = safe_draw_median(
+        ax, fragment_scores_drugflow, COLOR_SCHEME["DrugFlow"]
     )
-    ax.axvline(mean_neat, color=COLOR_SCHEME["NEAT"], linestyle="--", linewidth=3)
+    mean_neat = safe_draw_median(ax, fragment_scores_neat, COLOR_SCHEME["NEAT"])
 
     ax.set_xlabel("Fragment score")
     ax.set_ylabel("Density")
@@ -590,125 +957,6 @@ def main() -> None:
     plt.tight_layout()
     plt.savefig(OUTPUT_PATH / "fragment_score_distribution.png")
     plt.show()
-
-    # 4. Atom type fractions
-
-    mols_by_method = {
-        "CrossDocked": mols_crossdocked,
-        "Pocket2Mol": mols_pocket2mol,
-        "TargetDiff": mols_targetdiff,
-        "DiffSBDD": mols_diffsbdd,
-        "DrugFlow": mols_drugflow,
-        "NEAT": mols_neat,
-    }
-    atom_fractions_by_method = {
-        method: compute_atom_fractions(mols) for method, mols in mols_by_method.items()
-    }
-    periodic_table = Chem.GetPeriodicTable()
-    atom_types = sorted(
-        {
-            symbol
-            for fractions in atom_fractions_by_method.values()
-            for symbol in fractions
-        },
-        key=periodic_table.GetAtomicNumber,
-    )
-
-    atom_fraction_deviations_by_method = {
-        method: {
-            symbol: atom_fractions_by_method[method].get(symbol, 0.0)
-            - atom_fractions_by_method["CrossDocked"].get(symbol, 0.0)
-            for symbol in atom_types
-        }
-        for method in METHODS
-    }
-
-    fig, ax = plt.subplots(nrows=2, ncols=1, figsize=(30, 12))
-    grouped_bar_by_method(
-        ax[0], atom_types, atom_fractions_by_method, methods=METHODS, colors=COLORS
-    )
-    ax[0].set_ylabel("Fraction of atoms")
-    ax[0].legend(loc="upper right")
-
-    grouped_bar_deviation_by_method(
-        ax[1], atom_types, atom_fraction_deviations_by_method
-    )
-    ax[1].set_xlabel("Atom type")
-    ax[1].set_ylabel("Δ fraction of atoms")
-
-    plt.tight_layout()
-    plt.savefig(OUTPUT_PATH / "atom_fractions.png")
-    plt.show()
-
-    ### Rank methods by closeness to CrossDocked ###
-
-    general_stat_names = [
-        "heavy atoms",
-        "fraction hetero atoms",
-        "fraction halogen atoms",
-        "fraction rotatable bonds",
-        "fraction chiral centers",
-        "fraction HBA",
-        "fraction HBD",
-        "LogP",
-        "TPSA",
-        "QED",
-    ]
-    ring_stat_names = [
-        "number of rings",
-        "fraction aromatic rings",
-        "fraction aliphatic rings",
-        "fraction 3-rings",
-        "fraction 4-rings",
-        "fraction 5-rings",
-        "fraction 6-rings",
-        "fraction 7-rings",
-        "fraction 8-rings",
-        "fraction macrocycles",
-        "fraction bridgehead atoms",
-        "fraction spiro atoms",
-    ]
-
-    ranks_per_stat = {}
-
-    for i, name in enumerate(general_stat_names):
-        baseline = avg_general_by_method["CrossDocked"][i]
-        abs_devs = {
-            method: abs(avg_general_by_method[method][i] - baseline)
-            for method in METHODS
-        }
-        ranks_per_stat[f"general/{name}"] = ranks_by_closeness(abs_devs)
-
-    for i, name in enumerate(ring_stat_names):
-        baseline = avg_ring_by_method["CrossDocked"][i]
-        abs_devs = {
-            method: abs(avg_ring_by_method[method][i] - baseline) for method in METHODS
-        }
-        ranks_per_stat[f"ring/{name}"] = ranks_by_closeness(abs_devs)
-
-    for symbol in atom_types:
-        abs_devs = {
-            method: abs(atom_fraction_deviations_by_method[method][symbol])
-            for method in METHODS
-        }
-        ranks_per_stat[f"atom/{symbol}"] = ranks_by_closeness(abs_devs)
-
-    avg_ranks = {
-        method: np.mean([ranks[method] for ranks in ranks_per_stat.values()])
-        for method in METHODS
-    }
-
-    logging.info(
-        f"\nMethod ranks by closeness to CrossDocked "
-        f"(1 = closest; {len(ranks_per_stat)} statistics):"
-    )
-    for stat_name, ranks in ranks_per_stat.items():
-        rank_str = ", ".join(f"{method}={ranks[method]}" for method in METHODS)
-        logging.info(f"\t{stat_name}: {rank_str}")
-
-    logging.info("\nAverage ranks (lower is better):")
-    for method, avg_rank in sorted(avg_ranks.items(), key=lambda x: x[1]):
-        logging.info(f"\t{method}: {avg_rank:.3f}")
 
 
 if __name__ == "__main__":
