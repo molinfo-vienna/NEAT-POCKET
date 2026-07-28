@@ -309,23 +309,25 @@ def compute_js_divergence_by_method(reference_values, values_by_method):
 
 def get_mols(path):
     mols = []
-    for dir in os.listdir(path):
-        if os.path.isdir(os.path.join(path, dir)):
-            if os.path.exists(os.path.join(path, dir, "generated_mols.sdf")):
-                mols_file = os.path.join(path, dir, "generated_mols.sdf")
-            else:
-                mols_file = os.path.join(path, dir, "ligands.sdf")
-                # This is sued for the CrossDocked data
-            supplier = SDMolSupplier(mols_file, removeHs=False, sanitize=False)
-            mols.extend([mol for mol in supplier])
-    # Add hydrogens with the RDKit AddHs method
-    mols = [Chem.AddHs(mol, addCoords=True) for mol in mols if mol is not None]
-    # Add aromaticity flags without sanitizing whole molecules
-    [
-        SanitizeMol(mol, sanitizeOps=SanitizeFlags.SANITIZE_SETAROMATICITY)
-        for mol in mols
-        if mol is not None
-    ]
+    if "crossdocked" in str(path):
+        # Special loading for CrossDocked data
+        mols_file = os.path.join(path, "ligands_rdkit_default.sdf")
+        supplier = SDMolSupplier(mols_file, removeHs=False, sanitize=True)
+        mols.extend([mol for mol in supplier])
+    else:
+        # Normal loading for other data
+        for dir in os.listdir(path):
+            if os.path.isdir(os.path.join(path, dir)):
+                if os.path.exists(os.path.join(path, dir, "generated_mols.sdf")):
+                    mols_file = os.path.join(path, dir, "generated_mols.sdf")
+                else:
+                    logging.warning(f"No generated mols file found for {path}/{dir}")
+                    continue
+                supplier = SDMolSupplier(mols_file, removeHs=False, sanitize=True)
+                mols.extend([mol for mol in supplier])
+        if "diffsbdd" in str(path) or "drugflow" in str(path) or "pocket2mol" in str(path) or "targetdiff" in str(path):
+            # Add hydrogens with the RDKit default AddHs method
+            mols = [Chem.AddHs(mol, addCoords=True) for mol in mols if mol is not None]
     return mols
 
 
