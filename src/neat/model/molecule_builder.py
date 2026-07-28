@@ -146,6 +146,8 @@ class MoleculeBuilder:
             mol = rdmolfiles.MolFromXYZBlock(xyz_block)
             try:
                 rdDetermineBonds.DetermineBonds(mol, charge=0, maxIterations=100000)
+                Chem.SanitizeMol(mol)
+                
             except Exception as e:
                 logging.warning(
                     f"An error occurred while determining bonds for molecule in batch {batch_id}: {e}"
