@@ -2,9 +2,12 @@ accumulate_grad_batches: 8
 batch_size: 32
 bias: true
 cfg_dropout: 0.2
+clash_penalty: 4.0
+clash_penalty_margin: 0.0
 cross_attn_with_null_token: true
 data_set: CrossDocked
 dropout: 0.1
+freeze_pretrained: true
 global_cond_proj: true
 learning_rate: 5.0e-05
 lr_decay_epochs: 2000
@@ -26,8 +29,5 @@ residue_pooling: sum
 rope: false
 time_step_resampling: 4
 time_step_sampling: logit_normal
-weight_decay: 1.0e-06
-clash_penalty: 4.0
-clash_penalty_margin: 0.0
-freeze_pretrained: true
 unfreeze_epoch: 150
+weight_decay: 1.0e-06
