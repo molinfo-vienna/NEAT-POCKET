@@ -8,8 +8,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from rdkit import Chem
-from rdkit.Chem import (QED, SanitizeFlags, SanitizeMol, SDMolSupplier,
-                        rdFingerprintGenerator, rdMolDescriptors)
+from rdkit.Chem import (QED, SDMolSupplier, rdFingerprintGenerator,
+                        rdMolDescriptors)
 from scipy.spatial.distance import jensenshannon
 
 plt.rcParams["font.size"] = 18
@@ -64,6 +64,10 @@ def safe_fraction(numerator, denominator):
     return numerator / denominator if denominator else 0.0
 
 
+def safe_fraction_or_nan(numerator, denominator):
+    return numerator / denominator if denominator else np.nan
+
+
 def compute_atom_fractions(mols):
     counts = {}
     for mol in mols:
@@ -107,12 +111,14 @@ GENERAL_STAT_FUNCS = [
     (
         "fraction hetero atoms",
         lambda mol: safe_fraction(
-            rdMolDescriptors.CalcNumHeteroatoms(mol), mol.GetNumAtoms()
+            rdMolDescriptors.CalcNumHeteroatoms(mol), rdMolDescriptors.CalcNumAtoms(mol)
         ),
     ),
     (
         "fraction halogen atoms",
-        lambda mol: safe_fraction(get_num_halogen_atoms(mol), mol.GetNumAtoms()),
+        lambda mol: safe_fraction(
+            get_num_halogen_atoms(mol), rdMolDescriptors.CalcNumAtoms(mol)
+        ),
     ),
     (
         "fraction rotatable bonds",
@@ -124,16 +130,20 @@ GENERAL_STAT_FUNCS = [
         "fraction chiral centers",
         lambda mol: safe_fraction(
             len(Chem.FindMolChiralCenters(mol, includeUnassigned=True)),
-            mol.GetNumAtoms(),
+            rdMolDescriptors.CalcNumAtoms(mol),
         ),
     ),
     (
         "fraction HBA",
-        lambda mol: safe_fraction(rdMolDescriptors.CalcNumHBA(mol), mol.GetNumAtoms()),
+        lambda mol: safe_fraction(
+            rdMolDescriptors.CalcNumHBA(mol), rdMolDescriptors.CalcNumAtoms(mol)
+        ),
     ),
     (
         "fraction HBD",
-        lambda mol: safe_fraction(rdMolDescriptors.CalcNumHBD(mol), mol.GetNumAtoms()),
+        lambda mol: safe_fraction(
+            rdMolDescriptors.CalcNumHBD(mol), rdMolDescriptors.CalcNumAtoms(mol)
+        ),
     ),
     ("LogP", lambda mol: rdMolDescriptors.CalcCrippenDescriptors(mol)[0]),
     ("QED", lambda mol: QED.qed(mol)),
@@ -143,69 +153,72 @@ RING_STAT_FUNCS = [
     ("number of rings", lambda mol: rdMolDescriptors.CalcNumRings(mol)),
     (
         "fraction aromatic rings",
-        lambda mol: safe_fraction(
+        lambda mol: safe_fraction_or_nan(
             rdMolDescriptors.CalcNumAromaticRings(mol),
             rdMolDescriptors.CalcNumRings(mol),
         ),
     ),
     (
         "fraction aliphatic rings",
-        lambda mol: safe_fraction(
+        lambda mol: safe_fraction_or_nan(
             rdMolDescriptors.CalcNumAliphaticRings(mol),
             rdMolDescriptors.CalcNumRings(mol),
         ),
     ),
     (
         "fraction 3-rings",
-        lambda mol: safe_fraction(
+        lambda mol: safe_fraction_or_nan(
             get_ring_counts(mol)[0][3], rdMolDescriptors.CalcNumRings(mol)
         ),
     ),
     (
         "fraction 4-rings",
-        lambda mol: safe_fraction(
+        lambda mol: safe_fraction_or_nan(
             get_ring_counts(mol)[0][4], rdMolDescriptors.CalcNumRings(mol)
         ),
     ),
     (
         "fraction 5-rings",
-        lambda mol: safe_fraction(
+        lambda mol: safe_fraction_or_nan(
             get_ring_counts(mol)[0][5], rdMolDescriptors.CalcNumRings(mol)
         ),
     ),
     (
         "fraction 6-rings",
-        lambda mol: safe_fraction(
+        lambda mol: safe_fraction_or_nan(
             get_ring_counts(mol)[0][6], rdMolDescriptors.CalcNumRings(mol)
         ),
     ),
     (
         "fraction 7-rings",
-        lambda mol: safe_fraction(
+        lambda mol: safe_fraction_or_nan(
             get_ring_counts(mol)[0][7], rdMolDescriptors.CalcNumRings(mol)
         ),
     ),
     (
         "fraction 8-rings",
-        lambda mol: safe_fraction(
+        lambda mol: safe_fraction_or_nan(
             get_ring_counts(mol)[0][8], rdMolDescriptors.CalcNumRings(mol)
         ),
     ),
     (
         "fraction macrocycles",
-        lambda mol: safe_fraction(
+        lambda mol: safe_fraction_or_nan(
             get_ring_counts(mol)[1], rdMolDescriptors.CalcNumRings(mol)
         ),
     ),
     (
         "fraction bridgehead atoms",
         lambda mol: safe_fraction(
-            rdMolDescriptors.CalcNumBridgeheadAtoms(mol), mol.GetNumAtoms()
+            rdMolDescriptors.CalcNumBridgeheadAtoms(mol),
+            rdMolDescriptors.CalcNumAtoms(mol),
         ),
     ),
     (
         "fraction spiro atoms",
-        lambda mol: safe_fraction(rdMolDescriptors.CalcNumSpiroAtoms(mol), mol.GetNumAtoms()),
+        lambda mol: safe_fraction(
+            rdMolDescriptors.CalcNumSpiroAtoms(mol), rdMolDescriptors.CalcNumAtoms(mol)
+        ),
     ),
 ]
 
@@ -222,7 +235,9 @@ def compute_property_list(mols, method_name, property_name, compute_fn):
     values = []
     for mol_idx, mol in enumerate(mols, start=1):
         try:
-            values.append(compute_fn(mol))
+            value = compute_fn(mol)
+            if np.isfinite(value):
+                values.append(value)
         except Exception as exc:
             logging.warning(
                 "Skipping %s for %s %s: %s",
@@ -236,7 +251,9 @@ def compute_property_list(mols, method_name, property_name, compute_fn):
 
 def compute_property_lists(mols, method_name, property_funcs):
     return {
-        property_name: compute_property_list(mols, method_name, property_name, compute_fn)
+        property_name: compute_property_list(
+            mols, method_name, property_name, compute_fn
+        )
         for property_name, compute_fn in property_funcs
     }
 
@@ -244,9 +261,11 @@ def compute_property_lists(mols, method_name, property_funcs):
 def property_means(property_lists, property_names):
     return np.array(
         [
-            property_lists[property_name].mean()
-            if property_lists[property_name].size
-            else np.nan
+            (
+                property_lists[property_name].mean()
+                if property_lists[property_name].size
+                else np.nan
+            )
             for property_name in property_names
         ]
     )
@@ -307,6 +326,15 @@ def compute_js_divergence_by_method(reference_values, values_by_method):
     return js_by_method
 
 
+def js_divergence(reference, samples, bin_edges):
+    """Jensen-Shannon divergence between two 1D sample distributions (base 2, in [0, 1])."""
+    hist_ref, _ = np.histogram(reference, bins=bin_edges, density=False)
+    hist_samp, _ = np.histogram(samples, bins=bin_edges, density=False)
+    p = hist_ref / hist_ref.sum()
+    q = hist_samp / hist_samp.sum()
+    return float(jensenshannon(p, q, base=2) ** 2)
+
+
 def get_mols(path):
     mols = []
     if "crossdocked" in str(path):
@@ -325,7 +353,12 @@ def get_mols(path):
                     continue
                 supplier = SDMolSupplier(mols_file, removeHs=False, sanitize=True)
                 mols.extend([mol for mol in supplier])
-        if "diffsbdd" in str(path) or "drugflow" in str(path) or "pocket2mol" in str(path) or "targetdiff" in str(path):
+        if (
+            "diffsbdd" in str(path)
+            or "drugflow" in str(path)
+            or "pocket2mol" in str(path)
+            or "targetdiff" in str(path)
+        ):
             # Add hydrogens with the RDKit default AddHs method
             mols = [Chem.AddHs(mol, addCoords=True) for mol in mols if mol is not None]
     return mols
@@ -366,15 +399,6 @@ def grouped_bar_deviation_by_method(ax, categories, fractions_by_method):
         colors=COLORS,
     )
     ax.axhline(0, color="black", linewidth=1, linestyle="-")
-
-
-def js_divergence(reference, samples, bin_edges):
-    """Jensen-Shannon divergence between two 1D sample distributions (base 2, in [0, 1])."""
-    hist_ref, _ = np.histogram(reference, bins=bin_edges, density=False)
-    hist_samp, _ = np.histogram(samples, bins=bin_edges, density=False)
-    p = hist_ref / hist_ref.sum()
-    q = hist_samp / hist_samp.sum()
-    return float(jensenshannon(p, q, base=2) ** 2)
 
 
 def ranks_by_closeness(abs_devs_by_method):
@@ -507,15 +531,21 @@ def main() -> None:
     log_missing_property_counts(
         "CrossDocked", general_stats_crossdocked, len(mols_crossdocked)
     )
-    log_missing_property_counts("CrossDocked", ring_stats_crossdocked, len(mols_crossdocked))
+    log_missing_property_counts(
+        "CrossDocked", ring_stats_crossdocked, len(mols_crossdocked)
+    )
     log_missing_property_counts(
         "Pocket2Mol", general_stats_pocket2mol, len(mols_pocket2mol)
     )
-    log_missing_property_counts("Pocket2Mol", ring_stats_pocket2mol, len(mols_pocket2mol))
+    log_missing_property_counts(
+        "Pocket2Mol", ring_stats_pocket2mol, len(mols_pocket2mol)
+    )
     log_missing_property_counts(
         "TargetDiff", general_stats_targetdiff, len(mols_targetdiff)
     )
-    log_missing_property_counts("TargetDiff", ring_stats_targetdiff, len(mols_targetdiff))
+    log_missing_property_counts(
+        "TargetDiff", ring_stats_targetdiff, len(mols_targetdiff)
+    )
     log_missing_property_counts("DiffSBDD", general_stats_diffsbdd, len(mols_diffsbdd))
     log_missing_property_counts("DiffSBDD", ring_stats_diffsbdd, len(mols_diffsbdd))
     log_missing_property_counts("DrugFlow", general_stats_drugflow, len(mols_drugflow))
@@ -574,15 +604,9 @@ def main() -> None:
     logging.info(
         f"\tTargetDiff: {format_distribution_summary(fragment_scores_targetdiff)}"
     )
-    logging.info(
-        f"\tDiffSBDD: {format_distribution_summary(fragment_scores_diffsbdd)}"
-    )
-    logging.info(
-        f"\tDrugFlow: {format_distribution_summary(fragment_scores_drugflow)}"
-    )
-    logging.info(
-        f"\tNEAT: {format_distribution_summary(fragment_scores_neat)}"
-    )
+    logging.info(f"\tDiffSBDD: {format_distribution_summary(fragment_scores_diffsbdd)}")
+    logging.info(f"\tDrugFlow: {format_distribution_summary(fragment_scores_drugflow)}")
+    logging.info(f"\tNEAT: {format_distribution_summary(fragment_scores_neat)}")
 
     ### Compute and log Jensen-Shannon divergence of fragment scores ###
 
@@ -782,7 +806,6 @@ def main() -> None:
     plt.savefig(OUTPUT_PATH / "ring_sizes_and_atom_fractions_absolute.png")
     plt.show()
 
-
     # 4. Ring size and fraction of atoms statistics (relative)
 
     ring_size_labels = ["3", "4", "5", "6", "7", "8", "Macrocycle"]
@@ -829,13 +852,21 @@ def main() -> None:
     fig, ax = plt.subplots(nrows=2, ncols=1, figsize=(30, 12))
 
     grouped_bar_by_method(
-        ax[0], ring_size_labels, ring_size_deviations_by_method, methods=METHODS, colors=COLORS
+        ax[0],
+        ring_size_labels,
+        ring_size_deviations_by_method,
+        methods=METHODS,
+        colors=COLORS,
     )
     ax[0].set_xlabel("Ring size")
     ax[0].set_ylabel("Δ fraction of rings")
 
     grouped_bar_by_method(
-        ax[1], atom_types, atom_fraction_deviations_by_method, methods=METHODS, colors=COLORS
+        ax[1],
+        atom_types,
+        atom_fraction_deviations_by_method,
+        methods=METHODS,
+        colors=COLORS,
     )
     ax[1].set_xlabel("Atom type")
     ax[1].set_ylabel("Δ fraction of atoms")
