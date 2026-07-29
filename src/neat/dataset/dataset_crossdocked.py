@@ -3,21 +3,22 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import random
 import tarfile
 from pathlib import Path
 
 import gdown
 import networkx as nx
 import numpy as np
+import openbabel
 import torch
-import random
 from Bio.PDB import PDBParser
 from Bio.PDB.Polypeptide import is_aa
+from dask.distributed import Client, LocalCluster, as_completed
 from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
-from dask.distributed import Client, LocalCluster, as_completed
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -123,31 +124,31 @@ def _add_hydrogens_with_rdkit(mol: Chem.Mol, max_attempts: int = 50) -> Chem.Mol
         return None
 
 
-# def _add_hydrogens_with_openbabel(mol: Chem.Mol) -> Chem.Mol:
+def _add_hydrogens_with_openbabel(mol: Chem.Mol) -> Chem.Mol:
 
-#     try:
-#         # Convert RDKit molecule to OpenBabel molecule
-#         ob_conversion = openbabel.OBConversion()
-#         ob_conversion.SetInFormat("mol")
-#         ob_conversion.SetOutFormat("mol")
-        
-#         # Generate a temporary MOL file from RDKit molecule
-#         mol_block = Chem.MolToMolBlock(mol)
-#         ob_mol = openbabel.OBMol()
-#         ob_conversion.ReadString(ob_mol, mol_block)
-        
-#         # Add hydrogens using OpenBabel
-#         ob_mol.AddHydrogens()
-        
-#         # Convert OpenBabel molecule back to RDKit molecule
-#         updated_mol_block = ob_conversion.WriteString(ob_mol)
-#         updated_rdkit_mol = Chem.MolFromMolBlock(updated_mol_block, removeHs=False)
-        
-#         # Return the updated RDKit molecule
-#         return updated_rdkit_mol
-    
-#     except Exception:
-#         return None
+    try:
+        # Convert RDKit molecule to OpenBabel molecule
+        ob_conversion = openbabel.OBConversion()
+        ob_conversion.SetInFormat("mol")
+        ob_conversion.SetOutFormat("mol")
+
+        # Generate a temporary MOL file from RDKit molecule
+        mol_block = Chem.MolToMolBlock(mol)
+        ob_mol = openbabel.OBMol()
+        ob_conversion.ReadString(ob_mol, mol_block)
+
+        # Add hydrogens using OpenBabel
+        ob_mol.AddHydrogens()
+
+        # Convert OpenBabel molecule back to RDKit molecule
+        updated_mol_block = ob_conversion.WriteString(ob_mol)
+        updated_rdkit_mol = Chem.MolFromMolBlock(updated_mol_block, removeHs=False)
+
+        # Return the updated RDKit molecule
+        return updated_rdkit_mol
+
+    except Exception:
+        return None
 
 
 def _ligand_features(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
@@ -223,9 +224,7 @@ def _pocket_features(
 
                 for atom in heavy:
                     atom_type = _pdb_heavy_element_symbol(atom)
-                    atom_type_encoded = _encode_pocket_atom(
-                        atom_type, ATOM_VOCABULARY
-                    )
+                    atom_type_encoded = _encode_pocket_atom(atom_type, ATOM_VOCABULARY)
                     atom_coords = np.asarray(atom.get_coord(), dtype=np.float32)
                     selected.append(
                         (atom_type_encoded, atom_coords, residue_id, residue_type)
@@ -284,10 +283,10 @@ def _process_pair(
             return None
 
     if add_hydrogens:
-        rdmol = _add_hydrogens_with_rdkit(rdmol)
+        rdmol = Chem.AddHs(rdmol, addCoords=True)
         if rdmol is None:
             logger.warning(
-                f"Ligand {ligand_path}: embedding hydrogen atoms with RDKit failed."
+                f"Ligand {ligand_path}: adding hydrogen atoms with RDKit's default method failed."
             )
             return None
 

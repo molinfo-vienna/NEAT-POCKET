@@ -45,7 +45,6 @@ from neat.model.molecule_builder import MoleculeBuilder
 from neat.utils.edm_metrics import compute_edm_metrics_from_tensors
 from neat.utils.pose_check_metrics import compute_pose_check_metrics_from_mols
 from neat.utils.sbdd_metrics import ClashEvaluator, GninaEvaluator
-from neat.dataset.dataset_crossdocked import _add_hydrogens_with_rdkit
 
 # ---------------------------------------------------------------------------
 # Constants

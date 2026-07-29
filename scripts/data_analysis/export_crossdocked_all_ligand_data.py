@@ -1,56 +1,103 @@
-import copy
 import os
+from pathlib import Path
 
 import torch
 from rdkit import Chem
 from tqdm import tqdm
 
-from neat.dataset.dataset_crossdocked import _add_hydrogens
+from neat.dataset.dataset_crossdocked import (_add_hydrogens_with_openbabel,
+                                              _add_hydrogens_with_rdkit)
+
+ROOT = Path("/home/rjacob/NEAT-Cond-Dev")
 
 ROOT = os.getcwd()
 INPUT_PATH = os.path.join(ROOT, "data", "CROSSDOCKED", "raw", "crossdocked_pocket10")
 OUTPUT_DIR = os.path.join(ROOT, "output", "crossdocked_all_ligands")
-OUTPUT_SUBDIR = "seed_0"
 DATA_SET = "CROSSDOCKED"
 
 split_file_path = os.path.join(ROOT, "data", "CROSSDOCKED", "raw", "split_by_name.pt")
 data_split = torch.load(split_file_path, map_location="cpu", weights_only=False)
 
-selected_ligand_files_train = [ligand_file for pocket_file, ligand_file in data_split["train"]]
-selected_ligand_files_test = [ligand_file for pocket_file, ligand_file in data_split["test"]]
-selected_ligand_files = selected_ligand_files_train + selected_ligand_files_test
-selected_ligand_files_tupled = [(file.split("/")[0], file.split("/")[1]) for file in selected_ligand_files]
+pairs_train = data_split.get("train")
+pairs_test = data_split.get("test")
+pairs_all = pairs_train + pairs_test
 
 
-ligands = []
+def load_molecules(pairs, datadir):
+    def load_mol(ligand_file_name):
+        suppl = Chem.SDMolSupplier(
+            str(datadir / Path(ligand_file_name)), sanitize=True, removeHs=False
+        )
+        return suppl[0] if suppl and len(suppl) > 0 else None
 
-for pocket_dir in tqdm(os.listdir(INPUT_PATH)):
-    pocket_path = os.path.join(INPUT_PATH, pocket_dir)
-    if os.path.isdir(pocket_path):
-        for file in os.listdir(pocket_path):
-            if file.endswith(".sdf"):
-                if (pocket_dir, file) in selected_ligand_files_tupled:
-                    ligand_file_path = os.path.join(pocket_path, file)
-                    suppl = Chem.SDMolSupplier(str(ligand_file_path), sanitize=False, removeHs=False)
-                    ligand = suppl[0]
-                    if ligand is not None:
-                        Chem.SanitizeMol(ligand, sanitizeOps=Chem.SanitizeFlags.SANITIZE_SETAROMATICITY)
-                        ligands.append(ligand)
+    return list(
+        filter(
+            None,
+            tqdm(
+                map(load_mol, (ligand for _, ligand in pairs)),
+                desc="Loading molecules",
+                total=len(pairs),
+            ),
+        )
+    )
 
-print("Number of ligands:", len(ligands))
 
-canonical_smiles = [Chem.MolToSmiles(ligand, isomericSmiles=True, canonical=True) for ligand in ligands]
-ligands_unique = [ligands[i] for i in range(len(ligands)) if canonical_smiles[i] not in canonical_smiles[:i]]
-print("Number of unique ligands:", len(set(ligands_unique)))
+train_mols = load_molecules(pairs_train, INPUT_PATH)
+test_mols = load_molecules(pairs_test, INPUT_PATH)
+all_mols = train_mols + test_mols
 
-ligands_unique_hydrogens = [_add_hydrogens(ligand) for ligand in ligands_unique]
+print(f"Number of train ligands: {len(train_mols)}")
+print(f"Number of test ligands: {len(test_mols)}")
+print(f"Number of all ligands: {len(all_mols)}")
 
-output_path = os.path.join(OUTPUT_DIR, OUTPUT_SUBDIR)
-os.makedirs(output_path, exist_ok=True)
-writer = Chem.SDWriter(os.path.join(output_path, "ligands.sdf"))
-for ligand in ligands_unique_hydrogens:
-    if ligand is not None:
-        writer.write(ligand)
-writer.close()
+all_mols_canonical_smiles = [
+    Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True) for mol in all_mols
+]
+all_mols_unique = [
+    all_mols[i]
+    for i in range(len(all_mols))
+    if all_mols_canonical_smiles[i] not in all_mols_canonical_smiles[:i]
+]
+print(f"Number of unique ligands: {len(all_mols_unique)}")
+with Chem.SDWriter(os.path.join(OUTPUT_DIR, "ligands_raw.sdf")) as w:
+    for mol in all_mols_unique:
+        w.write(mol)
 
-print(f"Exported {len(ligands_unique_hydrogens)} ligands to {output_path}")
+all_mols_unique_rdkit_default = [
+    Chem.AddHs(mol, addCoords=True) for mol in all_mols_unique if mol is not None
+]
+all_mols_unique_rdkit_default = [
+    mol for mol in all_mols_unique_rdkit_default if mol is not None
+]
+print(
+    f"Number of unique ligands with RDKit default hydrogenation: {len(all_mols_unique_rdkit_default)}"
+)
+with Chem.SDWriter(os.path.join(OUTPUT_DIR, "ligands_rdkit_default.sdf")) as w:
+    for mol in all_mols_unique_rdkit_default:
+        w.write(mol)
+
+all_mols_unique_rdkit_embed = [
+    _add_hydrogens_with_rdkit(mol) for mol in all_mols_unique if mol is not None
+]
+all_mols_unique_rdkit_embed = [
+    mol for mol in all_mols_unique_rdkit_embed if mol is not None
+]
+print(
+    f"Number of unique ligands with RDKit embed hydrogenation: {len(all_mols_unique_rdkit_embed)}"
+)
+with Chem.SDWriter(os.path.join(OUTPUT_DIR, "ligands_rdkit_embed.sdf")) as w:
+    for mol in all_mols_unique_rdkit_embed:
+        w.write(mol)
+
+all_mols_unique_openbabel = [
+    _add_hydrogens_with_openbabel(mol) for mol in all_mols_unique if mol is not None
+]
+all_mols_unique_openbabel = [
+    mol for mol in all_mols_unique_openbabel if mol is not None
+]
+print(
+    f"Number of unique ligands with OpenBabel hydrogenation: {len(all_mols_unique_openbabel)}"
+)
+with Chem.SDWriter(os.path.join(OUTPUT_DIR, "ligands_openbabel.sdf")) as w:
+    for mol in all_mols_unique_openbabel:
+        w.write(mol)
