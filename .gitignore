@@ -1,12 +1,14 @@
 __pycache__/
-notebooks/
 build
 plotting
 data
+fragments
 logs 
+notebooks
 output
+plotting
+trained_models
 evaluation.log
-trained_models*
 *.egg-info
 *.env
 *.flake8

@@ -1220,31 +1220,19 @@ class NEAT(LightningModule):
         Returns:
             tuple[Tensor, Tensor, Tensor]: The atom types, their positions, and the batch indices of the generated molecules.
         """
-        # if pocket_info is not None:
-        #     batch_size = pocket_info["pocket_batch"].max().item() + 1
-        #     pocket_center = global_mean_pool(
-        #         pocket_info["pocket_pos"], pocket_info["pocket_batch"]
-        #     )
-        #     pocket_info["pocket_pos"] = (
-        #         pocket_info["pocket_pos"] - pocket_center[pocket_info["pocket_batch"]]
-        #     )
 
         if prefix_x is not None and prefix_pos is not None:
-            # (1) Initialize starting atom types with the provided prefix
+            # (1) Initialize starting atom types, positions, and batch source with the provided prefix
             x = torch.cat([prefix_x for _ in range(batch_size)]).to(device)
-
-            # (2) Initialize starting positions with the provided prefix
             pos = torch.cat([prefix_pos for _ in range(batch_size)], dim=0).to(device)
-
-            # (3) Initialize the batch source tensor with the provided prefix
             batch_source = torch.cat(
                 [torch.ones_like(prefix_x) * i for i in range(batch_size)]
             ).to(device)
-
             rotation_augmentation = RandomRotationAugmentation()
             pos = rotation_augmentation.rotate_molecule_randomly(pos, batch_source)
         
         elif fragment_info is not None:
+            # (1) Initialize starting atom types, positions, and batch source with the provided fragment
             x = fragment_info["fragment_x"].to(device)
             pos = fragment_info["fragment_pos"].to(device)
             batch_source = fragment_info["fragment_batch"].to(device)
@@ -1255,67 +1243,23 @@ class NEAT(LightningModule):
                     pocket_info["pocket_pos"]
                     - mean_pos[pocket_info["pocket_batch"]]
                 )
-            
-
+    
         else:
-            # (1) Sample initial atoms from the prior distribution of atom types
-            if self.hparams.data_set == "QM9":
-                dist = torch.tensor(
-                    [0.0000, 0.5109, 0.3517, 0.0580, 0.0780, 0.0014], device=device
-                )
-                x = torch.multinomial(
-                    dist, batch_size, replacement=True
-                )  # [batch_size]
-            elif self.hparams.data_set == "GEOM" or _dataset_is_crossdocked(
-                self.hparams.data_set
-            ):
-                dist = torch.tensor(
-                    [
-                        0,
-                        4.4115e-01,
-                        1.0262e-06,
-                        4.0569e-01,
-                        6.4707e-02,
-                        6.6119e-02,
-                        4.8757e-03,
-                        0,
-                        7.2215e-07,
-                        9.3404e-05,
-                        1.2265e-02,
-                        4.0290e-03,
-                        0,
-                        1.0497e-03,
-                        1.9821e-05,
-                        0,
-                        7.6015e-08,
-                    ],
-                    device=device,
-                )
-                x = torch.multinomial(
-                    dist, batch_size, replacement=True
-                )  # [batch_size]
-            else:
-                raise ValueError(f"Unknown data set: {self.hparams.data_set}")
-
-            # (2) Initialize starting positions with random zeroes
+            # (1) Initialize empty starting atom types, positions, and batch source (unconditional generation)
             x = torch.empty(0, dtype=torch.long, device=device)
             pos = torch.empty(0, 3, device=device)
-            # pos = torch.zeros(batch_size, 3, device=device)
-
-            # (3) Initialize the batch source tensor
             batch_source = torch.empty(0, device=device, dtype=torch.long)
-            # batch_source = torch.arange(batch_size, device=device)
 
-        # (4) Create a mask for the stop tokens that will be used to track which molecules have a stop token
+        # (2) Create a mask for the stop tokens that will be used to track which molecules have a stop token
         stop_token_mask = torch.zeros(batch_size, device=device, dtype=torch.bool)
 
-        # (5) Create a tensor of molecule indices that do not have a stop token
+        # (3) Create a tensor of molecule indices that do not have a stop token
         active_mol_idx = torch.arange(batch_size, device=device)[~stop_token_mask]
 
-        # (6) Iterate over the maximum number of atoms to generate
+        # (4) Iterate over the maximum number of atoms to generate
         with tqdm(range(max_atoms)) as pbar:
             for i in pbar:
-                # (6.1) Compute source set representation
+                # (4.1) Compute source set representation
                 active_batch_size = len(active_mol_idx)
                 expanded_mask = torch.isin(batch_source, active_mol_idx)
                 masked_x = x[expanded_mask]
@@ -1357,27 +1301,27 @@ class NEAT(LightningModule):
                     pocket_info=pocket_info_masked,
                 )  # [active_mol_count, n_embd]
 
-                # (6.2) Compute logits
+                # (4.2) Compute logits
                 logits = self.atom_type_prediction_head(
                     source_set_representation
                 )  # [active_mol_count, vocab_size]
                 
                 logits = logits / temperature  # Apply temperature scaling to logits
 
-                # (6.3) Compute probabilities
+                # (4.3) Compute probabilities
                 probabilities = F.softmax(
                     logits, dim=-1
                 )  # [active_mol_count, vocab_size]
 
-                # (6.4) Sample next atom types from the resulting distribution
+                # (4.4) Sample next atom types from the resulting distribution
                 x_next = torch.argmax(probabilities, dim=1)
-                # x_next_0_mask = x_next == 0
-                # x_next_1_mask = x_next == 1
-                # x_next = torch.multinomial(probabilities, num_samples=1).squeeze(1)
-                # x_next[x_next_0_mask] = 0
-                # x_next[x_next_1_mask] = 1
+                # x_next_0_mask = x_next == 0  # Used in hybrid sampling
+                # x_next_1_mask = x_next == 1  # Used in hybrid sampling
+                # x_next = torch.multinomial(probabilities, num_samples=1).squeeze(1)  # Used in hybrid sampling
+                # x_next[x_next_0_mask] = 0  # Used in hybrid sampling
+                # x_next[x_next_1_mask] = 1  # Used in hybrid sampling
 
-                # (6.5) Create a mask on the active molecules given the newly predicted atom types
+                # (4.5) Create a mask on the active molecules given the newly predicted atom types
                 x_next_mask = x_next == 0  # [active_mol_count]
 
                 pbar.set_postfix_str(
@@ -1385,10 +1329,10 @@ class NEAT(LightningModule):
                 )
                 pbar.refresh()
 
-                # (6.6) Update the stop token mask with the newly predicted stop tokens
+                # (4.6) Update the stop token mask with the newly predicted stop tokens
                 stop_token_mask[active_mol_idx] += x_next_mask  # [batch_size]
 
-                # (6.7) Count the number of stop tokens and break if all molecules
+                # (4.7) Count the number of stop tokens and break if all molecules
                 # have a stop token also update the active molecule indices and count
                 n_stop_tokens = stop_token_mask.sum()
                 active_mol_idx = torch.arange(batch_size, device=device)[
@@ -1397,11 +1341,11 @@ class NEAT(LightningModule):
                 if n_stop_tokens == batch_size:
                     break
 
-                # (6.8) Select only the source set representations for the active molecules
+                # (4.8) Select only the source set representations for the active molecules
                 x_next = x_next[~x_next_mask]
                 source_set_representation = source_set_representation[~x_next_mask]
 
-                # (6.9) If using pocket information, the source set representations are
+                # (4.9) If using pocket information, the source set representations are
                 # conditioned on the pocket. For CFG, we also need unconditioned source
                 # set representations. These are computed here.
                 if pocket_info is not None and cfg_factor > 0.0:
@@ -1417,7 +1361,7 @@ class NEAT(LightningModule):
                 else:
                     source_set_representation_unconditioned_for_cfg = None
 
-                # (6.10) Calculate the positions of the newly predicted atoms with flow matching
+                # (4.10) Calculate the positions of the newly predicted atoms with flow matching
                 pos_next = self.calculate_positions(
                     x_next,
                     source_set_representation,
@@ -1429,7 +1373,7 @@ class NEAT(LightningModule):
                     source_set_representation_unconditioned_for_cfg,
                 )
 
-                # (6.11) Update the positions with the calculated new positions
+                # (4.11) Update the positions with the calculated new positions
                 x, pos, batch_source = self.update_batch_with_new_atoms(
                     x,
                     pos,
@@ -1441,7 +1385,7 @@ class NEAT(LightningModule):
                     device,
                 )
 
-                # (6.12) Recenter the ligand (and pocket) w.r.t. the COM
+                # (4.12) Recenter the ligand (and pocket) w.r.t. the COM
                 mean_pos = global_mean_pool(pos, batch_source)
                 pos = pos - mean_pos[batch_source]
                 if pocket_info is not None:
