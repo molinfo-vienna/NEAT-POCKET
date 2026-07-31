@@ -1,4 +1,22 @@
-"""Evaluate generated molecules."""
+"""Evaluate generated molecules from NEAT (and related) generation runs.
+
+Workflow:
+  1. Load scripts/config_evaluation.yaml (or --config).
+  2. Iterate result subdirectories under data_path/data_subdir whose names
+     start with seed_, prefix_, or pocket_ (see RESULT_SUBDIR_PREFIXES).
+  3. For each subdirectory: build RDKit mols from generated_mols.pt (or
+     .sdf), compute selected metrics, write evaluation_results.txt and
+     visualization images.
+  4. Aggregate per-subdir scores into evaluation_summary.txt (mean ± 95% CI).
+
+Subdirectories missing generated_mols.pt / generated_mols.sdf (e.g. pockets
+skipped during fragment-conditioned generation) are skipped rather than
+raising.
+
+Metric flags in the config (compute_edm, compute_posebusters, …) control
+which scores are computed. Molecule construction uses xyz2mol by default,
+or a bond predictor if bond_predictor_path is set.
+"""
 
 from __future__ import annotations
 
@@ -65,6 +83,7 @@ RESULT_SUBDIR_PREFIXES = ("seed", "prefix", "pocket")
 
 
 def resolve_config_path(config_file: str | None) -> Path:
+    """Return the evaluation config path, defaulting to config_evaluation.yaml."""
     if config_file is not None:
         path = Path(config_file)
         print(f"Using config file: {path}")
@@ -74,12 +93,14 @@ def resolve_config_path(config_file: str | None) -> Path:
 
 
 def load_evaluation_config(config_file: str | None) -> dict:
+    """Load and parse the evaluation YAML config."""
     path = resolve_config_path(config_file)
     with path.open() as f:
         return yaml.load(f, Loader=yaml.FullLoader)
 
 
 def load_reference_smiles(params: dict) -> list[str] | None:
+    """Load training-set SMILES used as the novelty reference distribution."""
     data_root = ROOT / "data"
     datamodule = DataModule(data_root, data_set=params["data_set"].upper())
     datamodule.setup()
@@ -87,6 +108,7 @@ def load_reference_smiles(params: dict) -> list[str] | None:
 
 
 def iter_result_subdirs(data_path: Path) -> Iterator[Path]:
+    """Yield seed_/prefix_/pocket_ result directories under data_path, sorted."""
     for subdir in sorted(data_path.iterdir()):
         if subdir.is_dir() and subdir.name.startswith(RESULT_SUBDIR_PREFIXES):
             yield subdir
@@ -101,6 +123,7 @@ def save_2d_molecules_visualizations_to_png(
     subdir: Path, 
     mols: list
 ) -> None:
+    """Save 2D grid images (with and without hydrogens) for the first N mols."""
     subset = mols[:NUM_MOLECULES_PLOTTED]
 
     for mol in subset:
@@ -148,6 +171,7 @@ def save_3d_molecules_visualizations_to_html(
     pos,
     batch,
 ) -> None:
+    """Save an interactive py3Dmol HTML grid of the first N generated molecules."""
     view = py3Dmol.view(
         width=NUM_MOLECULES_PER_ROW * PLOT_RESOLUTION,
         height=NUM_MOLECULES_PLOTTED * PLOT_RESOLUTION,
@@ -180,7 +204,21 @@ def compute_validity_uniqueness_novelty(
     mols: list[Mol],
     reference_smiles: list[str] | None = None,
 ) -> tuple[float, float, float | None, list[bool | None]]:
-    """Return validity, uniqueness, and optional novelty ratios."""
+    """Compute RDKit validity / uniqueness / novelty fractions.
+
+    Validity: sanitizable mols with a canonical SMILES, over all mols.
+    Uniqueness: unique valid canonical SMILES, over all mols.
+    Novelty (optional): unique valid SMILES absent from reference_smiles,
+    over all mols.
+
+    Args:
+        mols: RDKit molecules (None entries count as invalid).
+        reference_smiles: Training SMILES for novelty; None skips novelty.
+
+    Returns:
+        (valid, valid_x_unique, valid_x_unique_x_novel_or_None, validity_flags)
+        where validity_flags[i] is True iff mols[i] passed validity checks.
+    """
 
     smiles: list[str] = []
     num_valid = 0
@@ -221,28 +259,33 @@ def compute_validity_uniqueness_novelty(
 
 
 def compute_mean_and_95_ci(data: list[float]) -> tuple[float, float]:
+    """Return (mean, 1.96 * std_err) for a list of scalar metric values."""
     mean = float(np.mean(data))
     std_err = float(np.std(data) / np.sqrt(len(data)))
     return mean, 1.96 * std_err
 
 
 def canonical_smiles_from_mols(mols: list) -> list[str | None]:
+    """Convert molecules to canonical SMILES (None stays None)."""
     return [
         MolToSmiles(mol, canonical=True) if mol is not None else None for mol in mols
     ]
 
 
 def pct(value: float) -> str:
+    """Format a fraction in [0, 1] as a percentage string with two decimals."""
     return f"{value * 100:.2f}%"
 
 
 def molecule_pipeline_label(params: dict, *, use_bond_predictor: bool) -> str:
+    """Human-readable label for how RDKit mols were built (xyz2mol vs predictor)."""
     if use_bond_predictor:
         return f"bond predictor ({params['bond_predictor_path']})"
     return "xyz2mol"
 
 
 def pb_validity_from_pb_reports(data_path: Path) -> float:
+    """Aggregate PoseBusters 'all checks pass' rate across pocket reports."""
     report = None
 
     for pocket_dir in os.listdir(data_path):
@@ -277,6 +320,7 @@ def pb_validity_from_pb_reports(data_path: Path) -> float:
 
 
 def save_molecules_to_sdf(mols: list, file_path: Path) -> None:
+    """Write non-None RDKit molecules to an SDF file."""
     writer = SDWriter(str(file_path))
     try:
         for mol in mols:
@@ -293,6 +337,7 @@ def _write_edm_metrics(
     title: str,
     metrics: EdmMetrics,
 ) -> None:
+    """Write a single-run EDM metric block to an open text file."""
     f.write(f"\n{title}:\n")
     f.write(f"Atom stable: {pct(metrics.atom_stability)}\n")
     f.write(f"Molecule stable: {pct(metrics.molecule_stability)}\n")
@@ -307,6 +352,7 @@ def _write_rdkit_metrics(
     *,
     include_novelty: bool,
 ) -> None:
+    """Write a single-run RDKit validity/uniqueness(/novelty) block."""
     f.write(f"\n{title}:\n")
     f.write(f"Valid: {pct(metrics.valid)}\n")
     f.write(f"Valid x unique: {pct(metrics.valid_x_unique)}\n")
@@ -322,6 +368,7 @@ def _write_dict_metrics(
     as_percent: bool,
     percent_keys: set[str] | None = None,
 ) -> None:
+    """Write a dict of named scalar metrics; optionally format as percentages."""
     percent_keys = percent_keys or set()
     f.write(f"\n{title}:\n")
     for name, value in metrics.items():
@@ -338,6 +385,7 @@ def write_subdir_results(
     compute_novelty: bool,
     molecule_pipeline: str,
 ) -> None:
+    """Write evaluation_results.txt for one seed/prefix/pocket subdirectory."""
     with (subdir / "evaluation_results.txt").open("w") as f:
         f.write(f"Data set: {params['data_set']}\n")
         f.write(f"RDKit version: {rdkit.__version__}\n")
@@ -389,6 +437,7 @@ def _write_aggregate_edm_metrics(
     valid: list[float],
     valid_x_unique: list[float],
 ) -> None:
+    """Write mean ± 95% CI for EDM metrics across subdirectories."""
     atom_mean, atom_ci = compute_mean_and_95_ci(atom_stability)
     molecule_mean, molecule_ci = compute_mean_and_95_ci(molecule_stability)
     valid_mean, valid_ci = compute_mean_and_95_ci(valid)
@@ -409,6 +458,7 @@ def _write_aggregate_rdkit_metrics(
     *,
     include_novelty: bool,
 ) -> None:
+    """Write mean ± 95% CI for RDKit metrics across subdirectories."""
     valid_mean, valid_ci = compute_mean_and_95_ci(valid)
     unique_mean, unique_ci = compute_mean_and_95_ci(valid_x_unique)
     f.write(f"\n{title}:\n")
@@ -427,6 +477,7 @@ def _write_aggregate_dict_metrics(
     as_percent: bool,
     percent_keys: set[str] | None = None,
 ) -> None:
+    """Write mean ± 95% CI for each key shared across per-subdir metric dicts."""
     if not runs:
         return
     percent_keys = percent_keys or set()
@@ -454,6 +505,7 @@ def write_summary(
     compute_vina: bool,
     molecule_pipeline: str,
 ) -> None:
+    """Write evaluation_summary.txt aggregating all subdirectory runs."""
     with (data_path / "evaluation_summary.txt").open("w") as f:
         f.write(f"Data set: {params['data_set']}\n")
         f.write(f"RDKit version: {rdkit.__version__}\n")
@@ -542,6 +594,8 @@ def write_summary(
 
 @dataclass
 class EdmMetrics:
+    """EDM atom/molecule stability and validity metrics for one subdirectory."""
+
     atom_stability: float
     molecule_stability: float
     valid: float
@@ -550,6 +604,8 @@ class EdmMetrics:
 
 @dataclass
 class RdkitMetrics:
+    """RDKit validity / uniqueness / optional novelty for one subdirectory."""
+
     valid: float
     valid_x_unique: float
     valid_x_unique_x_novel: float | None = None
@@ -557,6 +613,8 @@ class RdkitMetrics:
 
 @dataclass
 class SubdirRunResult:
+    """All metric blocks computed for a single seed/prefix/pocket directory."""
+
     edm: EdmMetrics | None = None
     rdkit: RdkitMetrics | None = None
     posebusters: dict[str, float] | None = None
@@ -568,6 +626,8 @@ class SubdirRunResult:
 
 @dataclass
 class AggregateResults:
+    """Accumulates per-subdirectory metric values for the summary report."""
+
     edm_atom_stability: list[float] = field(default_factory=list)
     edm_molecule_stability: list[float] = field(default_factory=list)
     edm_valid: list[float] = field(default_factory=list)
@@ -582,6 +642,7 @@ class AggregateResults:
     rdkit_valid_x_unique_x_novel: list[float] = field(default_factory=list)
 
     def record(self, run: SubdirRunResult) -> None:
+        """Append non-None metric blocks from one subdirectory run."""
         if run.edm is not None:
             self.edm_atom_stability.append(run.edm.atom_stability)
             self.edm_molecule_stability.append(run.edm.molecule_stability)
@@ -614,7 +675,8 @@ class AggregateResults:
 
 def _compute_rdkit_metrics(
     mols: list[Mol], reference_smiles: list[str] | None
-) -> RdkitMetrics:
+) -> tuple[RdkitMetrics, list[bool | None]]:
+    """Wrap validity/uniqueness/novelty into an RdkitMetrics dataclass."""
     valid, valid_x_unique, valid_x_unique_x_novel, validity_flag_list = compute_validity_uniqueness_novelty(
         mols, reference_smiles
     )
@@ -627,6 +689,10 @@ def _compute_rdkit_metrics(
 
 
 def compute_physchem_properties_from_mols(mols: list) -> dict[str, float] | None:
+    """Mean MW, heavy-atom count, SA, QED, and Lipinski pass rate over valid mols.
+
+    Returns None if no usable molecules are present.
+    """
     mol_weights: list[float] = []
     num_heavy_atoms: list[int] = []
     sa_scores: list[float] = []
@@ -664,6 +730,10 @@ def compute_physchem_properties_from_mols(mols: list) -> dict[str, float] | None
 
 
 def run_posebusters(cond_file: Path, pred_file: Path) -> dict[str, float]:
+    """Run PoseBusters on predicted mols; use dock mode if a pocket PDB exists.
+
+    Writes posebusters_report.csv next to cond_file and returns column means.
+    """
     buster = PoseBusters(config="mol")
 
     
@@ -695,9 +765,32 @@ def evaluate_subdirectory(
     molecule_pipeline: str,
     use_bond_predictor: bool,
     use_sdf: bool,
-) -> SubdirRunResult:
+) -> SubdirRunResult | None:
+    """Evaluate one seed/prefix/pocket directory and write local artifacts.
 
+    Loads generated_mols.pt (or .sdf), builds RDKit molecules, computes the
+    enabled metric suites, and writes evaluation_results.txt plus 2D/3D plots.
+
+    Args:
+        subdir: Path to a result directory containing generated molecules.
+        params: Evaluation config dict (dataset name, bond predictor path, …).
+        compute_*: Flags selecting which metric families to run.
+        reference_smiles: Training SMILES for novelty, or None.
+        molecule_pipeline: Label recorded in result files.
+        use_bond_predictor: Build mols via bond predictor instead of xyz2mol.
+        use_sdf: Read generated_mols.sdf instead of tensors (disables EDM).
+
+    Returns:
+        SubdirRunResult on success, or None if generated molecules are missing.
+    """
     result = SubdirRunResult()
+
+    # Pockets skipped during FBDD generation may leave an empty directory
+    # (no generated_mols.*). Skip those rather than crashing.
+    generated_file = subdir / ("generated_mols.sdf" if use_sdf else "generated_mols.pt")
+    if not generated_file.exists():
+        print(f"Skipping {subdir.name}: missing {generated_file.name}")
+        return None
 
     if use_sdf:
         supplier = SDMolSupplier(str(subdir / "generated_mols.sdf"), removeHs=False, sanitize=False)
@@ -716,7 +809,11 @@ def evaluate_subdirectory(
         save_molecules_to_sdf(mols, subdir / "generated_mols_with_hs.sdf")
     else:
         builder = MoleculeBuilder(vocab=params["data_set"])
-        x, pos, batch = builder.load_tensor_from_file(subdir)
+        try:
+            x, pos, batch = builder.load_tensor_from_file(subdir)
+        except FileNotFoundError as e:
+            print(f"Skipping {subdir.name}: {e}")
+            return None
 
         if use_bond_predictor:
             mols = builder.generate_rdkit_molecules_via_bond_predictor(
@@ -825,7 +922,11 @@ def eval_worker(
     use_sdf,
     log_filename="evaluation.log",
 ):
+    """Process-pool worker: evaluate one subdirectory with stdout/stderr redirected.
 
+    Logging noise from PoseCheck / docking tools is appended to log_filename
+    so the parent process progress bar stays readable.
+    """
     # 1. Disable all standard Python logging for this process
     logging.getLogger().setLevel(logging.CRITICAL)
 
@@ -865,6 +966,11 @@ def eval_worker(
 
 
 def evaluate(args: argparse.Namespace) -> None:
+    """Run evaluation over all result subdirectories and write the summary.
+
+    Uses a process pool when num_workers > 1. Skipped or failing subdirectories
+    are omitted from the aggregate rather than aborting the whole run.
+    """
     params = load_evaluation_config(args.config_file)
 
     compute_drugflow_clashes = bool(params.get("compute_drugflow_clashes", False))
@@ -927,29 +1033,43 @@ def evaluate(args: argparse.Namespace) -> None:
                 desc="Evaluating subdirectories",
             ):
                 original_index = futures[future]
-                runs_dict[original_index] = future.result()
+                try:
+                    runs_dict[original_index] = future.result()
+                except Exception as e:
+                    subdir = subdirs[original_index]
+                    print(f"Skipping {subdir.name}: {e}")
+                    runs_dict[original_index] = None
 
-        runs = [runs_dict[i] for i in sorted(runs_dict.keys())]
+        runs = [
+            runs_dict[i]
+            for i in sorted(runs_dict.keys())
+            if runs_dict[i] is not None
+        ]
     
     else:
         for subdir in iter_result_subdirs(data_path):
             print(f"Evaluating {subdir.name}...")
-            run = evaluate_subdirectory(
-                subdir,
-                params,
-                compute_drugflow_clashes=compute_drugflow_clashes,
-                compute_edm=compute_edm,
-                compute_novelty=compute_novelty,
-                compute_posebusters=compute_posebusters,
-                compute_posecheck=compute_posecheck,
-                compute_physchem=compute_physchem,
-                compute_vina=compute_vina,
-                molecule_pipeline=molecule_pipeline,
-                reference_smiles=reference_smiles,
-                use_bond_predictor=use_bond_predictor,
-                use_sdf=use_sdf,
-            )
-            runs.append(run)
+            try:
+                run = evaluate_subdirectory(
+                    subdir,
+                    params,
+                    compute_drugflow_clashes=compute_drugflow_clashes,
+                    compute_edm=compute_edm,
+                    compute_novelty=compute_novelty,
+                    compute_posebusters=compute_posebusters,
+                    compute_posecheck=compute_posecheck,
+                    compute_physchem=compute_physchem,
+                    compute_vina=compute_vina,
+                    molecule_pipeline=molecule_pipeline,
+                    reference_smiles=reference_smiles,
+                    use_bond_predictor=use_bond_predictor,
+                    use_sdf=use_sdf,
+                )
+            except Exception as e:
+                print(f"Skipping {subdir.name}: {e}")
+                continue
+            if run is not None:
+                runs.append(run)
 
     for run in runs:
         aggregate.record(run)
@@ -970,6 +1090,7 @@ def evaluate(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    """CLI entry point for scripts/evaluation.py."""
     parser = argparse.ArgumentParser(description="Evaluate generated molecules.")
     parser.add_argument(
         "--config",

@@ -1,18 +1,35 @@
+"""Conditional pocket-conditioned molecule generation with NEAT.
+
+Workflow:
+  1. Load a trained checkpoint and the CrossDocked test set.
+  2. For each pocket chunk: center the pocket/ligand, optionally load a
+     precomputed BRICS fragment, and run model.generate().
+  3. Save generated_mols.pt per pocket under output/.../conditional/.
+
+Fragment-based (FBDD) generation is controlled by `fragment_type` in
+config_generation_conditional.yaml:
+  - null: standard pocket-conditioned generation (no fragment seed)
+  - largest | second_largest | smallest: seed generation from that
+    precomputed fragment (see scripts/fragments_from_crossdocked.py)
+"""
+
 import argparse
 import os
 from datetime import datetime
 
-from rdkit import Chem
+import numpy as np
 import torch
 import torch_geometric
 import yaml
 from lightning import seed_everything
+from rdkit import Chem
 from torch_geometric.data import Batch
-import numpy as np
-from rdkit.Chem import BRICS
 
 from neat.dataset import DataModule
-from neat.dataset.dataset_crossdocked import _add_hydrogens_with_rdkit, _largest_fragment, _ligand_features
+from neat.dataset.dataset_crossdocked import (
+    _largest_fragment,
+    _ligand_features,
+)
 from neat.model import NEAT
 from neat.utils import center_pdb
 
@@ -27,127 +44,89 @@ seed_everything(42)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROOT = os.getcwd()
+FRAGMENTS_DIR = os.path.join(ROOT, "fragments")
+FRAGMENT_TYPES = ("largest", "second_largest", "smallest")
 
-import matplotlib.pyplot as plt
-from typing import List
 
-def plot_fragment_statistics(full_fragment_list: List[Chem.Mol], full_ligand_list: List[Chem.Mol]):
-    if len(full_fragment_list) != len(full_ligand_list):
-        raise ValueError("The fragment and ligand lists must be of the same length.")
-        
-    # 1. Extract the heavy atom counts (excluding hydrogens for standard structural analysis)
-    # If you want to include hydrogens, use mol.GetNumAtoms(onlyExplicit=False) instead.
-    frag_atom_counts = np.array([mol.GetNumHeavyAtoms() for mol in full_fragment_list])
-    ligand_atom_counts = np.array([mol.GetNumHeavyAtoms() for mol in full_ligand_list])
-    
-    # Calculate the relative size ratio
-    # Adding a tiny epsilon to avoid potential division by zero errors on empty/malformed mols
-    relative_sizes = frag_atom_counts / (ligand_atom_counts + 1e-9)
-    
-    # 2. Setup the matplotlib figure
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # --- Plot 1: Absolute Atom Count Frequency ---
-    max_atoms = int(np.max(frag_atom_counts)) if len(frag_atom_counts) > 0 else 10
-    # Set bin edges exactly at integer boundaries [0, 1, 2, ..., max_atoms + 1]
-    abs_bins = np.arange(0, max_atoms + 2)
-    
-    ax1.hist(frag_atom_counts, bins=abs_bins, edgecolor='black', alpha=0.75, rwidth=0.8, align='left')
-    ax1.set_xlim(-0.5, max_atoms + 0.5)
-    ax1.set_xticks(np.arange(0, max_atoms + 1, max(1, max_atoms // 10))) # Dynamic tick scaling
-    ax1.set_title("Fragment Absolute Size Distribution")
-    ax1.set_xlabel("Number of Heavy Atoms")
-    ax1.set_ylabel("Frequency")
-    ax1.grid(axis='y', linestyle='--', alpha=0.5)
+def prepare_fragment_info(
+    fragment_list: list[Chem.Mol], num_molecules: int
+) -> dict:
+    """Build batched fragment tensors for model.generate().
 
-    # --- Plot 2: Relative Atom Count Frequency ---
-    # 10% bin width means exactly 10 bins from 0.0 to 1.0
-    rel_bins = np.linspace(0.0, 1.0, 21)
-    
-    ax2.hist(relative_sizes, bins=rel_bins, edgecolor='black', alpha=0.75, rwidth=0.8)
-    ax2.set_xlim(0.0, 1.0)
-    ax2.set_xticks(rel_bins)
-    # Format labels as nice percentages
-    ax2.set_xticklabels([f"{int(x*100)}%" for x in rel_bins])
-    
-    ax2.set_title("Fragment Size Relative to Full Ligand")
-    ax2.set_xlabel("Relative Size (% of Total Heavy Atoms)")
-    ax2.set_ylabel("Frequency")
-    ax2.grid(axis='y', linestyle='--', alpha=0.5)
-    
-    plt.tight_layout()
-    plt.show()
+    For each pocket fragment in the chunk, atom types and positions are
+    repeated `num_molecules` times so every sample for that pocket starts
+    from the same fragment seed. Batch indices encode
+    (pocket_in_chunk, sample_within_pocket).
 
-def prepare_fragment_info(fragment_list: list[Chem.Mol], num_molecules: int, device=DEVICE) -> dict:
+    Args:
+        fragment_list: One RDKit mol per pocket in the current chunk.
+        num_molecules: Number of molecules to generate per pocket.
+
+    Returns:
+        Dict with fragment_x, fragment_pos, and fragment_batch tensors.
+    """
     x_list = []
     pos_list = []
     batch_list = []
 
     for i, fragment in enumerate(fragment_list):
         x, pos = _ligand_features(fragment)
+        # Repeat the fragment once for each molecule generated for this pocket.
         x_list.append(torch.cat([x for _ in range(num_molecules)], dim=0))
         pos_list.append(torch.cat([pos for _ in range(num_molecules)], dim=0))
-        batch_list.append(torch.cat([torch.ones(len(x), dtype=torch.long) * j for j in range(num_molecules)], dim=0) + i * num_molecules)
+        batch_list.append(
+            torch.cat(
+                [torch.ones(len(x), dtype=torch.long) * j for j in range(num_molecules)],
+                dim=0,
+            )
+            + i * num_molecules
+        )
 
     return {
         "fragment_x": torch.hstack(x_list),
         "fragment_pos": torch.vstack(pos_list),
-        "fragment_batch": torch.hstack(batch_list)
+        "fragment_batch": torch.hstack(batch_list),
     }
 
-def get_fragment_with_brics(mol: Chem.Mol) -> Chem.Mol:
-    """
-    Centers a molecule to its center of mass (unweighted),
-    fragments it using BRICS, and returns the largest fragment 
-    with BRICS dummy atoms stripped.
-    """
-    # 1. Center the molecule to its unweighted Center of Mass (COM)
-    # Ensure the molecule has at least one conformer
-    if mol.GetNumConformers() == 0:
-        raise ValueError("The input molecule must have a 3D conformation to calculate the center of mass.")
-    
-    conf = mol.GetConformer()
-    num_atoms = mol.GetNumAtoms()
-    
-    # Extract coordinates of all atoms
-    coords = np.array([list(conf.GetAtomPosition(i)) for i in range(num_atoms)])
-    
-    # Calculate unweighted Center of Mass (mean of positions)
-    com = np.mean(coords, axis=0)
-    
-    # Shift all atom positions to center them at (0, 0, 0)
-    for i in range(num_atoms):
-        original_pos = conf.GetAtomPosition(i)
-        centered_pos = original_pos - com
-        conf.SetAtomPosition(i, centered_pos)
-        
-    # 2. Fragment the molecule using BRICS
-    # BreakBRICSBonds breaks the bonds and adds dummy atoms at the cut points
-    fragmented_mol = BRICS.BreakBRICSBonds(mol)
-    
-    # 3. Get individual disconnected fragments
-    fragments = Chem.GetMolFrags(fragmented_mol, asMols=True)
-    
-    if not fragments or len(fragments) <= 1:
-        return mol # Return original if no fragments were generated
-    
-    # Get largest fragment
-    clean_frags = [Chem.DeleteSubstructs(frag, Chem.MolFromSmiles('*')) for frag in fragments]
-    num_atoms = np.array([frag.GetNumHeavyAtoms() for frag in clean_frags])
-    largest_idx = np.argsort(num_atoms)[-1]
-    largest_fragment = clean_frags[largest_idx]
-    
-    return largest_fragment
 
-def generate(args: argparse.Namespace) -> None:
-    """Generate molecules using the NEAT model.
+def load_fragment(pdb_code: str, fragment_type: str) -> Chem.Mol:
+    """Load a precomputed BRICS fragment SDF for a pocket.
+
+    Fragments are written by scripts/fragments_from_crossdocked.py under
+    fragments/{fragment_type}/{pdb_code}.sdf.
 
     Args:
-        args (argparse.Namespace): Command line arguments.
+        pdb_code: PDB code identifying the pocket.
+        fragment_type: One of largest, second_largest, smallest.
 
     Returns:
-        None
+        Fragment molecule with 3D coordinates (pocket-/COM-centered).
     """
+    if fragment_type not in FRAGMENT_TYPES:
+        raise ValueError(
+            f"Unknown fragment_type {fragment_type!r}. "
+            f"Expected one of {FRAGMENT_TYPES}."
+        )
+    fragment_path = os.path.join(FRAGMENTS_DIR, fragment_type, f"{pdb_code}.sdf")
+    if not os.path.exists(fragment_path):
+        raise FileNotFoundError(
+            f"Fragment file not found: {fragment_path}."
+        )
+    supplier = Chem.SDMolSupplier(fragment_path, removeHs=False, sanitize=True)
+    fragment = supplier[0]
+    if fragment is None:
+        raise ValueError(f"Failed to read fragment from {fragment_path}.")
+    return fragment
+
+
+def generate(args: argparse.Namespace) -> None:
+    """Run pocket-conditioned (optionally fragment-seeded) generation.
+
+    Args:
+        args: Must provide optional config_file; defaults to
+            scripts/config_generation_conditional.yaml.
+    """
+    # --- Config & model ---
     if args.config_file is not None:
         CONFIG_FILE_PATH = args.config_file
         print(f"Using config file: {CONFIG_FILE_PATH}")
@@ -177,6 +156,7 @@ def generate(args: argparse.Namespace) -> None:
     MODEL = NEAT
     model = MODEL.load_from_checkpoint(checkpoints_path, map_location=DEVICE)
 
+    # --- Data ---
     datamodule = DataModule(
         os.path.join(ROOT, "data"),
         params["data_set"].upper(),
@@ -186,58 +166,80 @@ def generate(args: argparse.Namespace) -> None:
 
     num_molecules = params["num_molecules"]
     chunk_size = params["chunk_size"]
-    fbdd = params.get("fbdd", False)
-    full_fragment_list = []
-    full_ligand_list = []
+    fragment_type = params.get("fragment_type", None)
+    # null / None => standard conditional generation; otherwise FBDD with that rank.
+    if fragment_type is not None:
+        print(f"Using fragment type: {fragment_type}")
 
+    # Process pockets in chunks to bound GPU memory.
     for chunk_start_idx in range(0, len(test_data), chunk_size):
-        # Here we store the metadata data in the appropriate directories
-        if fbdd:
-            fragment_list = []
-        for data_idx_in_chunk, data_idx in enumerate(
-            range(chunk_start_idx, min(chunk_start_idx + chunk_size, len(test_data)))
-        ):
+        chunk_end_idx = min(chunk_start_idx + chunk_size, len(test_data))
+        # Indices / fragments actually used for generation in this chunk
+        # (FBDD may drop pockets with no precomputed fragment).
+        included_data_indices: list[int] = []
+        fragment_list: list[Chem.Mol] = []
+
+        # Prepare centered pocket/ligand files (and collect fragments if FBDD).
+        for data_idx in range(chunk_start_idx, chunk_end_idx):
+            pdb_code = test_data.get_pdb_code_from_data_point(test_data[data_idx])
+
+            if fragment_type is not None:
+                try:
+                    fragment = load_fragment(pdb_code, fragment_type)
+                except (FileNotFoundError, ValueError) as e:
+                    print(f"Skipping pocket {pdb_code}: {e}")
+                    continue
+
             out_dir = os.path.join(
-                ROOT, params["output_path"], "conditional", f"pocket_{data_idx}"
+                ROOT, params["output_path"], "conditional", f"pocket_{pdb_code}"
             )
             if not os.path.exists(out_dir):
                 os.makedirs(out_dir)
 
+            # Center pocket at the origin and write pocket.pdb for later evaluation.
             in_pdb_file = test_data.get_pocket_path_from_data_point(test_data[data_idx])
             out_pdb_file = os.path.join(out_dir, "pocket.pdb")
             pocket_center = center_pdb(in_pdb_file, out_pdb_file, return_center=True)
+
+            # Load the reference ligand, keep the largest connected component,
+            # add hydrogens, and shift into the same pocket-centered frame.
             in_sdf_file = in_pdb_file.replace("_pocket10.pdb", ".sdf")
             out_sdf_file = os.path.join(out_dir, "ligand.sdf")
-            supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False)
+            supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False, sanitize=True)
             rdmol = supplier[0]
             rdmol = _largest_fragment(rdmol)
-            rdmol = _add_hydrogens_with_rdkit(rdmol)
-            
+            # TODO: decide which hydrogenation method to use
+            rdmol = Chem.AddHs(rdmol, addCoords=True)
+
             conformer = rdmol.GetConformer()
             for i in range(rdmol.GetNumAtoms()):
                 pos = conformer.GetAtomPosition(i)
-                # Convert Point3D to numpy array, subtract center, and update
                 new_pos = np.array([pos.x, pos.y, pos.z]) - pocket_center
                 conformer.SetAtomPosition(i, new_pos)
 
-            # 4. Save the modified molecule back to an SDF file
             writer = Chem.SDWriter(out_sdf_file)
             writer.write(rdmol)
             writer.close()
-            
-            full_ligand_list.append(rdmol)
-            if fbdd:
-                fragment = get_fragment_with_brics(rdmol)
-                fragment_list.append(fragment)
-                full_fragment_list.append(fragment)
 
-        if fbdd:
-            fragment_info = prepare_fragment_info(fragment_list, num_molecules, device=DEVICE)
-        
-        # Here we generate the molecules
-        data_point_list = list(
-            test_data[chunk_start_idx : chunk_start_idx + chunk_size]
-        )
+            included_data_indices.append(data_idx)
+            if fragment_type is not None:
+                fragment_list.append(fragment)
+
+        if not included_data_indices:
+            print(
+                f"Skipping chunk {chunk_start_idx}–{chunk_end_idx - 1}: "
+                "no pockets with usable fragments."
+            )
+            continue
+
+        fragment_info = None
+        if fragment_type is not None:
+            fragment_info = prepare_fragment_info(
+                fragment_list, num_molecules
+            )
+
+        # Collate pocket features for the pockets kept in this chunk.
+        data_point_list = [test_data[i] for i in included_data_indices]
         pocket_info = datamodule.test_data.collate_pocket_info(
             data_point_list, samples_per_pocket=num_molecules, device=DEVICE
         )
@@ -251,13 +253,15 @@ def generate(args: argparse.Namespace) -> None:
                 time_step_spacing=params["time_step_spacing"],
                 integration_method=params["integration_method"],
                 pocket_info=pocket_info,
-                fragment_info=fragment_info if fbdd else None,
+                fragment_info=fragment_info,
             )
 
-        # Here we store the generated data in the appropriate directories
-        for data_idx_in_chunk, data_idx in enumerate(
-            range(chunk_start_idx, min(chunk_start_idx + chunk_size, len(test_data)))
-        ):
+        # Split the chunk batch back into per-pocket tensors and save.
+        for data_idx_in_chunk, data_idx in enumerate(included_data_indices):
+            pdb_code = test_data.get_pdb_code_from_data_point(test_data[data_idx])
+            out_dir = os.path.join(
+                ROOT, params["output_path"], "conditional", f"pocket_{pdb_code}"
+            )
             subset_mask = torch.isin(
                 generated_mols.batch,
                 torch.arange(
@@ -271,27 +275,26 @@ def generate(args: argparse.Namespace) -> None:
                 pos=generated_mols.pos[subset_mask],
                 batch=generated_mols.batch[subset_mask],
             )
+            # Renormalize batch ids to start at 0 within this pocket file.
             generated_mols_subset.batch -= generated_mols_subset.batch.min()
-            out_dir = os.path.join(
-                ROOT, params["output_path"], "conditional", f"pocket_{data_idx}"
-            )
-            os.makedirs(out_dir, exist_ok=True)
             torch.save(
                 generated_mols_subset, os.path.join(out_dir, "generated_mols.pt")
             )
 
         seed_end_time = datetime.now()
         print(
-            f"Generation time for pockets {chunk_start_idx} to {min(chunk_start_idx + chunk_size, len(test_data)) - 1}: {seed_end_time - pocket_start_time}"
+            f"Generation time for {len(included_data_indices)} pocket(s) "
+            f"in chunk {chunk_start_idx}–{chunk_end_idx - 1}: "
+            f"{seed_end_time - pocket_start_time}"
         )
-        
-    # plot_fragment_statistics(full_fragment_list, full_ligand_list)
 
 
 if __name__ == "__main__":
     start_time = datetime.now()
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Generate molecules conditioned on CrossDocked pockets."
+    )
 
     parser.add_argument(
         "--config",

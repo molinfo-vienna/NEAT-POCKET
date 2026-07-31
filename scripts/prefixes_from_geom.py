@@ -11,7 +11,7 @@ from tqdm import tqdm
 RDLogger.DisableLog("rdApp.*")
 
 ROOT = os.getcwd()
-
+PREFIXES_DIR = os.path.join(ROOT, "prefixes")
 
 def get_ring_system_components(mol: Chem.Mol) -> list[set[int]]:
     """Find sets of atoms constituting ring systems.
@@ -239,11 +239,11 @@ if __name__ == "__main__":
     print(f"Generated 3D coordinates for top {len(mols3d)} patterns.")
 
     # (4) Write 3D coords to SDF
-    w = SDWriter(os.path.join(ROOT, "prefixes", "prefixes.sdf"))
+    w = SDWriter(os.path.join(PREFIXES_DIR, "prefixes.sdf"))
     for m in mols3d:
         w.write(m)
     w.close()
-    print(f"Wrote prefixes to {os.path.join(ROOT, 'prefixes', 'prefixes.sdf')}.")
+    print(f"Wrote prefixes to {os.path.join(PREFIXES_DIR, 'prefixes.sdf')}.")
 
     # (5) Convert to 2D for visualization
     mols2d = []
@@ -268,7 +268,7 @@ if __name__ == "__main__":
         molsPerRow=5,
         subImgSize=(300, 300),
     )
-    img.save(os.path.join(ROOT, "prefixes", "prefixes.png"))
+    img.save(os.path.join(PREFIXES_DIR, "prefixes.png"))
 
     end_time = datetime.now()
     print(f"Total time: {end_time - start_time}")
