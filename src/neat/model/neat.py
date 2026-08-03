@@ -1301,53 +1301,8 @@ class NEAT(LightningModule):
                     pocket_info=pocket_info_masked,
                 )  # [active_mol_count, n_embd]
 
-                # (4.2) Compute logits
-                logits = self.atom_type_prediction_head(
-                    source_set_representation
-                )  # [active_mol_count, vocab_size]
-                
-                logits = logits / temperature  # Apply temperature scaling to logits
-
-                # (4.3) Compute probabilities
-                probabilities = F.softmax(
-                    logits, dim=-1
-                )  # [active_mol_count, vocab_size]
-
-                # (4.4) Sample next atom types from the resulting distribution
-                x_next = torch.argmax(probabilities, dim=1)
-                # x_next_0_mask = x_next == 0  # Used in hybrid sampling
-                # x_next_1_mask = x_next == 1  # Used in hybrid sampling
-                # x_next = torch.multinomial(probabilities, num_samples=1).squeeze(1)  # Used in hybrid sampling
-                # x_next[x_next_0_mask] = 0  # Used in hybrid sampling
-                # x_next[x_next_1_mask] = 1  # Used in hybrid sampling
-
-                # (4.5) Create a mask on the active molecules given the newly predicted atom types
-                x_next_mask = x_next == 0  # [active_mol_count]
-
-                pbar.set_postfix_str(
-                    f"Generating atom {i + 2} for {(~x_next_mask).sum()} molecules."
-                )
-                pbar.refresh()
-
-                # (4.6) Update the stop token mask with the newly predicted stop tokens
-                stop_token_mask[active_mol_idx] += x_next_mask  # [batch_size]
-
-                # (4.7) Count the number of stop tokens and break if all molecules
-                # have a stop token also update the active molecule indices and count
-                n_stop_tokens = stop_token_mask.sum()
-                active_mol_idx = torch.arange(batch_size, device=device)[
-                    ~stop_token_mask
-                ]  # [active_mol_count] carefull, this might be shorter than before, if stop tokens were predicted!
-                if n_stop_tokens == batch_size:
-                    break
-
-                # (4.8) Select only the source set representations for the active molecules
-                x_next = x_next[~x_next_mask]
-                source_set_representation = source_set_representation[~x_next_mask]
-
-                # (4.9) If using pocket information, the source set representations are
-                # conditioned on the pocket. For CFG, we also need unconditioned source
-                # set representations. These are computed here.
+                # (4.2) If using pocket information, the source set representations are
+                # conditioned on the pocket.
                 if pocket_info is not None and cfg_factor > 0.0:
                     source_set_representation_unconditioned_for_cfg = (
                         self.compute_source_set_representation(
@@ -1356,10 +1311,57 @@ class NEAT(LightningModule):
                             batch_source_remapped,
                             active_batch_size,
                             device,
-                        )[~x_next_mask]
+                        )
                     )  # [active_mol_count, n_embd]
+
                 else:
                     source_set_representation_unconditioned_for_cfg = None
+
+                # (4.3) Compute logits
+                logits = self.atom_type_prediction_head(
+                    source_set_representation
+                )  # [active_mol_count, vocab_size]
+                
+                logits = logits / temperature  # Apply temperature scaling to logits
+
+                # (4.4) Compute probabilities
+                probabilities = F.softmax(
+                    logits, dim=-1
+                )  # [active_mol_count, vocab_size]
+
+                # (4.5) Sample next atom types from the resulting distribution
+                x_next = torch.argmax(probabilities, dim=1)
+                # x_next_0_mask = x_next == 0  # Used in hybrid sampling
+                # x_next_1_mask = x_next == 1  # Used in hybrid sampling
+                # x_next = torch.multinomial(probabilities, num_samples=1).squeeze(1)  # Used in hybrid sampling
+                # x_next[x_next_0_mask] = 0  # Used in hybrid sampling
+                # x_next[x_next_1_mask] = 1  # Used in hybrid sampling
+
+                # (4.6) Create a mask on the active molecules given the newly predicted atom types
+                x_next_mask = x_next == 0  # [active_mol_count]
+
+                pbar.set_postfix_str(
+                    f"Generating atom {i + 2} for {(~x_next_mask).sum()} molecules."
+                )
+                pbar.refresh()
+
+                # (4.7) Update the stop token mask with the newly predicted stop tokens
+                stop_token_mask[active_mol_idx] += x_next_mask  # [batch_size]
+
+                # (4.8) Count the number of stop tokens and break if all molecules
+                # have a stop token also update the active molecule indices and count
+                n_stop_tokens = stop_token_mask.sum()
+                active_mol_idx = torch.arange(batch_size, device=device)[
+                    ~stop_token_mask
+                ]  # [active_mol_count] carefull, this might be shorter than before, if stop tokens were predicted!
+                if n_stop_tokens == batch_size:
+                    break
+
+                # (4.9) Select only the source set representations for the active molecules
+                x_next = x_next[~x_next_mask]
+                source_set_representation = source_set_representation[~x_next_mask]
+                if source_set_representation_unconditioned_for_cfg is not None:
+                    source_set_representation_unconditioned_for_cfg = source_set_representation_unconditioned_for_cfg[~x_next_mask]
 
                 # (4.10) Calculate the positions of the newly predicted atoms with flow matching
                 pos_next = self.calculate_positions(
