@@ -1,11 +1,11 @@
 from .edm_metrics import compute_edm_metrics_from_tensors
-from .pose_check_metrics import compute_pose_check_metrics_from_mols
+from .posecheck_metrics import compute_posecheck_metrics_from_mols
 from .sbdd_metrics import GninaEvaluator
 from .utils import center_pdb
 
 __all__ = [
     "compute_edm_metrics_from_tensors",
-    "compute_pose_check_metrics_from_mols",
+    "compute_posecheck_metrics_from_mols",
     "GninaEvaluator",
     "center_pdb",
 ]

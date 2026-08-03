@@ -4,8 +4,8 @@ Workflow:
   1. Load scripts/config_evaluation.yaml (or --config).
   2. Iterate result subdirectories under data_path/data_subdir whose names
      start with seed_, prefix_, or pocket_ (see RESULT_SUBDIR_PREFIXES).
-  3. For each subdirectory: build RDKit mols from generated_mols.pt (or
-     .sdf), compute selected metrics, write evaluation_results.txt and
+  3. For each subdirectory: build RDKit mols from generated_mols.pt (or load 
+     from .sdf), compute selected metrics, write evaluation_results.txt and
      visualization images.
   4. Aggregate per-subdir scores into evaluation_summary.txt (mean ± 95% CI).
 
@@ -36,10 +36,10 @@ import tempfile
 
 
 import numpy as np
-import pandas as pd
 import py3Dmol
 import rdkit
 import yaml
+from scipy import stats
 from posebusters import PoseBusters
 from posecheck import (
     PoseCheck,
@@ -61,7 +61,7 @@ from rdkit.Contrib.SA_Score import sascorer
 from neat.dataset import DataModule
 from neat.model.molecule_builder import MoleculeBuilder
 from neat.utils.edm_metrics import compute_edm_metrics_from_tensors
-from neat.utils.pose_check_metrics import compute_pose_check_metrics_from_mols
+from neat.utils.posecheck_metrics import compute_posecheck_metrics_from_mols
 from neat.utils.sbdd_metrics import ClashEvaluator, GninaEvaluator
 
 # ---------------------------------------------------------------------------
@@ -244,9 +244,11 @@ def compute_validity_uniqueness_novelty(
 
     # Uniqueness computed as number of unique canonical SMILES strings / total number of molecules
     unique_smiles = set[str](smiles)
-    p_valid_unique = len(unique_smiles) / total_mols
+    num_unique = len(unique_smiles)
+    p_valid_unique = num_unique / total_mols
 
-    # Novelty computed as number of unique canonical SMILES strings that are not in the reference set / total number of molecules
+    # Novelty computed as number of unique canonical SMILES strings that are not in the reference set / number of valid molecules
+    # Validity x uniqueness x novelty computed as number of unique canonical SMILES strings that are not in the reference set / total number of molecules
     if reference_smiles is None:
         return p_valid, p_valid_unique, None, validity_flag_list
 
@@ -259,10 +261,19 @@ def compute_validity_uniqueness_novelty(
 
 
 def compute_mean_and_95_ci(data: list[float]) -> tuple[float, float]:
-    """Return (mean, 1.96 * std_err) for a list of scalar metric values."""
+    """Return (mean, half-width of a 95% t-interval) over scalar metric values.
+
+    Uses the sample standard deviation (ddof=1) and the Student-t critical
+    value with ``len(data) - 1`` degrees of freedom. For a single observation
+    the half-width is returned as 0 (CI undefined).
+    """
+    n = len(data)
     mean = float(np.mean(data))
-    std_err = float(np.std(data) / np.sqrt(len(data)))
-    return mean, 1.96 * std_err
+    if n < 2:
+        return mean, 0.0
+    std_err = float(np.std(data, ddof=1) / np.sqrt(n))
+    t_crit = float(stats.t.ppf(0.975, df=n - 1))
+    return mean, t_crit * std_err
 
 
 def canonical_smiles_from_mols(mols: list) -> list[str | None]:
@@ -283,36 +294,6 @@ def molecule_pipeline_label(params: dict, *, use_bond_predictor: bool) -> str:
         return f"bond predictor ({params['bond_predictor_path']})"
     return "xyz2mol"
 
-
-def pb_validity_from_pb_reports(data_path: Path) -> float:
-    """Aggregate PoseBusters 'all checks pass' rate across pocket reports."""
-    report = None
-
-    for pocket_dir in os.listdir(data_path):
-        if not os.path.isdir(os.path.join(data_path, pocket_dir)):
-            print(f"{pocket_dir} is not a directory.")
-            continue
-
-        report_file = os.path.join(data_path, pocket_dir, "posebusters_report.csv")
-        if not os.path.exists(report_file):
-            print(f"Pocket {pocket_dir} does not have a posebusters report.")
-            continue
-
-        report_ = pd.read_csv(report_file)
-        report_["all"] = report_.all(axis=1)
-        report_["pocket"] = pocket_dir.split("_")[1]
-
-        if report is None:
-            report = report_
-        else:
-            report = pd.concat([report, report_], ignore_index=True)
-
-    stats = {}
-    for column in report.columns:
-        if column != "pocket":
-            stats[column] = report[column].sum() / len(report)
-
-    return stats["all"]
 
 # ---------------------------------------------------------------------------
 # I/O
@@ -403,6 +384,9 @@ def write_subdir_results(
             _write_dict_metrics(
                 f, "PoseBusters metrics", run.posebusters, as_percent=True
             )
+
+        if run.rdkit_x_posebusters is not None:
+            f.write(f"\nRDKit x PoseBusters: {pct(run.rdkit_x_posebusters)}\n")
 
         if run.posecheck is not None:
             _write_dict_metrics(f, "PoseCheck metrics", run.posecheck, as_percent=False)
@@ -532,7 +516,7 @@ def write_summary(
                 aggregate.rdkit_valid_x_unique,
                 aggregate.rdkit_valid_x_unique_x_novel or None,
                 include_novelty=compute_novelty,
-            )
+            )   
         else:
             f.write("RDKit metrics: No data available\n")
 
@@ -541,10 +525,12 @@ def write_summary(
                 _write_aggregate_dict_metrics(
                     f, "PoseBusters metrics", aggregate.posebusters, as_percent=True
                 )
-                pb_validity = pb_validity_from_pb_reports(data_path)
-                f.write(f"PoseBusters validity: {pct(pb_validity)}\n")
             else:
                 f.write("PoseBusters metrics: No data available\n")
+
+        if aggregate.rdkit_x_posebusters:
+            mean, ci = compute_mean_and_95_ci(aggregate.rdkit_x_posebusters)
+            f.write(f"\nRDKit x PoseBusters: {pct(mean)} ± {pct(ci)}\n")
 
         if compute_posecheck:
             if aggregate.posecheck:
@@ -618,6 +604,7 @@ class SubdirRunResult:
     edm: EdmMetrics | None = None
     rdkit: RdkitMetrics | None = None
     posebusters: dict[str, float] | None = None
+    rdkit_x_posebusters: float | None = None
     posecheck: dict[str, float] | None = None
     physchem: dict[str, float] | None = None
     drugflow: dict[str, float] | None = None
@@ -633,6 +620,7 @@ class AggregateResults:
     edm_valid: list[float] = field(default_factory=list)
     edm_valid_x_unique: list[float] = field(default_factory=list)
     posebusters: list[dict[str, float]] = field(default_factory=list)
+    rdkit_x_posebusters: list[float] = field(default_factory=list)
     posecheck: list[dict[str, float]] = field(default_factory=list)
     physchem: list[dict[str, float]] = field(default_factory=list)
     drugflow: list[dict[str, float]] = field(default_factory=list)
@@ -651,6 +639,9 @@ class AggregateResults:
 
         if run.posebusters is not None:
             self.posebusters.append(run.posebusters)
+
+        if run.rdkit_x_posebusters is not None:
+            self.rdkit_x_posebusters.append(run.rdkit_x_posebusters)
 
         if run.posecheck is not None:
             self.posecheck.append(run.posecheck)
@@ -677,7 +668,7 @@ def _compute_rdkit_metrics(
     mols: list[Mol], reference_smiles: list[str] | None
 ) -> tuple[RdkitMetrics, list[bool | None]]:
     """Wrap validity/uniqueness/novelty into an RdkitMetrics dataclass."""
-    valid, valid_x_unique, valid_x_unique_x_novel, validity_flag_list = compute_validity_uniqueness_novelty(
+    valid,valid_x_unique, valid_x_unique_x_novel, validity_flag_list = compute_validity_uniqueness_novelty(
         mols, reference_smiles
     )
     return RdkitMetrics(valid, valid_x_unique, valid_x_unique_x_novel), validity_flag_list
@@ -729,14 +720,14 @@ def compute_physchem_properties_from_mols(mols: list) -> dict[str, float] | None
     }
 
 
-def run_posebusters(cond_file: Path, pred_file: Path) -> dict[str, float]:
+def run_posebusters(cond_file: Path, pred_file: Path) -> dict[str, float] | None:
     """Run PoseBusters on predicted mols; use dock mode if a pocket PDB exists.
 
-    Writes posebusters_report.csv next to cond_file and returns column means.
+    Writes posebusters_report.csv next to cond_file and returns per-check pass
+    rates plus ``all`` (fraction of molecules that pass every check).
     """
     buster = PoseBusters(config="mol")
 
-    
     if os.path.exists(cond_file):
         buster = PoseBusters(config="dock")
     df = buster.bust(
@@ -745,9 +736,11 @@ def run_posebusters(cond_file: Path, pred_file: Path) -> dict[str, float]:
     subdir = cond_file.parent
     df.to_csv(subdir / "posebusters_report.csv", index=False)
     try:
-        return {column: df[column].mean() for column in df.columns}
-    except:
-        return 0
+        metrics = {column: float(df[column].mean()) for column in df.columns}
+        metrics["all"] = float(df.all(axis=1).mean())
+        return metrics
+    except Exception:
+        return None
 
 
 def evaluate_subdirectory(
@@ -863,8 +856,15 @@ def evaluate_subdirectory(
     if compute_posebusters:
         result.posebusters = run_posebusters(pocket_path, mol_sdf_path)
 
+    if (
+        result.rdkit is not None
+        and result.posebusters is not None
+        and "all" in result.posebusters
+    ):
+        result.rdkit_x_posebusters = result.rdkit.valid * result.posebusters["all"]
+
     if compute_posecheck:
-        result.posecheck = compute_pose_check_metrics_from_mols(mols, str(pocket_path))
+        result.posecheck = compute_posecheck_metrics_from_mols(mols, str(pocket_path))
 
     if compute_drugflow_clashes:
         clash_evaluator = ClashEvaluator()
@@ -883,6 +883,20 @@ def evaluate_subdirectory(
             mol_sdf_path, str(pocket_path), str(ligand_sdf_path), minimize=False
         )
         result.vina = vina_results | vin_min_results
+
+        mean_nha = float(
+            np.mean([mol.GetNumHeavyAtoms() for mol in mols if mol is not None])
+        )
+        if mean_nha > 0:
+            # Insert efficiency next to the corresponding vina scores for readability.
+            ordered_vina: dict[str, float] = {}
+            for key, value in result.vina.items():
+                ordered_vina[key] = value
+                if key == "vina_score":
+                    ordered_vina["vina_efficiency"] = value / mean_nha
+                elif key == "vina_score_min":
+                    ordered_vina["vina_efficiency_min"] = value / mean_nha
+            result.vina = ordered_vina
 
     if compute_physchem:
         result.physchem = compute_physchem_properties_from_mols(mols)
@@ -996,8 +1010,6 @@ def evaluate(args: argparse.Namespace) -> None:
         reference_smiles = None
 
     data_path = ROOT / params["data_path"] / params["data_subdir"]
-    #from pathlib import Path
-    #data_path = Path("/data/sharedXL/projects/Daniel/baselines/Pocket2Mol/outputs_pocket2mol")
     aggregate = AggregateResults()
 
     num_workers = params.get("num_workers", 1)
