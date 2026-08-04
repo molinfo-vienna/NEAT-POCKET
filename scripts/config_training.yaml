@@ -1,11 +1,11 @@
-accumulate_grad_batches: 8
-batch_size: 32
+accumulate_grad_batches: 2
+batch_size: 128
 bias: true
 cfg_dropout: 0.2
 clash_penalty: 4.0
-clash_penalty_margin: 0.0
+clash_penalty_margin: -0.5
 cross_attn_with_null_token: true
-data_set: CrossDocked
+data_set: SPINDR
 dropout: 0.1
 freeze_pretrained: true
 global_cond_proj: true
@@ -26,7 +26,6 @@ pocket_n_layer: 4
 pocket_n_layer_atom_level: 1
 pretrained_model_path: logs/NEAT/pretrained_geom
 residue_pooling: sum
-rope: false
 time_step_resampling: 4
 time_step_sampling: logit_normal
 unfreeze_epoch: 150

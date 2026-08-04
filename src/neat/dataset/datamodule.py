@@ -410,7 +410,7 @@ class DataModule(LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             persistent_workers=True,
-            drop_last=True,
+            drop_last=False,
             collate_fn=(
                 self.source_target_split_fn
                 if self.task == "neat"
