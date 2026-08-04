@@ -179,7 +179,7 @@ class SpindrDataSet(InMemoryDataset):
         output_path = os.path.join(target_dir, file_name)
         command = ["wget", "-O", output_path, self.SPINDR_ZENODO]
         
-        if not os.path.exists(Path(target_dir) / "raw"):
+        if not os.path.exists(Path(target_dir) / "raw" / "train"):
             try:
                 print(f"Downloading file to {output_path}...")
                 subprocess.run(command, check=True)
