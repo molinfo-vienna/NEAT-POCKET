@@ -14,6 +14,7 @@ from .augmentation import RandomRotationAugmentation
 from .dataset_geom import GEOMDataSet
 from .dataset_qm9 import QM9DataSet
 from .dataset_crossdocked import CrossDockedDataSet
+from .dataset_spindr import SpindrDataSet
 from .splitting import SourceTargetSplitter
 
 
@@ -300,6 +301,7 @@ class DataModule(LightningDataModule):
         self.bond_predictor_radius = bond_predictor_radius
         self.bond_predictor_noise_ratio = bond_predictor_noise_ratio
 
+        follow_pocket_batch = False
         if self.data_set == "QM9":
             self.vocab_size = len(QM9DataSet.VOCABULARY) + 1
             self.vocab = QM9DataSet.VOCABULARY
@@ -309,6 +311,11 @@ class DataModule(LightningDataModule):
         elif self.data_set == "CROSSDOCKED":
             self.vocab_size = len(GEOMDataSet.VOCABULARY) + 1
             self.vocab = GEOMDataSet.VOCABULARY
+            follow_pocket_batch = True
+        elif self.data_set == "SPINDR":
+            self.vocab_size = len(GEOMDataSet.VOCABULARY) + 1
+            self.vocab = GEOMDataSet.VOCABULARY
+            follow_pocket_batch = True
         else:
             raise ValueError(f"Unknown data_set: {self.data_set}")
 
@@ -322,7 +329,7 @@ class DataModule(LightningDataModule):
                 source_set_perturbation=self.source_set_perturbation_std,
                 perturbation_factor=self.source_set_perturbation_fraction,
                 follow_batch=(
-                    ["pocket_pos"] if self.data_set == "CROSSDOCKED" else None
+                    ["pocket_pos"] if follow_pocket_batch else None
                 ),
             )
 
@@ -365,6 +372,15 @@ class DataModule(LightningDataModule):
                 self.training_data = CrossDockedDataSet(self.data_path, split="train")
                 self.validation_data = CrossDockedDataSet(self.data_path, split="val")
                 self.test_data = CrossDockedDataSet(self.data_path, split="test")
+                print(f"Number of training graphs: {len(self.training_data)}")
+                print(f"Number of validation graphs: {len(self.validation_data)}")
+                print(f"Number of test graphs: {len(self.test_data)}")
+                
+            elif str(self.data_set).upper() == "SPINDR":
+                print("Using Spindr dataset.")
+                self.training_data = SpindrDataSet(self.data_path, split="train")
+                self.validation_data = SpindrDataSet(self.data_path, split="val")
+                self.test_data = SpindrDataSet(self.data_path, split="test")
                 print(f"Number of training graphs: {len(self.training_data)}")
                 print(f"Number of validation graphs: {len(self.validation_data)}")
                 print(f"Number of test graphs: {len(self.test_data)}")

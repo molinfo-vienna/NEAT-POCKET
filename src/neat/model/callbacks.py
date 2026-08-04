@@ -7,7 +7,7 @@ import numpy as np
 
 from neat.utils.sbdd_metrics import ClashEvaluator
 from neat.model.molecule_builder import MoleculeBuilder
-from neat.utils import center_pdb
+from neat.utils import center_pdb, cif_2_pdb
 
 
 class GenerationMonitor(Callback):
@@ -88,6 +88,24 @@ class GenerationMonitor(Callback):
                 )
                 for data_point in val_data
             ]
+        elif str(self.dataset).upper() == "SPINDR":
+            val_data = list(trainer.val_dataloaders.dataset)
+            mols_per_pocket = self.num_samples // len(val_data)
+            batch_size = len(val_data) * mols_per_pocket
+            pocket_info = trainer.val_dataloaders.dataset.collate_pocket_info(
+                val_data, samples_per_pocket=mols_per_pocket, device=pl_module.device
+            )
+            generated_mols = pl_module.generate(
+                batch_size=batch_size,
+                integration_method="euler_maruyama",
+                pocket_info=pocket_info,
+            )
+            pocket_paths = [
+                trainer.val_dataloaders.dataset.get_pocket_path_from_data_point(
+                    data_point
+                )
+                for data_point in val_data
+            ]
         else:
             raise ValueError(f"Unknown dataset: {self.dataset}")
 
@@ -114,14 +132,20 @@ class GenerationMonitor(Callback):
             on_step=False,
             on_epoch=True,
         )
-        if str(self.dataset).upper() == "CROSSDOCKED":
+        if str(self.dataset).upper() == "CROSSDOCKED" or str(self.dataset).upper() == "SPINDR":
             clash_scores_mean = []
             clash_scores_sum = []
             for i, pocket_path in enumerate(pocket_paths):
                 try:
                     with NamedTemporaryFile(delete=True, suffix=".pdb") as temp_file:
                         # Convert the string path to a pathlib.Path object
-                        center_pdb(pocket_path, temp_file.name)
+                        if str(self.dataset).upper() == "CROSSDOCKED":
+                            center_pdb(pocket_path, temp_file.name)
+                        elif str(self.dataset).upper() == "SPINDR":
+                            cif_2_pdb(pocket_path, temp_file.name)
+                        else:
+                            raise ValueError(f"Unknown dataset: {self.dataset}")
+                        
                         mols_for_pocket = mols[
                             i * mols_per_pocket : (i + 1) * mols_per_pocket
                         ]

@@ -23,8 +23,8 @@ from .positional_encoding import FourierPositionEncoding
 from .simple_mlp import SimpleMLPAdaLN
 
 
-def _dataset_is_crossdocked(data_set: str | None) -> bool:
-    return str(data_set).upper() == "CROSSDOCKED"
+def _dataset_enables_cross_attention(data_set: str | None) -> bool:
+    return str(data_set).upper() == "CROSSDOCKED" or str(data_set).upper() == "SPINDR"
 
 
 class NEAT(LightningModule):
@@ -70,7 +70,7 @@ class NEAT(LightningModule):
         self.dropout_layer = nn.Dropout(self.hparams.dropout)
 
         # Transformer blocks for the ligand stream
-        self.enable_cross_attention = _dataset_is_crossdocked(self.hparams.data_set)
+        self.enable_cross_attention = _dataset_enables_cross_attention(self.hparams.data_set)
         scale_shift_weights = False if self.hparams.global_cond_proj else True
         self.transformer_blocks = nn.ModuleList(
             [

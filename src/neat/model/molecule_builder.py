@@ -38,7 +38,7 @@ class MoleculeBuilder:
                 4: "O",
                 5: "F",
             }
-        elif str(vocab).upper() == "GEOM" or str(vocab).upper() == "CROSSDOCKED":
+        elif str(vocab).upper() == "GEOM" or str(vocab).upper() == "CROSSDOCKED" or str(vocab).upper() == "SPINDR":
             self.atom_type_to_element = {
                 1: "H",
                 2: "B",
