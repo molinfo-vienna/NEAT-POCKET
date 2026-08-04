@@ -49,6 +49,10 @@ def bar_relative_by_method(ax, values, methods=None, colors=None):
         ax.bar(method, value, color=color, label=method)
     ax.tick_params(axis="x", labelrotation=45)
     ax.axhline(0, color="black", linewidth=1, linestyle="-")
+    # Keep y=0 centered so the baseline is aligned across subplots.
+    max_abs = max((abs(v) for v in values), default=0.0) or 1.0
+    limit = max_abs * 1.05
+    ax.set_ylim(-limit, limit)
 
 
 def bar_absolute_by_method(ax, values, methods=None, colors=None):
@@ -437,7 +441,7 @@ def main() -> None:
     drugflow_path = ROOT / "output" / "drugflow" / "conditional"
     mols_drugflow = get_mols(drugflow_path)
 
-    neat_path = ROOT / "output" / "version_121_cfg05_greedy" / "conditional"
+    neat_path = ROOT / "output" / "version_126_cfg05_greedy" / "conditional"
     mols_neat = get_mols(neat_path)
 
     logging.info(f"CrossDocked: {len(mols_crossdocked)} molecules")
