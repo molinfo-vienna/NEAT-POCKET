@@ -821,7 +821,7 @@ def compute_edm_metrics_from_tensors(x, pos, batch, dataset):
     # atom stability depends on the group of molecules - cannot be computed for individual molecules and mean-aggregated
     if dataset == "QM9":
         dataset_info = qm9_with_h
-    elif dataset == "GEOM" or dataset == "CROSSDOCKED":
+    elif dataset == "GEOM" or dataset == "CROSSDOCKED" or dataset == "SPINDR":
         dataset_info = geom_with_h
     else:
         raise ValueError("Dataset not recognized: " + dataset)

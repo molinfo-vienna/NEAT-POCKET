@@ -31,7 +31,7 @@ from neat.dataset.dataset_crossdocked import (
     _ligand_features,
 )
 from neat.model import NEAT
-from neat.utils import center_pdb
+from neat.utils import center_pdb, cif_2_pdb
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -199,13 +199,18 @@ def generate(args: argparse.Namespace) -> None:
             # Center pocket at the origin and write pocket.pdb for later evaluation.
             in_pdb_file = test_data.get_pocket_path_from_data_point(test_data[data_idx])
             out_pdb_file = os.path.join(out_dir, "pocket.pdb")
-            pocket_center = center_pdb(in_pdb_file, out_pdb_file, return_center=True)
+            if in_pdb_file.endswith(".cif"):
+                pocket_center = cif_2_pdb(in_pdb_file, out_pdb_file, return_center=True)
+            elif in_pdb_file.endswith(".pdb"):
+                pocket_center = center_pdb(in_pdb_file, out_pdb_file, return_center=True)
+            else:
+                raise ValueError(f"Unsupported pocket file format: {in_pdb_file}")
 
             # Load the reference ligand, keep the largest connected component,
             # add hydrogens, and shift into the same pocket-centered frame.
-            in_sdf_file = in_pdb_file.replace("_pocket10.pdb", ".sdf")
+            in_sdf_file = test_data.get_ligand_path_from_data_point(test_data[data_idx])
             out_sdf_file = os.path.join(out_dir, "ligand.sdf")
-            supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False, sanitize=True)
+            supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False, sanitize=False)
             rdmol = supplier[0]
             rdmol = _largest_fragment(rdmol)
             # TODO: decide which hydrogenation method to use
