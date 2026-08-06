@@ -24,11 +24,13 @@ class GenerationMonitor(Callback):
         num_samples: int = 1000,
         every_n_epochs: int = 50,
         dataset: str = "QM9",
+        bond_predictor_path: str = None,
     ) -> None:
         super().__init__()
         self.num_samples = num_samples
         self.every_n_epochs = every_n_epochs
         self.dataset = dataset
+        self.bond_predictor_path = bond_predictor_path
 
     def on_train_start(
         self,
@@ -55,7 +57,7 @@ class GenerationMonitor(Callback):
         trainer: Trainer,
         pl_module: LightningModule,
     ) -> None:
-        if trainer.current_epoch % self.every_n_epochs != 0 or trainer.current_epoch == 0:
+        if trainer.current_epoch % self.every_n_epochs != 0:
             return
 
         generated_mols = None
@@ -110,9 +112,14 @@ class GenerationMonitor(Callback):
             raise ValueError(f"Unknown dataset: {self.dataset}")
 
         builder = MoleculeBuilder(vocab=str(pl_module.hparams.data_set).upper())
-        mols = builder.generate_rdkit_molecules_via_xyz2mol(
-            generated_mols.x, generated_mols.pos, generated_mols.batch
-        )
+        if self.bond_predictor_path is not None:
+            mols = builder.generate_rdkit_molecules_via_bond_predictor(
+                generated_mols.x, generated_mols.pos, generated_mols.batch, self.bond_predictor_path
+            )
+        else:
+            mols = builder.generate_rdkit_molecules_via_xyz2mol(
+                generated_mols.x, generated_mols.pos, generated_mols.batch
+            )
         n_valid = self.compute_validity(mols)
         n_unique = self.compute_uniqueness(mols)
         frac_valid = n_valid / self.num_samples

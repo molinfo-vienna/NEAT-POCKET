@@ -166,7 +166,8 @@ class MoleculeBuilder:
         x: torch.Tensor,
         pos: torch.Tensor,
         batch: torch.Tensor,
-        bond_predictor_path: str,
+        bond_predictor_path: str = None,
+        bond_predictor: BondPredictor = None,
         progress_bar: bool = False,
         break_after_k_mols: Optional[int] = None,
     ) -> list[Mol]:
@@ -184,31 +185,47 @@ class MoleculeBuilder:
         Returns:
             list[Mol]: List of RDKit molecules (None for failed conversions).
         """
-        ckpt_path = bond_predictor_path
-        if os.path.isdir(ckpt_path):
-            # Look for *.ckpt
-            pattern = os.path.join(ckpt_path, f"*.ckpt")
-            matches = glob.glob(pattern)
-            if not matches:
-                raise FileNotFoundError(
-                    f"No bond predictor checkpoint found in {ckpt_path}."
-                )
-            ckpt_path = matches[0]
-        if not os.path.exists(ckpt_path):
-            raise FileNotFoundError(f"Bond predictor checkpoint not found: {ckpt_path}")
+        if bond_predictor is None and bond_predictor_path is not None:
+            ckpt_path = bond_predictor_path
+            if os.path.isdir(ckpt_path):
+                # Look for *.ckpt
+                pattern = os.path.join(ckpt_path, f"*.ckpt")
+                matches = glob.glob(pattern)
+                if not matches:
+                    raise FileNotFoundError(
+                        f"No bond predictor checkpoint found in {ckpt_path}."
+                    )
+                ckpt_path = matches[0]
+            if not os.path.exists(ckpt_path):
+                raise FileNotFoundError(f"Bond predictor checkpoint not found: {ckpt_path}")
+            
+            bond_predictor = BondPredictor.load_from_checkpoint(ckpt_path)
 
-        bond_predictor = BondPredictor.load_from_checkpoint(ckpt_path)
+        elif bond_predictor is None:
+            raise ValueError(
+                "Either bond_predictor or bond_predictor_path must be provided."
+            )
+
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         x, pos, batch = x.to(device), pos.to(device), batch.to(device)
         bond_predictor = bond_predictor.to(device).eval()
 
         with torch.no_grad():
-            # predict_bonds returns (bond_types, pair_indices) for radius-graph edges
+            # predict_bonds returns (bond_types, pair_indices, charges) for radius-graph edges
             bond_types, pair_indices = bond_predictor.predict_bonds(
                 x,
                 pos,
                 batch,
                 device,
+                radius=getattr(bond_predictor.hparams, "radius", 2.5),
+            )
+            charges = bond_predictor.predict_charges(
+                x,
+                pos,
+                batch,
+                bond_types=bond_types,
+                pair_indices=pair_indices,
+                device=device,
                 radius=getattr(bond_predictor.hparams, "radius", 2.5),
             )
 
@@ -256,10 +273,13 @@ class MoleculeBuilder:
             i_local = local_idx[bonded_pairs[:, 0]]
             j_local = local_idx[bonded_pairs[:, 1]]
             mol_atomic_nums = atomic_nums[mol_mask]
+            mol_charges = charges[mol_mask]
 
             rwmol = Chem.RWMol()
             for i in range(n):
-                rwmol.AddAtom(Chem.Atom(mol_atomic_nums[i].item()))
+                atom = Chem.Atom(mol_atomic_nums[i].item())
+                atom.SetFormalCharge(int(mol_charges[i].item()))
+                rwmol.AddAtom(atom)
             for idx in range(bonded_pairs.shape[0]):
                 bt = bonded_types[idx].item()
                 rdkit_bt = RDKIT_BOND_TYPES[bt]

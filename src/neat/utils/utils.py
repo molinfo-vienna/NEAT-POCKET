@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import numpy as np
 from Bio.PDB import PDBParser, PDBIO
 import biotite.structure.io.pdb as pdb
 import biotite.structure.io.pdbx as pdbx
+from rdkit.Chem import SDWriter
 
 
 def center_pdb(input_path, output_path, return_center=False):
@@ -63,3 +66,17 @@ def cif_2_pdb(input_path, output_path, return_center=False):
     
     if return_center:
         return com
+
+def save_molecules_to_sdf(mols: list, file_path: Path) -> None:
+    """Write non-None RDKit molecules to an SDF file."""
+    writer = SDWriter(str(file_path))
+    try:
+        for mol in mols:
+            if mol is None:
+                continue
+            try:
+                writer.write(mol)
+            except Exception as e:
+                print(f"Error while writing molecules to SDF: {e}")
+    finally:
+        writer.close()

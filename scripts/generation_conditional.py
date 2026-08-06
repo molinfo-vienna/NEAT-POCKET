@@ -31,7 +31,10 @@ from neat.dataset.dataset_crossdocked import (
     _ligand_features,
 )
 from neat.model import NEAT
-from neat.utils import center_pdb, cif_2_pdb
+from neat.model.bond_predictor import BondPredictor
+from neat.model.bond_predictor import BondPredictor
+from neat.model.molecule_builder import MoleculeBuilder
+from neat.utils import center_pdb, cif_2_pdb, save_molecules_to_sdf
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -155,6 +158,11 @@ def generate(args: argparse.Namespace) -> None:
 
     MODEL = NEAT
     model = MODEL.load_from_checkpoint(checkpoints_path, map_location=DEVICE)
+    
+    if params["bond_predictor_path"] is not None:
+        bond_predictor = BondPredictor.load_from_checkpoint(params["bond_predictor_path"], map_location=DEVICE)
+    else:
+        bond_predictor = None
 
     # --- Data ---
     datamodule = DataModule(
@@ -285,6 +293,24 @@ def generate(args: argparse.Namespace) -> None:
             torch.save(
                 generated_mols_subset, os.path.join(out_dir, "generated_mols.pt")
             )
+            # Generate mols with bond and charge predictors and save as SDF for later evaluation.
+            if bond_predictor is not None:
+                builder = MoleculeBuilder(vocab=params["data_set"])
+                rdkit_mols = builder.generate_rdkit_molecules_via_bond_predictor(
+                    generated_mols_subset.x,
+                    generated_mols_subset.pos,
+                    generated_mols_subset.batch,
+                    bond_predictor=bond_predictor,
+                    progress_bar=True,
+                )
+            else:
+                rdkit_mols = builder.generate_rdkit_molecules_via_xyz2mol(
+                    generated_mols_subset.x,
+                    generated_mols_subset.pos,
+                    generated_mols_subset.batch,
+                    progress_bar=True
+                )
+            save_molecules_to_sdf(rdkit_mols, os.path.join(out_dir, "generated_mols.sdf"))
 
         seed_end_time = datetime.now()
         print(

@@ -4,7 +4,7 @@ from rdkit.Chem import Mol
 from posecheck.utils.chem import remove_radicals
 
 
-def compute_posecheck_metrics_from_mols(mols: list[Mol], pocket_path: str) -> dict[str, float]:
+def compute_posecheck_metrics_from_mols(mols: list[Mol], pocket_path: str, compute_strain: bool = False) -> dict[str, float]:
     # Initialize the PoseCheck object
     pc = PoseCheck()
 
@@ -20,7 +20,8 @@ def compute_posecheck_metrics_from_mols(mols: list[Mol], pocket_path: str) -> di
     pose_check_results = {}
 
     # Calculate strain energies
-    strain = pc.calculate_strain_energy()
+    if compute_strain:
+        strain = pc.calculate_strain_energy()
 
     # Calculate interactions
     interactions = pc.calculate_interactions()
@@ -30,8 +31,9 @@ def compute_posecheck_metrics_from_mols(mols: list[Mol], pocket_path: str) -> di
     clashes = [c for c in clashes if c is not None]
     pose_check_results["clashes"] = np.array(clashes).mean()
 
-    strain = [s for s in strain if s is not None]
-    pose_check_results["strain"] = np.array(strain).mean()
+    if compute_strain:
+        strain = [s for s in strain if s is not None]
+        pose_check_results["strain"] = np.array(strain).mean()
 
     interaction_types = [
         "HBAcceptor",

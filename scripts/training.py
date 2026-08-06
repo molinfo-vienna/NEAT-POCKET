@@ -87,6 +87,7 @@ def train(args: argparse.Namespace) -> None:
     accumulate_grad_batches = params.pop("accumulate_grad_batches")
     params["vocab_size"] = datamodule.vocab_size
     model = MODEL(**params)
+    bond_predictor_path = params.get("bond_predictor_path", None)
 
     # If path to pretrained weights is provided, load them
     pretrained_model_path = params.get("pretrained_model_path", None)
@@ -136,6 +137,7 @@ def train(args: argparse.Namespace) -> None:
             num_samples=400,
             every_n_epochs=generate_every_n_epochs,
             dataset=params["data_set"],
+            bond_predictor_path=bond_predictor_path,
         ),
         checkpoint_val_loss,
         checkpoint_validity,

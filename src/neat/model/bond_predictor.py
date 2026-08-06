@@ -60,6 +60,20 @@ class BondPredictor(LightningModule):
             nn.ReLU(),
             nn.Linear(n_embd, NUM_BOND_TYPES),
         )
+        if self.hparams.predict_charge:
+            nn_module = nn.Sequential(
+                nn.Linear(n_embd, n_embd * 2),
+                nn.ReLU(),
+                nn.Dropout(self.hparams.dropout),
+                nn.Linear(n_embd * 2, n_embd),
+            )
+            self.charge_conv_layer = GINEConv(nn=nn_module, eps=0.0, train_eps=True, edge_dim=5)
+            self.charge_mlp = nn.Sequential(
+                nn.Linear(n_embd, n_embd),
+                nn.ReLU(),
+                nn.Dropout(self.hparams.dropout),
+                nn.Linear(n_embd, 3),
+            )
 
     def _get_edge_attr(self, data: Data) -> Tensor:
         """Get edge attributes (distances). Compute from pos if not in data."""
@@ -107,6 +121,21 @@ class BondPredictor(LightningModule):
         bond_logits = self.bond_mlp(edge_features)
 
         return bond_logits
+        
+    def forward_charges(self, data: Data) -> Tensor:
+        """Forward pass for charge prediction."""
+
+        atom_embedding = self.atom_type_embedding(data.x)
+        atom_embedding = self.dropout(atom_embedding)
+        edge_mask = [data.edge_labels != 0]
+        edge_index = data.edge_index[:, edge_mask[0]]
+        edge_labels = F.one_hot(data.edge_labels[edge_mask[0]], num_classes=5).float()
+        charge_embedding = self.charge_conv_layer(atom_embedding, edge_index, edge_labels) + atom_embedding
+        charge_embedding = F.relu(charge_embedding)
+        charge_embedding = self.layer_norm(charge_embedding)
+        charge_logits = self.charge_mlp(charge_embedding)
+        
+        return charge_logits  
 
     @torch.no_grad()
     def predict_bonds(
@@ -142,22 +171,70 @@ class BondPredictor(LightningModule):
         pair_indices = data.edge_index.t()
 
         return bond_types, pair_indices
+    
+    @torch.no_grad()
+    def predict_charges(
+        self,
+        x: Tensor,
+        pos: Tensor,
+        batch: Tensor | None = None,
+        bond_types: Tensor | None = None,
+        pair_indices: Tensor | None = None,
+        device: torch.device | None = None,
+        radius: float | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Predict bond types for inference. Builds radius graph from pos/batch.
+
+        Returns:
+            bond_types: [num_edges] predicted class (0-4) per edge.
+            pair_indices: [num_edges, 2] (src, dst) for each edge.
+        """
+        if device is None:
+            device = x.device
+
+        if batch is None:
+            batch = torch.zeros(x.shape[0], dtype=torch.long, device=device)
+            
+        data = Data(x=x, pos=pos, edge_labels=bond_types, edge_index=pair_indices.T, batch=batch)
+        data = data.to(device)
+
+        logits = self.forward_charges(data)
+        charges = logits.argmax(dim=1) - 1
+
+        return charges
 
     def training_step(self, batch: Data, batch_idx: int) -> Tensor:
         bond_logits = self(batch)
-        labels = batch.edge_labels
-        loss = F.cross_entropy(bond_logits, labels.long(), reduction="mean")
-        self.log("train/loss", loss, prog_bar=True, on_step=True)
+        loss = F.cross_entropy(bond_logits, batch.edge_labels.long(), reduction="mean")
+        self.log("train/bond_loss", loss, prog_bar=True, on_step=True)
+        
+        if self.hparams.predict_charge:
+            charge_logits = self.forward_charges(batch)
+            charge_loss = F.cross_entropy(charge_logits, batch.charge.long() + 1, reduction="mean")
+            self.log("train/charge_loss", charge_loss, prog_bar=True, on_step=True)   
+            loss = loss + charge_loss
+            self.log("train/loss", loss, prog_bar=True, on_step=True)
+        
         return loss
 
     def validation_step(self, batch: Data, batch_idx: int) -> Tensor:
         bond_logits = self(batch)
-        labels = batch.edge_labels
-        loss = F.cross_entropy(bond_logits, labels.long(), reduction="mean")
-        pred = bond_logits.argmax(dim=1)
-        acc = (pred == labels).float().mean()
-        self.log("val/loss", loss, prog_bar=True)
-        self.log("val/acc", acc, prog_bar=True)
+        loss = F.cross_entropy(bond_logits, batch.edge_labels.long(), reduction="mean")
+        self.log("val/bond_loss", loss, prog_bar=True, on_step=True)
+        pred_bonds = bond_logits.argmax(dim=1)
+        acc_bonds = (pred_bonds == batch.edge_labels).float().mean()
+        self.log("val/acc_bonds", acc_bonds, prog_bar=True)
+        
+        if self.hparams.predict_charge:
+            charge_logits = self.forward_charges(batch)
+            charge_loss = F.cross_entropy(charge_logits, batch.charge.long() + 1, reduction="mean")
+            self.log("val/charge_loss", charge_loss, prog_bar=True, on_step=True)   
+            loss = loss + charge_loss
+            self.log("val/loss", loss, prog_bar=True, on_step=True)
+            pred_charges = charge_logits.argmax(dim=1) - 1
+            acc_charges = (pred_charges == batch.charge).float().mean()
+            self.log("val/acc_charges", acc_charges, prog_bar=True)
+        
         return loss
 
     def configure_optimizers(self):

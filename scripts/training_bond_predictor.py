@@ -82,6 +82,7 @@ def train(args: argparse.Namespace) -> None:
         "lr_min_ratio": params.get("lr_min_ratio", 0.1),
         "radius": params.get("radius", 2.5),
         "noise_ratio": params.get("noise_ratio", 0.05),
+        "predict_charge": params.get("predict_charge", False),
     }
 
     model = BondPredictor(**model_params)

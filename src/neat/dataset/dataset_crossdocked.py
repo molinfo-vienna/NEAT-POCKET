@@ -151,7 +151,7 @@ def _add_hydrogens_with_openbabel(mol: Chem.Mol) -> Chem.Mol:
         return None
 
 
-def _ligand_features(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
+def _ligand_features(mol: Chem.Mol, get_charge: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     logger = logging.getLogger(__name__)
     try:
         n = mol.GetNumAtoms()
@@ -166,11 +166,20 @@ def _ligand_features(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
             pos[i, 0] = p.x
             pos[i, 1] = p.y
             pos[i, 2] = p.z
-        return x, pos
+        if get_charge:
+            charge = torch.tensor(
+                [a.GetFormalCharge() for a in mol.GetAtoms()],
+                dtype=torch.float32,
+            )
+            return x, pos, charge
+        else:
+            return x, pos
     except Exception as e:
         logger.warning(f"Ligand {mol}: cannot get features: {e}")
-        return None, None
-
+        if get_charge:
+            return None, None, None
+        else:
+            return None, None
 
 def _ligand_edges(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
     logger = logging.getLogger(__name__)

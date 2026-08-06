@@ -1,7 +1,7 @@
 from .edm_metrics import compute_edm_metrics_from_tensors
 from .posecheck_metrics import compute_posecheck_metrics_from_mols
 from .sbdd_metrics import GninaEvaluator
-from .utils import center_pdb, cif_2_pdb
+from .utils import center_pdb, cif_2_pdb, save_molecules_to_sdf
 
 __all__ = [
     "compute_edm_metrics_from_tensors",
@@ -9,4 +9,5 @@ __all__ = [
     "GninaEvaluator",
     "center_pdb",
     "cif_2_pdb",
+    "save_molecules_to_sdf",
 ]

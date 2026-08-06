@@ -54,12 +54,12 @@ from rdkit.Chem import (
     rdDepictor,
     SanitizeMol,
     SDMolSupplier,
-    SDWriter,
 )
 from rdkit.Contrib.SA_Score import sascorer
 
 from neat.dataset import DataModule
 from neat.model.molecule_builder import MoleculeBuilder
+from neat.utils import save_molecules_to_sdf
 from neat.utils.edm_metrics import compute_edm_metrics_from_tensors
 from neat.utils.posecheck_metrics import compute_posecheck_metrics_from_mols
 from neat.utils.sbdd_metrics import ClashEvaluator, GninaEvaluator
@@ -288,29 +288,9 @@ def pct(value: float) -> str:
     return f"{value * 100:.2f}%"
 
 
-def molecule_pipeline_label(params: dict, *, use_bond_predictor: bool) -> str:
-    """Human-readable label for how RDKit mols were built (xyz2mol vs predictor)."""
-    if use_bond_predictor:
-        return f"bond predictor ({params['bond_predictor_path']})"
-    return "xyz2mol"
-
-
 # ---------------------------------------------------------------------------
 # I/O
 # ---------------------------------------------------------------------------
-
-
-def save_molecules_to_sdf(mols: list, file_path: Path) -> None:
-    """Write non-None RDKit molecules to an SDF file."""
-    writer = SDWriter(str(file_path))
-    try:
-        for mol in mols:
-            if mol is None:
-                print("Warning: Encountered a 'None' molecule object. Skipping.")
-                continue
-            writer.write(mol)
-    finally:
-        writer.close()
 
 
 def _write_edm_metrics(
@@ -364,13 +344,11 @@ def write_subdir_results(
     params: dict,
     run: SubdirRunResult,
     compute_novelty: bool,
-    molecule_pipeline: str,
 ) -> None:
     """Write evaluation_results.txt for one seed/prefix/pocket subdirectory."""
     with (subdir / "evaluation_results.txt").open("w") as f:
         f.write(f"Data set: {params['data_set']}\n")
         f.write(f"RDKit version: {rdkit.__version__}\n")
-        f.write(f"Molecule construction: {molecule_pipeline}\n")
 
         if run.edm is not None:
             _write_edm_metrics(f, "EDM metrics", run.edm)
@@ -487,13 +465,11 @@ def write_summary(
     compute_physchem: bool,
     compute_drugflow_clashes: bool,
     compute_vina: bool,
-    molecule_pipeline: str,
 ) -> None:
     """Write evaluation_summary.txt aggregating all subdirectory runs."""
     with (data_path / "evaluation_summary.txt").open("w") as f:
         f.write(f"Data set: {params['data_set']}\n")
         f.write(f"RDKit version: {rdkit.__version__}\n")
-        f.write(f"Molecule construction: {molecule_pipeline}\n")
 
         if compute_edm:
             if aggregate.edm_atom_stability:
@@ -752,12 +728,11 @@ def evaluate_subdirectory(
     compute_novelty: bool,
     compute_posebusters: bool,
     compute_posecheck: bool,
+    compute_strain: bool,
     compute_physchem: bool,
     compute_vina: bool,
     reference_smiles: list[str] | None,
-    molecule_pipeline: str,
-    use_bond_predictor: bool,
-    use_sdf: bool,
+    add_hydrogens: bool,
 ) -> SubdirRunResult | None:
     """Evaluate one seed/prefix/pocket directory and write local artifacts.
 
@@ -769,9 +744,7 @@ def evaluate_subdirectory(
         params: Evaluation config dict (dataset name, bond predictor path, …).
         compute_*: Flags selecting which metric families to run.
         reference_smiles: Training SMILES for novelty, or None.
-        molecule_pipeline: Label recorded in result files.
-        use_bond_predictor: Build mols via bond predictor instead of xyz2mol.
-        use_sdf: Read generated_mols.sdf instead of tensors (disables EDM).
+        add_hydrogens: Whether to add hydrogens to the generated molecules.
 
     Returns:
         SubdirRunResult on success, or None if generated molecules are missing.
@@ -780,52 +753,38 @@ def evaluate_subdirectory(
 
     # Pockets skipped during FBDD generation may leave an empty directory
     # (no generated_mols.*). Skip those rather than crashing.
-    generated_file = subdir / ("generated_mols.sdf" if use_sdf else "generated_mols.pt")
+    generated_file = subdir / "generated_mols.sdf" 
+    
     if not generated_file.exists():
         print(f"Skipping {subdir.name}: missing {generated_file.name}")
         return None
 
-    if use_sdf:
-        supplier = SDMolSupplier(str(subdir / "generated_mols.sdf"), removeHs=False, sanitize=False)
-        mols = []
-        for mol in supplier:
-            try:
-                Chem.SanitizeMol(mol)
-                mol = Chem.AddHs(mol, addCoords=True)
-                mols.append(mol)
-            except Exception as e:
-                print(f"Warning: Failed to sanitize a molecule: {e}")
-                continue
-        if len(mols) < 100:
-            mols += [None] * (100 - len(mols))  # Pad with None if fewer than 100 molecules
-        
-        save_molecules_to_sdf(mols, subdir / "generated_mols_with_hs.sdf")
-    else:
-        builder = MoleculeBuilder(vocab=params["data_set"])
+    supplier = SDMolSupplier(str(subdir / "generated_mols.sdf"), removeHs=False, sanitize=False)
+    mols = []
+    for mol in supplier:
         try:
-            x, pos, batch = builder.load_tensor_from_file(subdir)
-        except FileNotFoundError as e:
-            print(f"Skipping {subdir.name}: {e}")
-            return None
+            Chem.SanitizeMol(mol)
+            if add_hydrogens:
+                mol = Chem.AddHs(mol, addCoords=True)
+            mols.append(mol)
+        except Exception as e:
+            print(f"Warning: Failed to sanitize a molecule: {e}")
+            continue
+    if len(mols) < 100:
+        mols += [None] * (100 - len(mols))  # Pad with None if fewer than 100 molecules
+    
+    if add_hydrogens:
+        save_molecules_to_sdf(mols, subdir / "generated_mols_with_hs.sdf")
 
-        if use_bond_predictor:
-            mols = builder.generate_rdkit_molecules_via_bond_predictor(
-                x,
-                pos,
-                batch,
-                bond_predictor_path=params["bond_predictor_path"],
-                progress_bar=True,
-            )
-
-        else:
-            mols = builder.generate_rdkit_molecules_via_xyz2mol(
-                x, pos, batch, progress_bar=True
-            )
-
-        save_molecules_to_sdf(mols, subdir / "generated_mols.sdf")
-
-
-    if compute_edm:
+    tensor_file_available = True
+    try:
+        builder = MoleculeBuilder(vocab=params["data_set"])
+        x, pos, batch = builder.load_tensor_from_file(subdir)
+    except FileNotFoundError as e:
+        print(f"Skipping {subdir.name}: {e}")
+        tensor_file_available = False
+        
+    if compute_edm and tensor_file_available:
         atom_stability, mol_stability, edm_valid, edm_unique, _ = (
             compute_edm_metrics_from_tensors(x, pos, batch, params["data_set"].upper())
         )
@@ -835,7 +794,7 @@ def evaluate_subdirectory(
             valid=edm_valid,
             valid_x_unique=edm_valid * edm_unique,
         )
-
+    
     result.rdkit, validity_flag_list = _compute_rdkit_metrics(
         mols, reference_smiles
     )
@@ -864,7 +823,7 @@ def evaluate_subdirectory(
         result.rdkit_x_posebusters = result.rdkit.valid * result.posebusters["all"]
 
     if compute_posecheck:
-        result.posecheck = compute_posecheck_metrics_from_mols(mols, str(pocket_path))
+        result.posecheck = compute_posecheck_metrics_from_mols(mols, str(pocket_path), compute_strain)
 
     if compute_drugflow_clashes:
         clash_evaluator = ClashEvaluator()
@@ -906,10 +865,9 @@ def evaluate_subdirectory(
         params,
         result,
         compute_novelty,
-        molecule_pipeline,
     )
     save_2d_molecules_visualizations_to_png(subdir, mols)
-    if not use_sdf:
+    if tensor_file_available:
         save_3d_molecules_visualizations_to_html(subdir, builder, x, pos, batch)
 
     return result
@@ -928,12 +886,11 @@ def eval_worker(
     compute_novelty,
     compute_posebusters,
     compute_posecheck,
+    compute_strain,
     compute_physchem,
     compute_vina,
     reference_smiles,
-    molecule_pipeline,
-    use_bond_predictor,
-    use_sdf,
+    add_hydrogens,
     log_filename="evaluation.log",
 ):
     """Process-pool worker: evaluate one subdirectory with stdout/stderr redirected.
@@ -964,12 +921,11 @@ def eval_worker(
                 compute_novelty=compute_novelty,
                 compute_posebusters=compute_posebusters,
                 compute_posecheck=compute_posecheck,
+                compute_strain=compute_strain,
                 compute_physchem=compute_physchem,
                 compute_vina=compute_vina,
-                molecule_pipeline=molecule_pipeline,
                 reference_smiles=reference_smiles,
-                use_bond_predictor=use_bond_predictor,
-                use_sdf=use_sdf,
+                add_hydrogens=add_hydrogens
             )
         finally:
             # Always restore the low-level streams back to the terminal
@@ -992,17 +948,10 @@ def evaluate(args: argparse.Namespace) -> None:
     compute_novelty = bool(params.get("compute_novelty", False))
     compute_posebusters = bool(params.get("compute_posebusters", False))
     compute_posecheck = bool(params.get("compute_posecheck", False))
+    compute_strain = bool(params.get("compute_strain", False))
     compute_physchem = bool(params.get("compute_physchem", False))
     compute_vina = bool(params.get("compute_vina", False))
-    use_bond_predictor = params.get("bond_predictor_path") is not None
-    use_sdf = bool(params.get("use_sdf", False))
-    molecule_pipeline = molecule_pipeline_label(
-        params, use_bond_predictor=use_bond_predictor
-    )
-
-    if use_sdf:
-        compute_edm = False
-        print("EDM metrics are not supported for SDF files. Setting compute_edm to False.")
+    add_hydrogens = bool(params.get("add_hydrogens", False))
 
     if compute_novelty:
         reference_smiles = load_reference_smiles(params)
@@ -1025,12 +974,11 @@ def evaluate(args: argparse.Namespace) -> None:
             compute_novelty=compute_novelty,
             compute_posebusters=compute_posebusters,
             compute_posecheck=compute_posecheck,
+            compute_strain=compute_strain,
             compute_physchem=compute_physchem,
             compute_vina=compute_vina,
-            molecule_pipeline=molecule_pipeline,
             reference_smiles=reference_smiles,
-            use_bond_predictor=use_bond_predictor,
-            use_sdf=use_sdf,
+            add_hydrogens=add_hydrogens,
         )
         runs_dict = {}
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
@@ -1070,12 +1018,11 @@ def evaluate(args: argparse.Namespace) -> None:
                     compute_novelty=compute_novelty,
                     compute_posebusters=compute_posebusters,
                     compute_posecheck=compute_posecheck,
+                    compute_strain=compute_strain,
                     compute_physchem=compute_physchem,
                     compute_vina=compute_vina,
-                    molecule_pipeline=molecule_pipeline,
                     reference_smiles=reference_smiles,
-                    use_bond_predictor=use_bond_predictor,
-                    use_sdf=use_sdf,
+                    add_hydrogens=params.get("add_hydrogens", False)
                 )
             except Exception as e:
                 print(f"Skipping {subdir.name}: {e}")
@@ -1097,7 +1044,6 @@ def evaluate(args: argparse.Namespace) -> None:
         compute_posecheck=compute_posecheck,
         compute_physchem=compute_physchem,
         compute_vina=compute_vina,
-        molecule_pipeline=molecule_pipeline,
     )
 
 

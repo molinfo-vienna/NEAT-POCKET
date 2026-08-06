@@ -70,7 +70,7 @@ def _process_pair(
             return None
 
     ### Process ligand into graph ###
-    lig_x, lig_pos = _ligand_features(rdmol)
+    lig_x, lig_pos, lig_charge = _ligand_features(rdmol, get_charge=True)
     if lig_x is None or lig_pos is None:
         logger.warning(f"Ligand {ligand_path}: cannot get features.")
         return None
@@ -118,6 +118,7 @@ def _process_pair(
     return Data(
         x=lig_x,
         pos=lig_pos,
+        charge=lig_charge,
         edge_index=edge_index,
         edge_labels=edge_labels,
         eccentricity=eccentricity,
