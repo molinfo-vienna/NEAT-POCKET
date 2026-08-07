@@ -130,6 +130,13 @@ def train(args: argparse.Namespace) -> None:
         save_top_k=1,
         every_n_epochs=generate_every_n_epochs,
     )
+
+    checkpoint_perodic = ModelCheckpoint(
+        filename="periodic-{epoch:02d}",
+        save_top_k=1,
+        every_n_epochs=10,
+    )
+
     unfreeze_callback = UnfreezeModelCallback(unfreeze_epoch=params.get("unfreeze_epoch", 0))
 
     callbacks = [
@@ -141,6 +148,7 @@ def train(args: argparse.Namespace) -> None:
         ),
         checkpoint_val_loss,
         checkpoint_validity,
+        checkpoint_perodic,
         LearningRateMonitor(logging_interval="epoch"),
         unfreeze_callback,
     ]
