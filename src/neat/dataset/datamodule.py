@@ -91,7 +91,9 @@ def bond_prediction_batch_transform(
     # (0) Optionally add isotropic coordinate noise (for training robustness)
     if noise_ratio > 0:
         noise_std = noise_ratio * radius
-        batch.pos = batch.pos + noise_std * torch.randn_like(batch.pos)
+        added_noise = noise_std * torch.randn_like(batch.pos)
+        added_noise /= torch.clamp(torch.norm(added_noise, dim=-1, keepdim=True), min=1.0)
+        batch.pos = batch.pos + added_noise
 
     # (1) Add edges to the graph by connecting atoms within a certain radius
     # and add "0" bond type to the edge attributes for the new edges

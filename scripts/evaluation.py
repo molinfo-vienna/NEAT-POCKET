@@ -759,7 +759,7 @@ def evaluate_subdirectory(
         print(f"Skipping {subdir.name}: missing {generated_file.name}")
         return None
 
-    supplier = SDMolSupplier(str(subdir / "generated_mols.sdf"), removeHs=False, sanitize=False)
+    supplier = SDMolSupplier(str(generated_file), removeHs=False, sanitize=False)
     mols = []
     for mol in supplier:
         try:

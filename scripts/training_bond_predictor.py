@@ -65,27 +65,13 @@ def train(args: argparse.Namespace) -> None:
         bond_predictor_noise_ratio=params.get("noise_ratio", 0.0),
     )
     datamodule.setup()
-    vocab_size = datamodule.vocab_size
+
     print(
         f"Train: {len(datamodule.training_data)}, Val: {len(datamodule.validation_data)}"
     )
-
-    model_params = {
-        "vocab_size": vocab_size,
-        "n_embd": params.get("n_embd", 256),
-        "n_conv_layers": params.get("n_conv_layers", 4),
-        "dropout": params.get("dropout", 0.1),
-        "learning_rate": params.get("learning_rate", 1e-3),
-        "weight_decay": params.get("weight_decay", 1e-6),
-        "max_epochs": params.get("max_epochs", 100),
-        "lr_warmup_epochs": params.get("lr_warmup_epochs", 5),
-        "lr_min_ratio": params.get("lr_min_ratio", 0.1),
-        "radius": params.get("radius", 2.5),
-        "noise_ratio": params.get("noise_ratio", 0.05),
-        "predict_charge": params.get("predict_charge", False),
-    }
-
-    model = BondPredictor(**model_params)
+    params["vocab_size"] = datamodule.vocab_size
+    
+    model = BondPredictor(**params)
 
     log_dir = os.path.join(ROOT, "logs", "BondPredictor")
     tb_logger = TensorBoardLogger(log_dir, name=dataset_name, default_hp_metric=False)
@@ -113,7 +99,7 @@ def train(args: argparse.Namespace) -> None:
 
     trainer = Trainer(
         devices=[0] if torch.cuda.is_available() else "auto",
-        max_epochs=model_params["max_epochs"],
+        max_epochs=params["max_epochs"],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         logger=tb_logger,
         log_every_n_steps=10,

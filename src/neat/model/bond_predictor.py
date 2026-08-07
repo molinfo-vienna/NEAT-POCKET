@@ -21,6 +21,7 @@ class BondPredictor(LightningModule):
 
     def __init__(self, **params) -> None:
         super().__init__()
+        self.hparams.setdefault("data_set", "SPINDR")
         self.save_hyperparameters()
 
         n_embd = self.hparams.n_embd
@@ -61,6 +62,16 @@ class BondPredictor(LightningModule):
             nn.Linear(n_embd, NUM_BOND_TYPES),
         )
         if self.hparams.predict_charge:
+            if self.hparams.data_set == "SPINDR":
+                self.min_charge = -1
+                self.max_charge = 1
+            elif self.hparams.data_set == "GEOM":
+                self.min_charge = -2
+                self.max_charge = 3
+            else:
+                raise ValueError(f"Unknown dataset: {self.hparams.data_set}")
+            
+            self.charge_range = self.max_charge - self.min_charge + 1
             nn_module = nn.Sequential(
                 nn.Linear(n_embd, n_embd * 2),
                 nn.ReLU(),
@@ -72,7 +83,7 @@ class BondPredictor(LightningModule):
                 nn.Linear(n_embd, n_embd),
                 nn.ReLU(),
                 nn.Dropout(self.hparams.dropout),
-                nn.Linear(n_embd, 3),
+                nn.Linear(n_embd, self.charge_range),
             )
 
     def _get_edge_attr(self, data: Data) -> Tensor:
@@ -199,7 +210,7 @@ class BondPredictor(LightningModule):
         data = data.to(device)
 
         logits = self.forward_charges(data)
-        charges = logits.argmax(dim=1) - 1
+        charges = logits.argmax(dim=1) + self.min_charge
 
         return charges
 
@@ -210,7 +221,7 @@ class BondPredictor(LightningModule):
         
         if self.hparams.predict_charge:
             charge_logits = self.forward_charges(batch)
-            charge_loss = F.cross_entropy(charge_logits, batch.charge.long() + 1, reduction="mean")
+            charge_loss = F.cross_entropy(charge_logits, batch.charge.long() - self.min_charge, reduction="mean")
             self.log("train/charge_loss", charge_loss, prog_bar=True, on_step=True)   
             loss = loss + charge_loss
             self.log("train/loss", loss, prog_bar=True, on_step=True)
@@ -227,11 +238,11 @@ class BondPredictor(LightningModule):
         
         if self.hparams.predict_charge:
             charge_logits = self.forward_charges(batch)
-            charge_loss = F.cross_entropy(charge_logits, batch.charge.long() + 1, reduction="mean")
+            charge_loss = F.cross_entropy(charge_logits, batch.charge.long() - self.min_charge, reduction="mean")
             self.log("val/charge_loss", charge_loss, prog_bar=True, on_step=True)   
             loss = loss + charge_loss
             self.log("val/loss", loss, prog_bar=True, on_step=True)
-            pred_charges = charge_logits.argmax(dim=1) - 1
+            pred_charges = charge_logits.argmax(dim=1) + self.min_charge
             acc_charges = (pred_charges == batch.charge).float().mean()
             self.log("val/acc_charges", acc_charges, prog_bar=True)
         

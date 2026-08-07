@@ -1,7 +1,7 @@
 data_set: SPINDR
 batch_size: 512
 radius: 2.5
-noise_ratio: 0.05
+noise_ratio: 0.1
 n_embd: 256
 n_conv_layers: 4
 dropout: 0.1

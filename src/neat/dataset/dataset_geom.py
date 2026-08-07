@@ -200,6 +200,10 @@ class GEOMDataSet(InMemoryDataset):
                     [vocabulary[atom.GetAtomicNum()] for atom in mol.GetAtoms()],
                     dtype=torch.long,
                 )
+                charge = torch.tensor(
+                    [a.GetFormalCharge() for a in mol.GetAtoms()],
+                    dtype=torch.float32,
+                )
 
                 # 3D coordinates centered at origin
                 conf = mol.GetConformer()
@@ -247,6 +251,7 @@ class GEOMDataSet(InMemoryDataset):
                     edge_labels=edge_labels,
                     eccentricity=eccentricity_tensor,
                     smiles=smiles,
+                    charge=charge,
                 )
 
                 conformer_list.append(data)
