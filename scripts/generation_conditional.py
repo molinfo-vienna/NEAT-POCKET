@@ -144,6 +144,7 @@ def generate(args: argparse.Namespace) -> None:
         Loader=yaml.FullLoader,
     )
 
+    # Load the checkpoint of the generative model
     checkpoints_dir = os.path.join(ROOT, params["checkpoints_path"], "checkpoints")
     pt_files = [
         f
@@ -158,9 +159,22 @@ def generate(args: argparse.Namespace) -> None:
 
     MODEL = NEAT
     model = MODEL.load_from_checkpoint(checkpoints_path, map_location=DEVICE)
-    bond_predictor_path = params.get("bond_predictor_path", None)
     
-    if bond_predictor_path is not None:
+    # Load bond predictor if available
+    bond_predictor_dir = params.get("bond_predictor_dir", None)
+    
+    if bond_predictor_dir is not None:
+        bond_predictor_dir = os.path.join(ROOT, bond_predictor_dir, "checkpoints")
+        pt_files = [
+            f
+            for f in os.listdir(bond_predictor_dir)
+            if f.endswith(".ckpt")
+        ]
+        if not pt_files:
+            raise FileNotFoundError(f"No .ckpt files found in {bond_predictor_dir}")
+
+        bond_predictor_path = os.path.join(bond_predictor_dir, pt_files[0])
+        print(f"Using checkpoint file: {bond_predictor_path}")
         bond_predictor = BondPredictor.load_from_checkpoint(bond_predictor_path, map_location=DEVICE)
     else:
         bond_predictor = None
@@ -260,6 +274,7 @@ def generate(args: argparse.Namespace) -> None:
         pocket_start_time = datetime.now()
         with torch.no_grad():
             model.eval()
+            cfg_factor = params.get("cfg_factor", 0.)
             generated_mols = model.generate(
                 batch_size=pocket_info["pocket_batch"].max().item() + 1,
                 max_atoms=params["max_atoms"],
@@ -268,6 +283,7 @@ def generate(args: argparse.Namespace) -> None:
                 integration_method=params["integration_method"],
                 pocket_info=pocket_info,
                 fragment_info=fragment_info,
+                cfg_factor=cfg_factor,
             )
 
         # Split the chunk batch back into per-pocket tensors and save.

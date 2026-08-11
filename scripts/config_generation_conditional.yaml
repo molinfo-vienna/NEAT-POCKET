@@ -1,11 +1,12 @@
-checkpoints_path: logs/NEAT/version_129
-output_path: output/version_129_cfg05_null
-data_set: SPINDR
+checkpoints_path: logs/NEAT/version_126
+output_path: output/version_126_cfg05_logits
+data_set: CROSSDOCKED
 num_molecules: 100
 chunk_size: 3
-max_atoms: 200
+max_atoms: 100
 num_time_steps: 60
 time_step_spacing: linear
 integration_method: euler_maruyama
-fragment_type: null  # null | largest | second_largest | smallest
-bond_predictor_path: /data/sharedXL/projects/Daniel/NEAT-Cond-Dev/logs/BondPredictor/SPINDR/version_2/checkpoints/bond_predictor_SPINDR-epoch=37.ckpt
+cfg_factor: 0.5
+fragment_type: null # null | largest | second_largest | smallest
+bond_predictor_dir: logs/BondPredictor/CROSSDOCKED/version_1
