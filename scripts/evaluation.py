@@ -781,7 +781,6 @@ def evaluate_subdirectory(
         builder = MoleculeBuilder(vocab=params["data_set"])
         x, pos, batch = builder.load_tensor_from_file(subdir)
     except FileNotFoundError as e:
-        print(f"Skipping {subdir.name}: {e}")
         tensor_file_available = False
         
     if compute_edm and tensor_file_available:
