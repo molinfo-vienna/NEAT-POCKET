@@ -11,9 +11,10 @@ from torch.optim import AdamW
 from torch_geometric.data import Data
 from torch_geometric.nn import GINEConv, radius_graph
 from torch_geometric.transforms import Distance
+from e3nn.nn.models.v2103.gate_points_networks import SimpleNetwork
 
 # Bond types: 0=no bond, 1=single, 2=double, 3=triple, 4=aromatic
-NUM_BOND_TYPES = 5
+NUM_BOND_TYPES = 4
 
 
 class BondPredictor(LightningModule):
@@ -37,54 +38,28 @@ class BondPredictor(LightningModule):
             nn.Linear(n_embd // 2, n_embd),
         )
 
-        # GINEConv layers: message passing with edge features
-        self.conv_layers = nn.ModuleList()
-        for _ in range(n_conv_layers):
-            nn_module = nn.Sequential(
-                nn.Linear(n_embd, n_embd * 2),
-                nn.ReLU(),
-                nn.Dropout(self.hparams.dropout),
-                nn.Linear(n_embd * 2, n_embd),
-            )
-            self.conv_layers.append(
-                GINEConv(nn=nn_module, eps=0.0, train_eps=True, edge_dim=n_embd)
-            )
-        self.layer_norm = nn.LayerNorm(n_embd)
+        self.net = SimpleNetwork(
+            irreps_in=f"{n_embd}x0e",
+            irreps_out=f"{n_embd}x0e",
+            max_radius=2.5,
+            layers=n_conv_layers,
+            num_neighbors=20,
+            num_nodes=5.0,
+            pool_nodes=False,
+        )
+
+        self.final_layer_norm = nn.LayerNorm(n_embd)
         self.dropout = nn.Dropout(self.hparams.dropout)
 
-        # Bond prediction head: [h_src; h_dst; dist] -> 5-way logits
         self.bond_mlp = nn.Sequential(
-            nn.Linear(n_embd * 2 + 1, n_embd),
+            nn.Linear(n_embd, n_embd),
             nn.ReLU(),
             nn.Dropout(self.hparams.dropout),
             nn.Linear(n_embd, n_embd),
             nn.ReLU(),
             nn.Linear(n_embd, NUM_BOND_TYPES),
         )
-        if self.hparams.predict_charge:
-            if self.hparams.data_set == "SPINDR":
-                self.min_charge = -1
-                self.max_charge = 1
-            elif self.hparams.data_set == "GEOM":
-                self.min_charge = -2
-                self.max_charge = 3
-            else:
-                raise ValueError(f"Unknown dataset: {self.hparams.data_set}")
-            
-            self.charge_range = self.max_charge - self.min_charge + 1
-            nn_module = nn.Sequential(
-                nn.Linear(n_embd, n_embd * 2),
-                nn.ReLU(),
-                nn.Dropout(self.hparams.dropout),
-                nn.Linear(n_embd * 2, n_embd),
-            )
-            self.charge_conv_layer = GINEConv(nn=nn_module, eps=0.0, train_eps=True, edge_dim=5)
-            self.charge_mlp = nn.Sequential(
-                nn.Linear(n_embd, n_embd),
-                nn.ReLU(),
-                nn.Dropout(self.hparams.dropout),
-                nn.Linear(n_embd, self.charge_range),
-            )
+
 
     def _get_edge_attr(self, data: Data) -> Tensor:
         """Get edge attributes (distances). Compute from pos if not in data."""
@@ -117,36 +92,16 @@ class BondPredictor(LightningModule):
         edge_dist = self._get_edge_attr(data)
         edge_attr = self.edge_encoder(edge_dist)
 
-        # (3) Message passing with GINEConv
-        for conv in self.conv_layers:
-            x = conv(x, data.edge_index, edge_attr) + x
-            x = F.relu(x)
-        x = self.layer_norm(x)
+        # (3) GNN with E(3) invariant features
+        x = self.net({"x": x, "pos": data.pos, "batch": data.batch})
 
-        # (4) Bond prediction: [h_src; h_dst; dist]
+        # (4) Bond prediction
         src, dst = data.edge_index[0], data.edge_index[1]
-        h_src = x[src]
-        h_dst = x[dst]
-        edge_dist_scalar = self._get_edge_attr(data)  # [num_edges, 1]
-        edge_features = torch.cat([h_src, h_dst, edge_dist_scalar], dim=-1)
+        edge_features = x[src] + x[dst] + edge_attr
         bond_logits = self.bond_mlp(edge_features)
 
         return bond_logits
-        
-    def forward_charges(self, data: Data) -> Tensor:
-        """Forward pass for charge prediction."""
-
-        atom_embedding = self.atom_type_embedding(data.x)
-        atom_embedding = self.dropout(atom_embedding)
-        edge_mask = [data.edge_labels != 0]
-        edge_index = data.edge_index[:, edge_mask[0]]
-        edge_labels = F.one_hot(data.edge_labels[edge_mask[0]], num_classes=5).float()
-        charge_embedding = self.charge_conv_layer(atom_embedding, edge_index, edge_labels) + atom_embedding
-        charge_embedding = F.relu(charge_embedding)
-        charge_embedding = self.layer_norm(charge_embedding)
-        charge_logits = self.charge_mlp(charge_embedding)
-        
-        return charge_logits  
+    
 
     @torch.no_grad()
     def predict_bonds(
@@ -175,76 +130,31 @@ class BondPredictor(LightningModule):
         data = data.to(device)
 
         data.edge_index = radius_graph(data.pos, r=radius, batch=data.batch, loop=False)
-        # edge_attr not set; _get_edge_attr will compute from pos
 
         logits = self(data)
-        bond_types = logits.argmax(dim=1)
+        bond_probs = F.softmax(logits, dim=-1)
+        no_bonds_mask = (bond_probs[:, 0] > 0.99)
+        bond_probs = bond_probs[~no_bonds_mask]
         pair_indices = data.edge_index.t()
+        pair_indices = pair_indices[~no_bonds_mask]
 
-        return bond_types, pair_indices
-    
-    @torch.no_grad()
-    def predict_charges(
-        self,
-        x: Tensor,
-        pos: Tensor,
-        batch: Tensor | None = None,
-        bond_types: Tensor | None = None,
-        pair_indices: Tensor | None = None,
-        device: torch.device | None = None,
-        radius: float | None = None,
-    ) -> tuple[Tensor, Tensor]:
-        """Predict bond types for inference. Builds radius graph from pos/batch.
+        return bond_probs, pair_indices
 
-        Returns:
-            bond_types: [num_edges] predicted class (0-4) per edge.
-            pair_indices: [num_edges, 2] (src, dst) for each edge.
-        """
-        if device is None:
-            device = x.device
-
-        if batch is None:
-            batch = torch.zeros(x.shape[0], dtype=torch.long, device=device)
-            
-        data = Data(x=x, pos=pos, edge_labels=bond_types, edge_index=pair_indices.T, batch=batch)
-        data = data.to(device)
-
-        logits = self.forward_charges(data)
-        charges = logits.argmax(dim=1) + self.min_charge
-
-        return charges
 
     def training_step(self, batch: Data, batch_idx: int) -> Tensor:
         bond_logits = self(batch)
         loss = F.cross_entropy(bond_logits, batch.edge_labels.long(), reduction="mean")
-        self.log("train/bond_loss", loss, prog_bar=True, on_step=True)
-        
-        if self.hparams.predict_charge:
-            charge_logits = self.forward_charges(batch)
-            charge_loss = F.cross_entropy(charge_logits, batch.charge.long() - self.min_charge, reduction="mean")
-            self.log("train/charge_loss", charge_loss, prog_bar=True, on_step=True)   
-            loss = loss + charge_loss
-            self.log("train/loss", loss, prog_bar=True, on_step=True)
+        self.log("train/loss", loss, prog_bar=True, on_step=True)
         
         return loss
 
     def validation_step(self, batch: Data, batch_idx: int) -> Tensor:
         bond_logits = self(batch)
         loss = F.cross_entropy(bond_logits, batch.edge_labels.long(), reduction="mean")
-        self.log("val/bond_loss", loss, prog_bar=True, on_step=True)
+        self.log("val/loss", loss, prog_bar=True, on_step=True)
         pred_bonds = bond_logits.argmax(dim=1)
         acc_bonds = (pred_bonds == batch.edge_labels).float().mean()
         self.log("val/acc_bonds", acc_bonds, prog_bar=True)
-        
-        if self.hparams.predict_charge:
-            charge_logits = self.forward_charges(batch)
-            charge_loss = F.cross_entropy(charge_logits, batch.charge.long() - self.min_charge, reduction="mean")
-            self.log("val/charge_loss", charge_loss, prog_bar=True, on_step=True)   
-            loss = loss + charge_loss
-            self.log("val/loss", loss, prog_bar=True, on_step=True)
-            pred_charges = charge_logits.argmax(dim=1) + self.min_charge
-            acc_charges = (pred_charges == batch.charge).float().mean()
-            self.log("val/acc_charges", acc_charges, prog_bar=True)
         
         return loss
 

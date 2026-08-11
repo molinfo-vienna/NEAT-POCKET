@@ -9,6 +9,7 @@ from torch_geometric.data import Batch
 from torch_geometric.nn import radius_graph
 from torch_geometric.nn.pool import global_mean_pool
 from torch_geometric.transforms import Distance
+from torch_geometric.utils import coalesce
 
 from .augmentation import RandomRotationAugmentation
 from .dataset_geom import GEOMDataSet
@@ -18,92 +19,42 @@ from .dataset_spindr import SpindrDataSet
 from .splitting import SourceTargetSplitter
 
 
-def update_edge_labels(batch_data, rad_edge_index):
-    """Update the edge labels of a batch of graphs by:
-
-        1. encoding edges into 1D keys for the whole batch,
-        2. initializing the new edge labels tensor,
-        3. vectorized mapping,
-        4. scattering the edge labels.
-
-    Args:
-        batch_data (Batch): Batch of graphs.
-        rad_edge_index (Tensor): Edge index of the radius graph.
-
-    Returns:
-        Tensor: Updated edge labels.
-    """
-
-    # Total number of nodes in the entire batch (sum of all nodes in all graphs)
-    N_total = batch_data.num_nodes
-
-    # 1. Encode edges into 1D keys for the whole batch
-    index_key_in_mol_graph = (
-        batch_data.edge_index[0] * N_total + batch_data.edge_index[1]
-    )
-    index_key_in_rad_graph = rad_edge_index[0] * N_total + rad_edge_index[1]
-
-    # 2. Initialize the new labels tensor
-    num_rad_edges = rad_edge_index.size(1)
-    rad_edge_labels = torch.zeros(
-        (num_rad_edges,),
-        device=batch_data.edge_labels.device,
-        dtype=batch_data.edge_labels.dtype,
-    )
-
-    # 3. Sort index_key_in_rad_graph to enable binary search (searchsorted)
-    sorted_rad_keys, perm = torch.sort(index_key_in_rad_graph)
-
-    # Find where the molecular edges land in the sorted radius edges
-    # This assumes every mol_edge exists in rad_edge_index
-    idx = torch.searchsorted(sorted_rad_keys, index_key_in_mol_graph)
-
-    # Map the sorted positions back to the original unsorted radius_edge_index positions
-    target_indices = perm[idx]
-
-    # 4. Scatter the attributes
-    rad_edge_labels[target_indices] = batch_data.edge_labels
-
-    return rad_edge_labels
-
 
 def bond_prediction_batch_transform(
     batch: Batch,
     radius: float,
     noise_ratio: float = 0.0,
 ) -> Batch:
-    """Transform a batch of graphs by:
-
-        1. optionally adding isotropic Gaussian noise to coordinates (training only),
-        2. adding edges to the graph by connecting atoms within a certain radius and
-           adding "0" bond type to the edge attributes for the new edges, and
-        3. adding distances as edge attributes for all edges.
-
-    Args:
-        batch (Batch): Batch of graphs.
-        radius (float): Radius for the radius graph.
-        noise_ratio (float): Fraction of radius to use as std for isotropic coordinate
-            noise. Applied only when > 0 (training only).
-
-    Returns:
-        Batch: Transformed batch of graphs.
-    """
-    # (0) Optionally add isotropic coordinate noise (for training robustness)
+    # (0) Coordinate noise
     if noise_ratio > 0:
         noise_std = noise_ratio * radius
         added_noise = noise_std * torch.randn_like(batch.pos)
-        added_noise /= torch.clamp(torch.norm(added_noise, dim=-1, keepdim=True), min=1.0)
         batch.pos = batch.pos + added_noise
 
-    # (1) Add edges to the graph by connecting atoms within a certain radius
-    # and add "0" bond type to the edge attributes for the new edges
-    # (keeping the original edge labels)
+    # (1) Compute radius edges
     rad_edge_index = radius_graph(batch.pos, r=radius, batch=batch.batch, loop=False)
-    rad_edge_labels = update_edge_labels(batch, rad_edge_index)
-    batch.edge_index = rad_edge_index
-    batch.edge_labels = rad_edge_labels
+    rad_edge_labels = torch.zeros(
+        rad_edge_index.size(1), 
+        device=batch.edge_labels.device, 
+        dtype=batch.edge_labels.dtype
+    )
 
-    # (2) Add distances as edge attributes (Distance adds batch.edge_attr)
+    # (2) Combine original molecular edges and new radius edges
+    combined_edge_index = torch.cat([batch.edge_index, rad_edge_index], dim=1)
+    combined_edge_labels = torch.cat([batch.edge_labels, rad_edge_labels], dim=0)
+
+    # (3) Deduplicate (coalesce) edges, keeping original labels (max reduction)
+    new_edge_index, new_edge_labels = coalesce(
+        combined_edge_index, 
+        combined_edge_labels, 
+        num_nodes=batch.num_nodes,
+        reduce="max"
+    )
+
+    batch.edge_index = new_edge_index
+    batch.edge_labels = new_edge_labels
+
+    # (4) Add distance attributes
     batch = Distance(norm=False)(batch)
 
     return batch

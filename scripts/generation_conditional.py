@@ -158,9 +158,10 @@ def generate(args: argparse.Namespace) -> None:
 
     MODEL = NEAT
     model = MODEL.load_from_checkpoint(checkpoints_path, map_location=DEVICE)
+    bond_predictor_path = params.get("bond_predictor_path", None)
     
-    if params["bond_predictor_path"] is not None:
-        bond_predictor = BondPredictor.load_from_checkpoint(params["bond_predictor_path"], map_location=DEVICE)
+    if bond_predictor_path is not None:
+        bond_predictor = BondPredictor.load_from_checkpoint(bond_predictor_path, map_location=DEVICE)
     else:
         bond_predictor = None
 
@@ -294,8 +295,8 @@ def generate(args: argparse.Namespace) -> None:
                 generated_mols_subset, os.path.join(out_dir, "generated_mols.pt")
             )
             # Generate mols with bond and charge predictors and save as SDF for later evaluation.
+            builder = MoleculeBuilder(vocab=params["data_set"])
             if bond_predictor is not None:
-                builder = MoleculeBuilder(vocab=params["data_set"])
                 rdkit_mols = builder.generate_rdkit_molecules_via_bond_predictor(
                     generated_mols_subset.x,
                     generated_mols_subset.pos,
