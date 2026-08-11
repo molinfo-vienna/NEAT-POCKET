@@ -25,13 +25,12 @@ from tqdm import tqdm
 from rdkit import Chem
 from rdkit.Chem import Mol
 
-# Bond type mapping: 0=no bond, 1=single, 2=double, 3=triple, 4=aromatic
+# Bond type mapping: 0=no bond, 1=single, 2=double, 3=triple
 RDKIT_BOND_TYPES = [
     None,
     Chem.rdchem.BondType.SINGLE,
     Chem.rdchem.BondType.DOUBLE,
     Chem.rdchem.BondType.TRIPLE,
-    Chem.rdchem.BondType.AROMATIC,
 ]
 
 # Standard maximum valence lookup table by atomic number
@@ -61,7 +60,7 @@ MIN_VALENCE_TABLE = {
     53: 1,  # I
 }
 
-BOND_ORDERS = np.array([0.0, 1.0, 2.0, 3.0, 1.5])  # 0=none, 1=single, 2=double, 3=triple, 4=aromatic
+BOND_ORDERS = np.array([0.0, 1.0, 2.0, 3.0])  # 0=none, 1=single, 2=double, 3=triple
 
 # Allowed neutral valence states for main-group elements
 NEUTRAL_VALENCE_SETS = {
@@ -127,14 +126,13 @@ def solve_bond_ilp_scipy(
     probs: np.ndarray,
     edge_pairs: np.ndarray,
     atomic_nums: np.ndarray,
+    pos: Optional[np.ndarray] = None,
     max_valence_dict: dict = MAX_VALENCE_TABLE,
     min_valence_dict: dict = MIN_VALENCE_TABLE,
     enforce_connectivity: bool = True,
+    min_allene_angle: float = 170.0,
 ) -> np.ndarray:
-    """Solves Integer Linear Program for bond assignment subject to min/max valence
-
-    constraints and single-commodity flow connectivity constraints.
-    """
+    """Solves ILP for bond assignment with vectorized geometric angle constraints."""
     n_edges, n_classes = probs.shape
     n_atoms = len(atomic_nums)
     if n_edges == 0:
@@ -147,16 +145,14 @@ def solve_bond_ilp_scipy(
         [max_valence_dict.get(int(a), 4) for a in atomic_nums], dtype=float
     )
 
-    # Base cost: Minimize -log(P) for chosen bond types
     c_bonds = -np.log(np.clip(probs, 1e-8, 1.0)).reshape(-1)
 
     n_bond_vars = n_edges * n_classes
-    # Add 2 flow variables per edge (one for each direction: u -> v and v -> u)
     n_flow_vars = (2 * n_edges) if (enforce_connectivity and n_atoms > 1) else 0
     total_vars = n_bond_vars + n_flow_vars
 
     c = np.zeros(total_vars)
-    c[:n_bond_vars] = c_bonds  # Flow variables have zero cost
+    c[:n_bond_vars] = c_bonds
 
     # Constraint 1: Exactly 1 bond type chosen per edge
     row_a1 = np.repeat(np.arange(n_edges), n_classes)
@@ -185,49 +181,34 @@ def solve_bond_ilp_scipy(
     # Constraint 3: Graph Connectivity via Single-Commodity Flow
     if enforce_connectivity and n_atoms > 1:
         flow_offset = n_bond_vars
-
-        # 3a. Node Flow Conservation
-        # Node 0 generates (N - 1) flow. Nodes 1..N-1 consume 1 unit.
         for i in range(n_atoms):
             for e_idx, (u, v) in enumerate(edge_pairs):
                 f_uv = flow_offset + 2 * e_idx
                 f_vu = flow_offset + 2 * e_idx + 1
 
                 if u == i:
-                    rows.append(row_count)
-                    cols.append(f_uv)
-                    data.append(1.0)  # Outflow
-                    rows.append(row_count)
-                    cols.append(f_vu)
-                    data.append(-1.0)  # Inflow
+                    rows.extend([row_count, row_count])
+                    cols.extend([f_uv, f_vu])
+                    data.extend([1.0, -1.0])
                 elif v == i:
-                    rows.append(row_count)
-                    cols.append(f_vu)
-                    data.append(1.0)  # Outflow
-                    rows.append(row_count)
-                    cols.append(f_uv)
-                    data.append(-1.0)  # Inflow
+                    rows.extend([row_count, row_count])
+                    cols.extend([f_vu, f_uv])
+                    data.extend([1.0, -1.0])
 
             req = float(n_atoms - 1) if i == 0 else -1.0
             lb_list.append([req])
             ub_list.append([req])
             row_count += 1
 
-        # 3b. Edge Flow Capacity
-        # Flow can only pass if edge e has a bond (k > 0): f_uv + f_vu <= (N - 1) * sum_{k>0} x_{e,k}
         big_m = float(n_atoms - 1)
         for e_idx in range(n_edges):
             f_uv = flow_offset + 2 * e_idx
             f_vu = flow_offset + 2 * e_idx + 1
 
-            rows.append(row_count)
-            cols.append(f_uv)
-            data.append(1.0)
-            rows.append(row_count)
-            cols.append(f_vu)
-            data.append(1.0)
+            rows.extend([row_count, row_count])
+            cols.extend([f_uv, f_vu])
+            data.extend([1.0, 1.0])
 
-            # Subtract Big-M * sum_{k>0} x_{e, k}
             for k in range(1, n_classes):
                 rows.append(row_count)
                 cols.append(e_idx * n_classes + k)
@@ -237,17 +218,73 @@ def solve_bond_ilp_scipy(
             ub_list.append([0.0])
             row_count += 1
 
+    # -------------------------------------------------------------
+    # Constraint 4: Vectorized Angle-based exclusion for cumulenes
+    # -------------------------------------------------------------
+    if pos is not None and min_allene_angle > 0 and n_edges > 1:
+        DOUBLE_BOND_K = 2
+        
+        # Deconstruct edges into 2E directed relationships: center -> neighbor
+        centers = np.concatenate([edge_pairs[:, 0], edge_pairs[:, 1]])
+        neighbors = np.concatenate([edge_pairs[:, 1], edge_pairs[:, 0]])
+        e_indices = np.concatenate([np.arange(n_edges), np.arange(n_edges)])
+        
+        # Calculate normalized vectors from center to neighbor
+        vecs = pos[neighbors] - pos[centers]
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+        vecs = np.divide(vecs, norms, out=np.zeros_like(vecs), where=norms > 1e-6)
+        
+        # Boolean mask (2E x 2E): True if two vectors share the same center
+        same_center = centers[:, None] == centers[None, :]
+        # Ensure we only check unique pairs of DIFFERENT edges
+        valid_pairs = same_center & (e_indices[:, None] < e_indices[None, :])
+        
+        idx1, idx2 = np.where(valid_pairs)
+        
+        if len(idx1) > 0:
+            # Vectorized dot product for all valid pairs
+            cosines = np.sum(vecs[idx1] * vecs[idx2], axis=1)
+            cosines = np.clip(cosines, -1.0, 1.0)
+            angles = np.degrees(np.arccos(cosines))
+            
+            # Mask pairs below the linear threshold
+            violating_mask = angles < min_allene_angle
+            
+            bad_e1 = e_indices[idx1[violating_mask]]
+            bad_e2 = e_indices[idx2[violating_mask]]
+            
+            n_violations = len(bad_e1)
+            if n_violations > 0:
+                # Add n_violations constraints: x_{e1,2} + x_{e2,2} <= 1
+                new_rows = np.repeat(np.arange(row_count, row_count + n_violations), 2)
+                
+                var1_indices = n_classes * bad_e1 + DOUBLE_BOND_K
+                var2_indices = n_classes * bad_e2 + DOUBLE_BOND_K
+                new_cols = np.empty(n_violations * 2, dtype=int)
+                new_cols[0::2] = var1_indices
+                new_cols[1::2] = var2_indices
+                
+                new_data = np.ones(n_violations * 2)
+                
+                rows.extend(new_rows.tolist())
+                cols.extend(new_cols.tolist())
+                data.extend(new_data.tolist())
+                
+                lb_list.append(np.full(n_violations, -np.inf))
+                ub_list.append(np.ones(n_violations))
+                row_count += n_violations
+
     # Assemble Constraints and Bounds
     A = csc_matrix((data, (rows, cols)), shape=(row_count, total_vars))
     lb = np.concatenate(lb_list)
     ub = np.concatenate(ub_list)
 
     integrality = np.zeros(total_vars)
-    integrality[:n_bond_vars] = 1.0  # Bond variables are binary integers
+    integrality[:n_bond_vars] = 1.0
 
     bounds_ub = np.ones(total_vars)
     if enforce_connectivity and n_atoms > 1:
-        bounds_ub[n_bond_vars:] = float(n_atoms - 1)  # Flow upper bound
+        bounds_ub[n_bond_vars:] = float(n_atoms - 1)
 
     bounds = Bounds(np.zeros(total_vars), bounds_ub)
     constraints = LinearConstraint(A, lb, ub)
@@ -266,6 +303,151 @@ def solve_bond_ilp_scipy(
 
     print("MILP solver failed or returned infeasible solution.")
     return None
+
+
+# def solve_bond_ilp_scipy(
+#     probs: np.ndarray,
+#     edge_pairs: np.ndarray,
+#     atomic_nums: np.ndarray,
+#     max_valence_dict: dict = MAX_VALENCE_TABLE,
+#     min_valence_dict: dict = MIN_VALENCE_TABLE,
+#     enforce_connectivity: bool = True,
+# ) -> np.ndarray:
+#     """Solves Integer Linear Program for bond assignment subject to min/max valence
+
+#     constraints and single-commodity flow connectivity constraints.
+#     """
+#     n_edges, n_classes = probs.shape
+#     n_atoms = len(atomic_nums)
+#     if n_edges == 0:
+#         return np.zeros(0, dtype=int)
+
+#     min_valences = np.array(
+#         [min_valence_dict.get(int(a), 0) for a in atomic_nums], dtype=float
+#     )
+#     max_valences = np.array(
+#         [max_valence_dict.get(int(a), 4) for a in atomic_nums], dtype=float
+#     )
+
+#     # Base cost: Minimize -log(P) for chosen bond types
+#     c_bonds = -np.log(np.clip(probs, 1e-8, 1.0)).reshape(-1)
+
+#     n_bond_vars = n_edges * n_classes
+#     # Add 2 flow variables per edge (one for each direction: u -> v and v -> u)
+#     n_flow_vars = (2 * n_edges) if (enforce_connectivity and n_atoms > 1) else 0
+#     total_vars = n_bond_vars + n_flow_vars
+
+#     c = np.zeros(total_vars)
+#     c[:n_bond_vars] = c_bonds  # Flow variables have zero cost
+
+#     # Constraint 1: Exactly 1 bond type chosen per edge
+#     row_a1 = np.repeat(np.arange(n_edges), n_classes)
+#     col_a1 = np.arange(n_classes * n_edges)
+#     data_a1 = np.ones(n_classes * n_edges)
+
+#     # Constraint 2: Total valence per atom
+#     row_a2, col_a2, data_a2 = [], [], []
+#     for e_idx, (u, v) in enumerate(edge_pairs):
+#         for k in range(n_classes):
+#             bo = BOND_ORDERS[k]
+#             if bo > 0:
+#                 var_idx = n_classes * e_idx + k
+#                 row_a2.extend([u, v])
+#                 col_a2.extend([var_idx, var_idx])
+#                 data_a2.extend([bo, bo])
+
+#     rows = list(row_a1) + [r + n_edges for r in row_a2]
+#     cols = list(col_a1) + col_a2
+#     data = list(data_a1) + data_a2
+
+#     lb_list = [np.ones(n_edges), min_valences]
+#     ub_list = [np.ones(n_edges), max_valences]
+#     row_count = n_edges + n_atoms
+
+#     # Constraint 3: Graph Connectivity via Single-Commodity Flow
+#     if enforce_connectivity and n_atoms > 1:
+#         flow_offset = n_bond_vars
+
+#         # 3a. Node Flow Conservation
+#         # Node 0 generates (N - 1) flow. Nodes 1..N-1 consume 1 unit.
+#         for i in range(n_atoms):
+#             for e_idx, (u, v) in enumerate(edge_pairs):
+#                 f_uv = flow_offset + 2 * e_idx
+#                 f_vu = flow_offset + 2 * e_idx + 1
+
+#                 if u == i:
+#                     rows.append(row_count)
+#                     cols.append(f_uv)
+#                     data.append(1.0)  # Outflow
+#                     rows.append(row_count)
+#                     cols.append(f_vu)
+#                     data.append(-1.0)  # Inflow
+#                 elif v == i:
+#                     rows.append(row_count)
+#                     cols.append(f_vu)
+#                     data.append(1.0)  # Outflow
+#                     rows.append(row_count)
+#                     cols.append(f_uv)
+#                     data.append(-1.0)  # Inflow
+
+#             req = float(n_atoms - 1) if i == 0 else -1.0
+#             lb_list.append([req])
+#             ub_list.append([req])
+#             row_count += 1
+
+#         # 3b. Edge Flow Capacity
+#         # Flow can only pass if edge e has a bond (k > 0): f_uv + f_vu <= (N - 1) * sum_{k>0} x_{e,k}
+#         big_m = float(n_atoms - 1)
+#         for e_idx in range(n_edges):
+#             f_uv = flow_offset + 2 * e_idx
+#             f_vu = flow_offset + 2 * e_idx + 1
+
+#             rows.append(row_count)
+#             cols.append(f_uv)
+#             data.append(1.0)
+#             rows.append(row_count)
+#             cols.append(f_vu)
+#             data.append(1.0)
+
+#             # Subtract Big-M * sum_{k>0} x_{e, k}
+#             for k in range(1, n_classes):
+#                 rows.append(row_count)
+#                 cols.append(e_idx * n_classes + k)
+#                 data.append(-big_m)
+
+#             lb_list.append([-np.inf])
+#             ub_list.append([0.0])
+#             row_count += 1
+
+#     # Assemble Constraints and Bounds
+#     A = csc_matrix((data, (rows, cols)), shape=(row_count, total_vars))
+#     lb = np.concatenate(lb_list)
+#     ub = np.concatenate(ub_list)
+
+#     integrality = np.zeros(total_vars)
+#     integrality[:n_bond_vars] = 1.0  # Bond variables are binary integers
+
+#     bounds_ub = np.ones(total_vars)
+#     if enforce_connectivity and n_atoms > 1:
+#         bounds_ub[n_bond_vars:] = float(n_atoms - 1)  # Flow upper bound
+
+#     bounds = Bounds(np.zeros(total_vars), bounds_ub)
+#     constraints = LinearConstraint(A, lb, ub)
+
+#     res = milp(
+#         c=c,
+#         integrality=integrality,
+#         bounds=bounds,
+#         constraints=constraints,
+#         options={"time_limit": 0.2},
+#     )
+
+#     if res.success:
+#         sol = res.x[:n_bond_vars].reshape(n_edges, n_classes)
+#         return np.argmax(sol, axis=1)
+
+#     print("MILP solver failed or returned infeasible solution.")
+#     return None
 
 
 # def solve_bond_ilp_scipy(
@@ -593,6 +775,7 @@ class MoleculeBuilder:
                         probs=p_undirected,
                         edge_pairs=edge_pairs_local,
                         atomic_nums=mol_atomic_nums,
+                        pos=mol_pos,
                         max_valence_dict=MAX_VALENCE_TABLE,
                         min_valence_dict=MIN_VALENCE_TABLE,
                     )

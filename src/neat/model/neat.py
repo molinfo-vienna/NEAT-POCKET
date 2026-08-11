@@ -1220,7 +1220,7 @@ class NEAT(LightningModule):
         Returns:
             tuple[Tensor, Tensor, Tensor]: The atom types, their positions, and the batch indices of the generated molecules.
         """
-
+        
         if prefix_x is not None and prefix_pos is not None:
             # (1) Initialize starting atom types, positions, and batch source with the provided prefix
             x = torch.cat([prefix_x for _ in range(batch_size)]).to(device)
@@ -1300,8 +1300,13 @@ class NEAT(LightningModule):
                     device,
                     pocket_info=pocket_info_masked,
                 )  # [active_mol_count, n_embd]
+                
+                # (4.2) Compute logits
+                logits = self.atom_type_prediction_head(
+                    source_set_representation
+                )  # [active_mol_count, vocab_size]
 
-                # (4.2) If using pocket information, the source set representations are
+                # (4.3) If using pocket information, the source set representations are
                 # conditioned on the pocket.
                 if pocket_info is not None and cfg_factor > 0.0:
                     source_set_representation_unconditioned_for_cfg = (
@@ -1313,16 +1318,21 @@ class NEAT(LightningModule):
                             device,
                         )
                     )  # [active_mol_count, n_embd]
+                    
+                    logits_unconditioned = self.atom_type_prediction_head(
+                        source_set_representation_unconditioned_for_cfg
+                    )  # [active_mol_count, vocab_size]
+
+                    logits = (
+                        1 + cfg_factor
+                    ) * logits - cfg_factor * logits_unconditioned
 
                 else:
                     source_set_representation_unconditioned_for_cfg = None
 
-                # (4.3) Compute logits
-                logits = self.atom_type_prediction_head(
-                    source_set_representation
-                )  # [active_mol_count, vocab_size]
                 
                 logits = logits / temperature  # Apply temperature scaling to logits
+                #temperature *= 0.9  # Decay temperature over time to encourage exploration early and exploitation later
 
                 # (4.4) Compute probabilities
                 probabilities = F.softmax(
@@ -1331,10 +1341,10 @@ class NEAT(LightningModule):
 
                 # (4.5) Sample next atom types from the resulting distribution
                 x_next = torch.argmax(probabilities, dim=1)
-                # x_next_0_mask = x_next == 0  # Used in hybrid sampling
+                #x_next_0_mask = x_next == 0  # Used in hybrid sampling
                 # x_next_1_mask = x_next == 1  # Used in hybrid sampling
-                # x_next = torch.multinomial(probabilities, num_samples=1).squeeze(1)  # Used in hybrid sampling
-                # x_next[x_next_0_mask] = 0  # Used in hybrid sampling
+                #x_next = torch.multinomial(probabilities, num_samples=1).squeeze(1)  # Used in hybrid sampling
+                #x_next[x_next_0_mask] = 0  # Used in hybrid sampling
                 # x_next[x_next_1_mask] = 1  # Used in hybrid sampling
 
                 # (4.6) Create a mask on the active molecules given the newly predicted atom types
