@@ -73,7 +73,7 @@ def prepare_fragment_info(
     batch_list = []
 
     for i, fragment in enumerate(fragment_list):
-        x, pos = _ligand_features(fragment)
+        x, pos = _ligand_features(fragment, get_charge=False)
         # Repeat the fragment once for each molecule generated for this pocket.
         x_list.append(torch.cat([x for _ in range(num_molecules)], dim=0))
         pos_list.append(torch.cat([pos for _ in range(num_molecules)], dim=0))
@@ -92,7 +92,7 @@ def prepare_fragment_info(
     }
 
 
-def load_fragment(pdb_code: str, fragment_type: str) -> Chem.Mol:
+def load_fragment(pdb_code: str, dataset: str, fragment_type: str) -> Chem.Mol:
     """Load a precomputed BRICS fragment SDF for a pocket.
 
     Fragments are written by scripts/fragments_from_crossdocked.py under
@@ -100,6 +100,7 @@ def load_fragment(pdb_code: str, fragment_type: str) -> Chem.Mol:
 
     Args:
         pdb_code: PDB code identifying the pocket.
+        dataset: Dataset name (e.g., "CrossDocked", "SPINDR").
         fragment_type: One of largest, second_largest, smallest.
 
     Returns:
@@ -110,12 +111,12 @@ def load_fragment(pdb_code: str, fragment_type: str) -> Chem.Mol:
             f"Unknown fragment_type {fragment_type!r}. "
             f"Expected one of {FRAGMENT_TYPES}."
         )
-    fragment_path = os.path.join(FRAGMENTS_DIR, fragment_type, f"{pdb_code}.sdf")
+    fragment_path = os.path.join(FRAGMENTS_DIR, dataset, fragment_type, f"{pdb_code}.sdf")
     if not os.path.exists(fragment_path):
         raise FileNotFoundError(
             f"Fragment file not found: {fragment_path}."
         )
-    supplier = Chem.SDMolSupplier(fragment_path, removeHs=False, sanitize=True)
+    supplier = Chem.SDMolSupplier(fragment_path, removeHs=False, sanitize=False)
     fragment = supplier[0]
     if fragment is None:
         raise ValueError(f"Failed to read fragment from {fragment_path}.")
@@ -180,9 +181,10 @@ def generate(args: argparse.Namespace) -> None:
         bond_predictor = None
 
     # --- Data ---
+    dataset = params["data_set"].upper()
     datamodule = DataModule(
         os.path.join(ROOT, "data"),
-        params["data_set"].upper(),
+        dataset,
     )
     datamodule.setup()
     test_data = datamodule.test_data
@@ -208,7 +210,7 @@ def generate(args: argparse.Namespace) -> None:
 
             if fragment_type is not None:
                 try:
-                    fragment = load_fragment(pdb_code, fragment_type)
+                    fragment = load_fragment(pdb_code, dataset, fragment_type)
                 except (FileNotFoundError, ValueError) as e:
                     print(f"Skipping pocket {pdb_code}: {e}")
                     continue

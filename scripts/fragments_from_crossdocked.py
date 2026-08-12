@@ -29,7 +29,7 @@ from rdkit.Chem import BRICS, SDWriter
 
 from neat.dataset import DataModule
 from neat.dataset.dataset_crossdocked import _largest_fragment
-from neat.utils import center_pdb
+from neat.utils import center_pdb, cif_2_pdb
 
 plt.rcParams["font.size"] = 18
 
@@ -186,7 +186,9 @@ def get_fragments_with_brics(mol: Chem.Mol) -> dict[str, Chem.Mol]:
 
     # No cleavable BRICS bond: treat the whole ligand as every rank.
     if not fragments or len(fragments) <= 1:
-        return {fragment_type: mol for fragment_type in FRAGMENT_TYPES}
+        print("No fragments found; returning the full molecule for all ranks.")
+        #return {fragment_type: mol for fragment_type in FRAGMENT_TYPES}
+        return None
 
     clean_frags = [
         Chem.DeleteSubstructs(frag, Chem.MolFromSmiles("*")) for frag in fragments
@@ -206,11 +208,12 @@ def get_fragments_with_brics(mol: Chem.Mol) -> dict[str, Chem.Mol]:
 def write_fragment(fragment: Chem.Mol, out_sdf_file: str) -> None:
     """Write a single fragment molecule to an SDF file."""
     writer = SDWriter(out_sdf_file)
+    writer.SetKekulize(False)
     writer.write(fragment)
     writer.close()
 
 
-def extract_fragments() -> None:
+def extract_fragments(dataset: str) -> None:
     """Extract and save BRICS fragments from the CrossDocked test set.
 
     Args:
@@ -221,22 +224,23 @@ def extract_fragments() -> None:
 
     datamodule = DataModule(
         os.path.join(ROOT, "data"),
-        "CROSSDOCKED",
+        dataset,
     )
     datamodule.setup()
     test_data = datamodule.test_data
 
     # Output layout: fragments/{largest,second_largest,smallest}/{pdb}.sdf
-    os.makedirs(FRAGMENTS_DIR, exist_ok=True)
+    fragments_dir = os.path.join(FRAGMENTS_DIR, dataset)
+    os.makedirs(fragments_dir, exist_ok=True)
     for fragment_type in FRAGMENT_TYPES:
-        os.makedirs(os.path.join(FRAGMENTS_DIR, fragment_type), exist_ok=True)
+        os.makedirs(os.path.join(fragments_dir, fragment_type), exist_ok=True)
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[
             logging.FileHandler(
-                os.path.join(FRAGMENTS_DIR, "fragments_from_crossdocked.log"),
+                os.path.join(fragments_dir, "fragments_from_crossdocked.log"),
                 mode="w",
             ),
             logging.StreamHandler(),
@@ -244,25 +248,33 @@ def extract_fragments() -> None:
         force=True,
     )
     # Temporary dir for centered pocket PDBs (discarded after the run).
-    tmp_dir = os.path.join(FRAGMENTS_DIR, "_tmp")
+    tmp_dir = os.path.join(fragments_dir, "_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
 
     fragments_by_type = {fragment_type: [] for fragment_type in FRAGMENT_TYPES}
     ligands_by_type = {fragment_type: [] for fragment_type in FRAGMENT_TYPES}
     n_failed = {fragment_type: 0 for fragment_type in FRAGMENT_TYPES}
+    n_samples = len(test_data)
 
-    for data_idx in range(len(test_data)):
+    for data_idx in range(n_samples):
         pdb_code = test_data.get_pdb_code_from_data_point(test_data[data_idx])
         in_pdb_file = test_data.get_pocket_path_from_data_point(test_data[data_idx])
         out_pdb_file = os.path.join(tmp_dir, f"{pdb_code}_pocket.pdb")
-        pocket_center = center_pdb(in_pdb_file, out_pdb_file, return_center=True)
+        
+        if in_pdb_file.endswith(".cif"):
+            pocket_center = cif_2_pdb(in_pdb_file, out_pdb_file, return_center=True)
+        elif in_pdb_file.endswith(".pdb"):
+            pocket_center = center_pdb(in_pdb_file, out_pdb_file, return_center=True)
+        else:
+            raise ValueError(f"Unsupported pocket file format: {in_pdb_file}")
 
         # Mirror ligand prep used at generation time so fragment coords match.
-        in_sdf_file = in_pdb_file.replace("_pocket10.pdb", ".sdf")
-        supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False, sanitize=True)
+        in_sdf_file = test_data.get_ligand_path_from_data_point(test_data[data_idx])
+        supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False, sanitize=False)
         rdmol = supplier[0]
         rdmol = _largest_fragment(rdmol)
         rdmol = Chem.AddHs(rdmol, addCoords=True)
+        Chem.Kekulize(rdmol, clearAromaticFlags=True)
 
         conformer = rdmol.GetConformer()
         for i in range(rdmol.GetNumAtoms()):
@@ -271,9 +283,12 @@ def extract_fragments() -> None:
             conformer.SetAtomPosition(i, new_pos)
 
         fragments = get_fragments_with_brics(rdmol)
+        if fragments is None:
+            logging.warning(f"No fragments found for {pdb_code}; skipping.")
+            continue
         for fragment_type in FRAGMENT_TYPES:
             out_sdf_file = os.path.join(
-                FRAGMENTS_DIR, fragment_type, f"{pdb_code}.sdf"
+                fragments_dir, fragment_type, f"{pdb_code}.sdf"
             )
             try:
                 write_fragment(fragments[fragment_type], out_sdf_file)
@@ -299,7 +314,7 @@ def extract_fragments() -> None:
             "Wrote %d %s fragments to %s (%d failed).",
             len(fragments_by_type[fragment_type]),
             fragment_type,
-            os.path.join(FRAGMENTS_DIR, fragment_type),
+            os.path.join(fragments_dir, fragment_type),
             n_failed[fragment_type],
         )
         print(
@@ -310,7 +325,7 @@ def extract_fragments() -> None:
         plot_fragment_statistics(
             fragments_by_type,
             ligands_by_type,
-            os.path.join(FRAGMENTS_DIR, "fragment_statistics.png"),
+            os.path.join(fragments_dir, "fragment_statistics.png"),
         )
     else:
         logging.warning("No fragments were written; skipping statistics plot.")
@@ -319,7 +334,11 @@ def extract_fragments() -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default="SPINDR", type=str, help="Dataset name (default: SPINDR)")
+    args = parser.parse_args()
+
     start_time = datetime.now()
-    extract_fragments()
+    extract_fragments(args.dataset)
     end_time = datetime.now()
     print(f"Total time: {end_time - start_time}")
