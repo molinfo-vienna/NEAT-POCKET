@@ -218,11 +218,13 @@ def solve_bond_ilp_scipy(
             ub_list.append([0.0])
             row_count += 1
 
-    # -------------------------------------------------------------
-    # Constraint 4: Vectorized Angle-based exclusion for cumulenes
+# -------------------------------------------------------------
+    # Constraint 4: Vectorized Angle-based exclusion for cumulenes and alkynes
     # -------------------------------------------------------------
     if pos is not None and min_allene_angle > 0 and n_edges > 1:
+        SINGLE_BOND_K = 1
         DOUBLE_BOND_K = 2
+        TRIPLE_BOND_K = 3
         
         # Deconstruct edges into 2E directed relationships: center -> neighbor
         centers = np.concatenate([edge_pairs[:, 0], edge_pairs[:, 1]])
@@ -255,24 +257,35 @@ def solve_bond_ilp_scipy(
             
             n_violations = len(bad_e1)
             if n_violations > 0:
-                # Add n_violations constraints: x_{e1,2} + x_{e2,2} <= 1
-                new_rows = np.repeat(np.arange(row_count, row_count + n_violations), 2)
+                # Add up to 3 constraints per violation: 
+                # 1. Double/Double, 2. Single/Triple, 3. Triple/Single
+                rules_per_violation = 3
+                n_new_constraints = n_violations * rules_per_violation
                 
-                var1_indices = n_classes * bad_e1 + DOUBLE_BOND_K
-                var2_indices = n_classes * bad_e2 + DOUBLE_BOND_K
-                new_cols = np.empty(n_violations * 2, dtype=int)
-                new_cols[0::2] = var1_indices
-                new_cols[1::2] = var2_indices
+                new_rows = np.repeat(np.arange(row_count, row_count + n_new_constraints), 2)
+                new_cols = np.empty(n_new_constraints * 2, dtype=int)
                 
-                new_data = np.ones(n_violations * 2)
+                # Rule 1: Double + Double <= 1
+                new_cols[0 : 2*n_violations : 2] = n_classes * bad_e1 + DOUBLE_BOND_K
+                new_cols[1 : 2*n_violations : 2] = n_classes * bad_e2 + DOUBLE_BOND_K
+                
+                # Rule 2: Single + Triple <= 1
+                new_cols[2*n_violations : 4*n_violations : 2] = n_classes * bad_e1 + SINGLE_BOND_K
+                new_cols[2*n_violations+1 : 4*n_violations : 2] = n_classes * bad_e2 + TRIPLE_BOND_K
+                
+                # Rule 3: Triple + Single <= 1
+                new_cols[4*n_violations : 6*n_violations : 2] = n_classes * bad_e1 + TRIPLE_BOND_K
+                new_cols[4*n_violations+1 : 6*n_violations : 2] = n_classes * bad_e2 + SINGLE_BOND_K
+            
+                new_data = np.ones(n_new_constraints * 2)
                 
                 rows.extend(new_rows.tolist())
                 cols.extend(new_cols.tolist())
                 data.extend(new_data.tolist())
                 
-                lb_list.append(np.full(n_violations, -np.inf))
-                ub_list.append(np.ones(n_violations))
-                row_count += n_violations
+                lb_list.append(np.full(n_new_constraints, -np.inf))
+                ub_list.append(np.ones(n_new_constraints))
+                row_count += n_new_constraints
 
     # Assemble Constraints and Bounds
     A = csc_matrix((data, (rows, cols)), shape=(row_count, total_vars))
