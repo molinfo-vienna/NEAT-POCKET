@@ -8,16 +8,16 @@ from typing import Optional
 import torch
 import torch.nn as nn
 from lightning import LightningModule
+from rdkit import Chem
 from torch import Tensor
 from torch.nn import functional as F
 from torch.optim import Optimizer
 from torch_geometric.data import Batch, Data
 from torch_geometric.nn.pool import global_mean_pool
 from tqdm import tqdm
-from rdkit import Chem
 
-from ..dataset.dataset_crossdocked import ATOM_VOCABULARY
 from ..dataset.augmentation import RandomRotationAugmentation
+from ..dataset.dataset_crossdocked import ATOM_VOCABULARY
 from .attention import BidirectionalAttentionBlock
 from .positional_encoding import FourierPositionEncoding
 from .simple_mlp import SimpleMLPAdaLN
@@ -70,7 +70,9 @@ class NEAT(LightningModule):
         self.dropout_layer = nn.Dropout(self.hparams.dropout)
 
         # Transformer blocks for the ligand stream
-        self.enable_cross_attention = _dataset_enables_cross_attention(self.hparams.data_set)
+        self.enable_cross_attention = _dataset_enables_cross_attention(
+            self.hparams.data_set
+        )
         scale_shift_weights = False if self.hparams.global_cond_proj else True
         self.transformer_blocks = nn.ModuleList(
             [
@@ -306,7 +308,7 @@ class NEAT(LightningModule):
             }
         else:
             pocket_info = None
-            
+
         # Create mask for CFG dropout
         cfg_dropout = self.hparams.get("cfg_dropout", None)
         if self.training and pocket_info is not None and cfg_dropout is not None:
@@ -874,12 +876,16 @@ class NEAT(LightningModule):
         loss_fm = torch.mean((output_fm - interpolation) ** 2, dim=1)  # [n_paths * k]
         loss_fm = loss_fm * scaling_factor  # [n_paths * k]
 
-        def batch_to_dense(x: Tensor, batch: Tensor, batch_size: int, n_embd: int) -> tuple[Tensor, Tensor]:
+        def batch_to_dense(
+            x: Tensor, batch: Tensor, batch_size: int, n_embd: int
+        ) -> tuple[Tensor, Tensor]:
             atom_count_source = torch.bincount(
                 batch, minlength=batch_size
             )  # [batch_size]
             dim = [len(atom_count_source), atom_count_source.max(), n_embd]
-            dense = torch.zeros(dim, device=device)  # [batch_size, max_atom_count, n_embd]
+            dense = torch.zeros(
+                dim, device=device
+            )  # [batch_size, max_atom_count, n_embd]
             context_range = torch.arange(
                 atom_count_source.max(), device=atom_count_source.device
             ).unsqueeze(0)
@@ -889,49 +895,84 @@ class NEAT(LightningModule):
             dense[atom_mask] = x  # [batch_size, max_atom_count, n_embd]
             return dense, atom_mask
 
-        if pocket_info is not None and cfg_mask is not None and self.hparams.clash_penalty > 0:
+        if (
+            pocket_info is not None
+            and cfg_mask is not None
+            and self.hparams.clash_penalty > 0
+        ):
             # Prepare pocket information
             _periodic_table = Chem.GetPeriodicTable()
             atom_types = list(ATOM_VOCABULARY.keys())
-            atom_radii = torch.tensor([_periodic_table.GetRvdw(atom_type) for atom_type in atom_types], device=device)
-            pocket_x = torch.cat([pocket_info["pocket_x"] for _ in range(resampling)], dim=0)
-            pocket_pos = torch.cat([pocket_info["pocket_pos"] for _ in range(resampling)], dim=0)
+            atom_radii = torch.tensor(
+                [_periodic_table.GetRvdw(atom_type) for atom_type in atom_types],
+                device=device,
+            )
+            pocket_x = torch.cat(
+                [pocket_info["pocket_x"] for _ in range(resampling)], dim=0
+            )
+            pocket_pos = torch.cat(
+                [pocket_info["pocket_pos"] for _ in range(resampling)], dim=0
+            )
             batch_size = pocket_info["pocket_batch"].max().item() + 1
-            pocket_batch = torch.cat([pocket_info["pocket_batch"] + i * batch_size for i in range(resampling)], dim=0)
-            batch_target = torch.cat([batch_target + i * batch_size for i in range(resampling)], dim=0)
+            pocket_batch = torch.cat(
+                [
+                    pocket_info["pocket_batch"] + i * batch_size
+                    for i in range(resampling)
+                ],
+                dim=0,
+            )
+            batch_target = torch.cat(
+                [batch_target + i * batch_size for i in range(resampling)], dim=0
+            )
             cfg_mask = torch.cat([cfg_mask for _ in range(resampling)], dim=0)
-            
+
             # Compute the projected positions of the target atoms at the sampled time steps
             pos_projected = interpolated_pos + output_fm * (1 - time_step).unsqueeze(1)
             pocket_atom_radii = atom_radii[pocket_x - 1]
             x_next_atom_radii = atom_radii[x_target - 1]
-            
+
             # For computing the distances, we need to convert to dense format
-            pos_projected_dense, _ = batch_to_dense(pos_projected, batch_target, batch_size*resampling, 3)
-            pos_pocket_dense, _ = batch_to_dense(pocket_pos, pocket_batch, batch_size*resampling, 3)
-            dist = (pos_projected_dense.unsqueeze(1) - pos_pocket_dense.unsqueeze(2)).norm(dim=3)
-            
+            pos_projected_dense, _ = batch_to_dense(
+                pos_projected, batch_target, batch_size * resampling, 3
+            )
+            pos_pocket_dense, _ = batch_to_dense(
+                pocket_pos, pocket_batch, batch_size * resampling, 3
+            )
+            dist = (
+                pos_projected_dense.unsqueeze(1) - pos_pocket_dense.unsqueeze(2)
+            ).norm(dim=3)
+
             # We also need to compute the pairwise sum of vdw radii
             margin = self.hparams.clash_penalty_margin
-            x_next_atom_radii_dense, atom_mask = batch_to_dense(x_next_atom_radii.unsqueeze(1), batch_target, batch_size*resampling, 1)
-            pocket_atom_radii_dense, pocket_mask = batch_to_dense(pocket_atom_radii.unsqueeze(1), pocket_batch, batch_size*resampling, 1)
-            vdw_radii_sum = (x_next_atom_radii_dense.unsqueeze(1) + pocket_atom_radii_dense.unsqueeze(2) + margin).squeeze(-1)
+            x_next_atom_radii_dense, atom_mask = batch_to_dense(
+                x_next_atom_radii.unsqueeze(1), batch_target, batch_size * resampling, 1
+            )
+            pocket_atom_radii_dense, pocket_mask = batch_to_dense(
+                pocket_atom_radii.unsqueeze(1), pocket_batch, batch_size * resampling, 1
+            )
+            vdw_radii_sum = (
+                x_next_atom_radii_dense.unsqueeze(1)
+                + pocket_atom_radii_dense.unsqueeze(2)
+                + margin
+            ).squeeze(-1)
             mask = (atom_mask.unsqueeze(1) & pocket_mask.unsqueeze(2)).squeeze(-1)
-            
+
             # Now we can compute the penalty for steric clashes
-            penalty = torch.clamp(vdw_radii_sum - dist, min=0.0)**2
-            penalty[~mask] = 0.0  # Ignore distances that are not valid (i.e., where there is no atom)
-            penalty = penalty.sum(dim=1) # Add up contributions per atom
+            penalty = torch.clamp(vdw_radii_sum - dist, min=0.0) ** 2
+            penalty[~mask] = (
+                0.0  # Ignore distances that are not valid (i.e., where there is no atom)
+            )
+            penalty = penalty.sum(dim=1)  # Add up contributions per atom
             penalty = penalty[atom_mask]
             non_masked_idx = torch.nonzero(~cfg_mask).flatten()
             final_mask = torch.isin(batch_target, non_masked_idx)
             penalty = penalty[final_mask]
             penalty = penalty.mean() * self.hparams.clash_penalty
-            
+
             return loss_fm.mean(), penalty
         else:
             # (9) Return the mean loss over all paths and time steps.
-            return loss_fm.mean(), None  
+            return loss_fm.mean(), None
 
     def sample_timesteps_uniform(
         self, num_samples: int, device: torch.device
@@ -1220,7 +1261,7 @@ class NEAT(LightningModule):
         Returns:
             tuple[Tensor, Tensor, Tensor]: The atom types, their positions, and the batch indices of the generated molecules.
         """
-        
+
         if prefix_x is not None and prefix_pos is not None:
             # (1) Initialize starting atom types, positions, and batch source with the provided prefix
             x = torch.cat([prefix_x for _ in range(batch_size)]).to(device)
@@ -1230,7 +1271,7 @@ class NEAT(LightningModule):
             ).to(device)
             rotation_augmentation = RandomRotationAugmentation()
             pos = rotation_augmentation.rotate_molecule_randomly(pos, batch_source)
-        
+
         elif fragment_info is not None:
             # (1) Initialize starting atom types, positions, and batch source with the provided fragment
             x = fragment_info["fragment_x"].to(device)
@@ -1240,10 +1281,9 @@ class NEAT(LightningModule):
             pos = pos - mean_pos[batch_source]
             if pocket_info is not None:
                 pocket_info["pocket_pos"] = (
-                    pocket_info["pocket_pos"]
-                    - mean_pos[pocket_info["pocket_batch"]]
+                    pocket_info["pocket_pos"] - mean_pos[pocket_info["pocket_batch"]]
                 )
-    
+
         else:
             # (1) Initialize empty starting atom types, positions, and batch source (unconditional generation)
             x = torch.empty(0, dtype=torch.long, device=device)
@@ -1300,7 +1340,7 @@ class NEAT(LightningModule):
                     device,
                     pocket_info=pocket_info_masked,
                 )  # [active_mol_count, n_embd]
-                
+
                 # (4.2) Compute logits
                 logits = self.atom_type_prediction_head(
                     source_set_representation
@@ -1318,7 +1358,7 @@ class NEAT(LightningModule):
                             device,
                         )
                     )  # [active_mol_count, n_embd]
-                    
+
                     logits_unconditioned = self.atom_type_prediction_head(
                         source_set_representation_unconditioned_for_cfg
                     )  # [active_mol_count, vocab_size]
@@ -1330,9 +1370,8 @@ class NEAT(LightningModule):
                 else:
                     source_set_representation_unconditioned_for_cfg = None
 
-                
                 logits = logits / temperature  # Apply temperature scaling to logits
-                #temperature *= 0.9  # Decay temperature over time to encourage exploration early and exploitation later
+                # temperature *= 0.9  # Decay temperature over time to encourage exploration early and exploitation later
 
                 # (4.4) Compute probabilities
                 probabilities = F.softmax(
@@ -1341,10 +1380,10 @@ class NEAT(LightningModule):
 
                 # (4.5) Sample next atom types from the resulting distribution
                 x_next = torch.argmax(probabilities, dim=1)
-                #x_next_0_mask = x_next == 0  # Used in hybrid sampling
+                # x_next_0_mask = x_next == 0  # Used in hybrid sampling
                 # x_next_1_mask = x_next == 1  # Used in hybrid sampling
-                #x_next = torch.multinomial(probabilities, num_samples=1).squeeze(1)  # Used in hybrid sampling
-                #x_next[x_next_0_mask] = 0  # Used in hybrid sampling
+                # x_next = torch.multinomial(probabilities, num_samples=1).squeeze(1)  # Used in hybrid sampling
+                # x_next[x_next_0_mask] = 0  # Used in hybrid sampling
                 # x_next[x_next_1_mask] = 1  # Used in hybrid sampling
 
                 # (4.6) Create a mask on the active molecules given the newly predicted atom types
@@ -1371,7 +1410,9 @@ class NEAT(LightningModule):
                 x_next = x_next[~x_next_mask]
                 source_set_representation = source_set_representation[~x_next_mask]
                 if source_set_representation_unconditioned_for_cfg is not None:
-                    source_set_representation_unconditioned_for_cfg = source_set_representation_unconditioned_for_cfg[~x_next_mask]
+                    source_set_representation_unconditioned_for_cfg = (
+                        source_set_representation_unconditioned_for_cfg[~x_next_mask]
+                    )
 
                 # (4.10) Calculate the positions of the newly predicted atoms with flow matching
                 pos_next = self.calculate_positions(
@@ -1412,7 +1453,7 @@ class NEAT(LightningModule):
             pos = pos - pocket_center[batch_source]
 
         return Batch(x=x, pos=pos, batch=batch_source)
-    
+
     def update_batch_with_new_atoms(
         self,
         x: Tensor,
@@ -1424,7 +1465,7 @@ class NEAT(LightningModule):
         batch_size: int,
         device: torch.device,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        
+
         # 1. Prepare the new elements
         # Reshape x_next and batch assignments for the new atoms to ensure correct dimensions
         x_next_flat = x_next.view(-1)
@@ -1434,8 +1475,8 @@ class NEAT(LightningModule):
         # 2. Compute sorting indices to group everything correctly by molecule ID
         # Combine the existing batch assignments with the new ones
         combined_batch = torch.cat([batch_source, new_batch_elements], dim=0)
-        
-        # argsort is highly optimized on GPU. It brings all elements of molecule 0 together, 
+
+        # argsort is highly optimized on GPU. It brings all elements of molecule 0 together,
         # then molecule 1, etc., perfectly preserving or re-ordering them cleanly.
         sort_indices = torch.argsort(combined_batch, stable=True)
 
@@ -1445,8 +1486,6 @@ class NEAT(LightningModule):
         updated_batch = combined_batch[sort_indices]
 
         return updated_x, updated_pos, updated_batch
-
-
 
     def calculate_positions(
         self,

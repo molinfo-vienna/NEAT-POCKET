@@ -70,7 +70,7 @@ def train(args: argparse.Namespace) -> None:
         f"Train: {len(datamodule.training_data)}, Val: {len(datamodule.validation_data)}"
     )
     params["vocab_size"] = datamodule.vocab_size
-    
+
     model = BondPredictor(**params)
 
     log_dir = os.path.join(ROOT, "logs", "BondPredictor")

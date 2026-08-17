@@ -1,10 +1,12 @@
 import numpy as np
 from posecheck import PoseCheck
-from rdkit.Chem import Mol
 from posecheck.utils.chem import remove_radicals
+from rdkit.Chem import Mol
 
 
-def compute_posecheck_metrics_from_mols(mols: list[Mol], pocket_path: str, compute_strain: bool = False) -> dict[str, float]:
+def compute_posecheck_metrics_from_mols(
+    mols: list[Mol], pocket_path: str, compute_strain: bool = False
+) -> dict[str, float]:
     # Initialize the PoseCheck object
     pc = PoseCheck()
 

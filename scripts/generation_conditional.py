@@ -26,12 +26,9 @@ from rdkit import Chem
 from torch_geometric.data import Batch
 
 from neat.dataset import DataModule
-from neat.dataset.dataset_crossdocked import (
-    _largest_fragment,
-    _ligand_features,
-)
+from neat.dataset.dataset_crossdocked import (_largest_fragment,
+                                              _ligand_features)
 from neat.model import NEAT
-from neat.model.bond_predictor import BondPredictor
 from neat.model.bond_predictor import BondPredictor
 from neat.model.molecule_builder import MoleculeBuilder
 from neat.utils import center_pdb, cif_2_pdb, save_molecules_to_sdf
@@ -41,7 +38,6 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 torch.set_float32_matmul_precision("medium")
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-
 torch_geometric.seed_everything(42)
 seed_everything(42)
 
@@ -51,9 +47,7 @@ FRAGMENTS_DIR = os.path.join(ROOT, "fragments")
 FRAGMENT_TYPES = ("largest", "second_largest", "smallest")
 
 
-def prepare_fragment_info(
-    fragment_list: list[Chem.Mol], num_molecules: int
-) -> dict:
+def prepare_fragment_info(fragment_list: list[Chem.Mol], num_molecules: int) -> dict:
     """Build batched fragment tensors for model.generate().
 
     For each pocket fragment in the chunk, atom types and positions are
@@ -79,7 +73,10 @@ def prepare_fragment_info(
         pos_list.append(torch.cat([pos for _ in range(num_molecules)], dim=0))
         batch_list.append(
             torch.cat(
-                [torch.ones(len(x), dtype=torch.long) * j for j in range(num_molecules)],
+                [
+                    torch.ones(len(x), dtype=torch.long) * j
+                    for j in range(num_molecules)
+                ],
                 dim=0,
             )
             + i * num_molecules
@@ -111,11 +108,11 @@ def load_fragment(pdb_code: str, dataset: str, fragment_type: str) -> Chem.Mol:
             f"Unknown fragment_type {fragment_type!r}. "
             f"Expected one of {FRAGMENT_TYPES}."
         )
-    fragment_path = os.path.join(FRAGMENTS_DIR, dataset, fragment_type, f"{pdb_code}.sdf")
+    fragment_path = os.path.join(
+        FRAGMENTS_DIR, dataset, fragment_type, f"{pdb_code}.sdf"
+    )
     if not os.path.exists(fragment_path):
-        raise FileNotFoundError(
-            f"Fragment file not found: {fragment_path}."
-        )
+        raise FileNotFoundError(f"Fragment file not found: {fragment_path}.")
     supplier = Chem.SDMolSupplier(fragment_path, removeHs=False, sanitize=False)
     fragment = supplier[0]
     if fragment is None:
@@ -150,7 +147,7 @@ def generate(args: argparse.Namespace) -> None:
     pt_files = [
         f
         for f in os.listdir(checkpoints_dir)
-        if f.endswith(".ckpt") and f.startswith("best-val-loss")
+        if f.endswith(".ckpt") and f.startswith("periodic-epoch")
     ]
     if not pt_files:
         raise FileNotFoundError(f"No .ckpt files found in {checkpoints_dir}")
@@ -160,23 +157,19 @@ def generate(args: argparse.Namespace) -> None:
 
     MODEL = NEAT
     model = MODEL.load_from_checkpoint(checkpoints_path, map_location=DEVICE)
-    
+
     # Load bond predictor if available
     bond_predictor_dir = params.get("bond_predictor_dir", None)
-    
     if bond_predictor_dir is not None:
         bond_predictor_dir = os.path.join(ROOT, bond_predictor_dir, "checkpoints")
-        pt_files = [
-            f
-            for f in os.listdir(bond_predictor_dir)
-            if f.endswith(".ckpt")
-        ]
+        pt_files = [f for f in os.listdir(bond_predictor_dir) if f.endswith(".ckpt")]
         if not pt_files:
             raise FileNotFoundError(f"No .ckpt files found in {bond_predictor_dir}")
-
         bond_predictor_path = os.path.join(bond_predictor_dir, pt_files[0])
         print(f"Using checkpoint file: {bond_predictor_path}")
-        bond_predictor = BondPredictor.load_from_checkpoint(bond_predictor_path, map_location=DEVICE)
+        bond_predictor = BondPredictor.load_from_checkpoint(
+            bond_predictor_path, map_location=DEVICE
+        )
     else:
         bond_predictor = None
 
@@ -227,7 +220,9 @@ def generate(args: argparse.Namespace) -> None:
             if in_pdb_file.endswith(".cif"):
                 pocket_center = cif_2_pdb(in_pdb_file, out_pdb_file, return_center=True)
             elif in_pdb_file.endswith(".pdb"):
-                pocket_center = center_pdb(in_pdb_file, out_pdb_file, return_center=True)
+                pocket_center = center_pdb(
+                    in_pdb_file, out_pdb_file, return_center=True
+                )
             else:
                 raise ValueError(f"Unsupported pocket file format: {in_pdb_file}")
 
@@ -264,9 +259,7 @@ def generate(args: argparse.Namespace) -> None:
 
         fragment_info = None
         if fragment_type is not None:
-            fragment_info = prepare_fragment_info(
-                fragment_list, num_molecules
-            )
+            fragment_info = prepare_fragment_info(fragment_list, num_molecules)
 
         # Collate pocket features for the pockets kept in this chunk.
         data_point_list = [test_data[i] for i in included_data_indices]
@@ -276,7 +269,7 @@ def generate(args: argparse.Namespace) -> None:
         pocket_start_time = datetime.now()
         with torch.no_grad():
             model.eval()
-            cfg_factor = params.get("cfg_factor", 0.)
+            cfg_factor = params.get("cfg_factor", 0.0)
             generated_mols = model.generate(
                 batch_size=pocket_info["pocket_batch"].max().item() + 1,
                 max_atoms=params["max_atoms"],
@@ -286,6 +279,7 @@ def generate(args: argparse.Namespace) -> None:
                 pocket_info=pocket_info,
                 fragment_info=fragment_info,
                 cfg_factor=cfg_factor,
+                device=DEVICE,
             )
 
         # Split the chunk batch back into per-pocket tensors and save.
@@ -327,9 +321,11 @@ def generate(args: argparse.Namespace) -> None:
                     generated_mols_subset.x,
                     generated_mols_subset.pos,
                     generated_mols_subset.batch,
-                    progress_bar=True
+                    progress_bar=True,
                 )
-            save_molecules_to_sdf(rdkit_mols, os.path.join(out_dir, "generated_mols.sdf"))
+            save_molecules_to_sdf(
+                rdkit_mols, os.path.join(out_dir, "generated_mols.sdf")
+            )
 
         seed_end_time = datetime.now()
         print(

@@ -4,16 +4,16 @@ import copy
 import logging
 import os
 import random
-import tarfile
 import subprocess
+import tarfile
 from pathlib import Path
 
+import biotite.structure.io.pdbx as pdbx
 import networkx as nx
 import numpy as np
 import openbabel
 import torch
 from Bio.PDB import PDBParser
-import biotite.structure.io.pdbx as pdbx
 from Bio.PDB.Polypeptide import is_aa
 from dask.distributed import Client, LocalCluster, as_completed
 from rdkit import Chem, RDLogger
@@ -21,22 +21,16 @@ from rdkit.Chem import AllChem
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
 
-from .dataset_crossdocked import (
-    ATOM_VOCABULARY, 
-    AA_VOCABULARY, 
-    _largest_fragment,
-    _ligand_features,
-    _ligand_edges,
-    )
+from .dataset_crossdocked import (AA_VOCABULARY, ATOM_VOCABULARY,
+                                  _largest_fragment, _ligand_edges,
+                                  _ligand_features)
 
 RDLogger.DisableLog("rdApp.*")
 
 SEED = 0
 
 
-def _process_pair(
-    pocket_path: Path, ligand_path: Path, split_name: str
-) -> Data | None:
+def _process_pair(pocket_path: Path, ligand_path: Path, split_name: str) -> Data | None:
 
     logger = logging.getLogger(__name__)
 
@@ -95,11 +89,20 @@ def _process_pair(
     file = pdbx.CIFFile.read(str(pocket_path))
     cif_model = pdbx.get_structure(file, model=1)
     pt = Chem.GetPeriodicTable()
-    pocket_x = torch.tensor([ATOM_VOCABULARY.get(pt.GetAtomicNumber(element)) for element in cif_model.element], dtype=torch.long)
+    pocket_x = torch.tensor(
+        [
+            ATOM_VOCABULARY.get(pt.GetAtomicNumber(element))
+            for element in cif_model.element
+        ],
+        dtype=torch.long,
+    )
     pocket_pos = torch.tensor(cif_model.coord)
     pocket_residue_id = torch.tensor(cif_model.res_id, dtype=torch.long)
     _, pocket_residue_id = torch.unique(pocket_residue_id, return_inverse=True)
-    pocket_residue_type = torch.tensor([AA_VOCABULARY.get(residue_type, 0) for residue_type in cif_model.res_name], dtype=torch.long)
+    pocket_residue_type = torch.tensor(
+        [AA_VOCABULARY.get(residue_type, 0) for residue_type in cif_model.res_name],
+        dtype=torch.long,
+    )
 
     if (
         pocket_x is None
@@ -179,26 +182,27 @@ class SpindrDataSet(InMemoryDataset):
         file_name = "spindr.tar.gz"
         output_path = os.path.join(target_dir, file_name)
         command = ["wget", "-O", output_path, self.SPINDR_ZENODO]
-        
+
         if not os.path.exists(Path(target_dir) / "raw" / "train"):
             try:
                 print(f"Downloading file to {output_path}...")
                 subprocess.run(command, check=True)
                 print("Download completed successfully! Starting extracting...")
-                
+
                 with tarfile.open(output_path, "r:gz") as tar:
-                    tar.extractall(path=self.root, filter='data')
-                    
+                    tar.extractall(path=self.root, filter="data")
+
                 print("Extraction completed successfully!")
-                
+
             except subprocess.CalledProcessError as e:
                 print(f"Error occurred during download: {e}")
             except FileNotFoundError:
                 print(f"Error: 'wget' is not installed or not in your system's PATH.")
-                
-        else:
-            print(f"Raw directory already exists at {Path(target_dir) / 'raw'}. Skipping download and extraction.")
 
+        else:
+            print(
+                f"Raw directory already exists at {Path(target_dir) / 'raw'}. Skipping download and extraction."
+            )
 
     @property
     def raw_file_names(self):
@@ -233,7 +237,9 @@ class SpindrDataSet(InMemoryDataset):
         # Load and process data
         for i, split_name in enumerate(self.raw_file_names):
             raw_split_path = raw_folder / split_name
-            complex_names = list({file.stem for file in raw_split_path.iterdir() if file.is_file()})
+            complex_names = list(
+                {file.stem for file in raw_split_path.iterdir() if file.is_file()}
+            )
             pairs = [(f"{name}.cif", f"{name}.sdf") for name in complex_names]
             self.logger.info(
                 f"Processing {split_name} split with {len(pairs)} pairs..."
@@ -364,9 +370,13 @@ class SpindrDataSet(InMemoryDataset):
         return pdb_code
 
     def get_pocket_path_from_data_point(self, data_point):
-        cif_file = os.path.join(self.root, "raw", data_point.split, data_point.name + ".cif")
+        cif_file = os.path.join(
+            self.root, "raw", data_point.split, data_point.name + ".cif"
+        )
         return cif_file
 
     def get_ligand_path_from_data_point(self, data_point):
-        sdf_file = os.path.join(self.root, "raw", data_point.split, data_point.name + ".sdf")
+        sdf_file = os.path.join(
+            self.root, "raw", data_point.split, data_point.name + ".sdf"
+        )
         return sdf_file

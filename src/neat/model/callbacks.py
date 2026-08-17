@@ -1,13 +1,13 @@
 from tempfile import NamedTemporaryFile
 
+import numpy as np
 import torch
 from lightning import Callback, LightningModule, Trainer
 from rdkit import Chem
-import numpy as np
 
-from neat.utils.sbdd_metrics import ClashEvaluator
 from neat.model.molecule_builder import MoleculeBuilder
 from neat.utils import center_pdb, cif_2_pdb
+from neat.utils.sbdd_metrics import ClashEvaluator
 
 
 class GenerationMonitor(Callback):
@@ -114,7 +114,10 @@ class GenerationMonitor(Callback):
         builder = MoleculeBuilder(vocab=str(pl_module.hparams.data_set).upper())
         if self.bond_predictor_path is not None:
             mols = builder.generate_rdkit_molecules_via_bond_predictor(
-                generated_mols.x, generated_mols.pos, generated_mols.batch, self.bond_predictor_path
+                generated_mols.x,
+                generated_mols.pos,
+                generated_mols.batch,
+                self.bond_predictor_path,
             )
         else:
             mols = builder.generate_rdkit_molecules_via_xyz2mol(
@@ -139,7 +142,10 @@ class GenerationMonitor(Callback):
             on_step=False,
             on_epoch=True,
         )
-        if str(self.dataset).upper() == "CROSSDOCKED" or str(self.dataset).upper() == "SPINDR":
+        if (
+            str(self.dataset).upper() == "CROSSDOCKED"
+            or str(self.dataset).upper() == "SPINDR"
+        ):
             clash_scores_mean = []
             clash_scores_sum = []
             for i, pocket_path in enumerate(pocket_paths):
@@ -152,7 +158,7 @@ class GenerationMonitor(Callback):
                             cif_2_pdb(pocket_path, temp_file.name)
                         else:
                             raise ValueError(f"Unknown dataset: {self.dataset}")
-                        
+
                         mols_for_pocket = mols[
                             i * mols_per_pocket : (i + 1) * mols_per_pocket
                         ]

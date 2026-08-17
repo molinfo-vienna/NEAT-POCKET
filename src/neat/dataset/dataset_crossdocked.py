@@ -151,7 +151,9 @@ def _add_hydrogens_with_openbabel(mol: Chem.Mol) -> Chem.Mol:
         return None
 
 
-def _ligand_features(mol: Chem.Mol, get_charge: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _ligand_features(
+    mol: Chem.Mol, get_charge: bool
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     logger = logging.getLogger(__name__)
     try:
         n = mol.GetNumAtoms()
@@ -181,6 +183,7 @@ def _ligand_features(mol: Chem.Mol, get_charge: bool) -> tuple[torch.Tensor, tor
         else:
             return None, None
 
+
 # def _ligand_edges(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
 #     logger = logging.getLogger(__name__)
 #     try:
@@ -206,12 +209,13 @@ def _ligand_features(mol: Chem.Mol, get_charge: bool) -> tuple[torch.Tensor, tor
 #         logger.warning(f"Ligand {mol}: cannot get edges: {e}")
 #         return None, None
 
+
 def _ligand_edges(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
     logger = logging.getLogger(__name__)
     try:
         # 1. Create a copy to prevent in-place mutation of the input molecule
         mol_kekule = Chem.Mol(mol)
-        
+
         # 2. Convert aromatic bonds to explicit single/double bonds
         Chem.Kekulize(mol_kekule, clearAromaticFlags=True)
 
@@ -222,10 +226,10 @@ def _ligand_edges(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
         for bond in mol_kekule.GetBonds():
             i = bond.GetBeginAtomIdx()
             j = bond.GetEndAtomIdx()
-            
+
             edge_index.append((i, j))
             edge_index.append((j, i))
-            
+
             bt = RDKIT_BOND_TO_ID.get(bond.GetBondType(), 0)
             edge_labels.append(bt)
             edge_labels.append(bt)
@@ -238,7 +242,7 @@ def _ligand_edges(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
 
         edge_index_t = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
         edge_labels_t = torch.tensor(edge_labels, dtype=torch.long)
-        
+
         return edge_index_t, edge_labels_t
 
     except Exception as e:

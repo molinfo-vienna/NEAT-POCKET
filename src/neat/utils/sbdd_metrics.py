@@ -5,9 +5,10 @@ https://github.com/LPDI-EPFL/DrugFlow/blob/ed6841677ccf3590000624baa757b61ce0bb2
 
 import subprocess
 from tempfile import NamedTemporaryFile
-import numpy as np
 
+import numpy as np
 from rdkit import Chem
+
 from .utils import center_pdb
 
 
@@ -18,7 +19,12 @@ class GninaEvaluator:
         self.gnina = gnina
 
     def evaluate_mols(
-        self, sdf_path, pdb_path=None, ligand_path=None, minimize=False, cnn_scoring=False
+        self,
+        sdf_path,
+        pdb_path=None,
+        ligand_path=None,
+        minimize=False,
+        cnn_scoring=False,
     ) -> dict[str, float]:
         if minimize:
             minimize_flag = "--minimize"
@@ -26,7 +32,6 @@ class GninaEvaluator:
             minimize_flag = "--score_only"
         if not cnn_scoring:
             minimize_flag += " --cnn_scoring none"
-            
 
         # gnina result of the original ligand
         if ligand_path is not None:
@@ -34,17 +39,22 @@ class GninaEvaluator:
             gnina_result = subprocess.run(
                 gnina_cmd, shell=True, capture_output=True, text=True
             )
-            ligand_scores = self.read_gnina_results(gnina_result, cnn_scoring=cnn_scoring)
+            ligand_scores = self.read_gnina_results(
+                gnina_result, cnn_scoring=cnn_scoring
+            )
 
         # gnina results of the generated mols
         gnina_cmd = f"{self.gnina} -r {str(pdb_path)} -l {str(sdf_path)} {minimize_flag} --seed 42 --no_gpu"
         gnina_result = subprocess.run(
             gnina_cmd, shell=True, capture_output=True, text=True
         )
-        generated_mol_scores = self.read_gnina_results(gnina_result, cnn_scoring=cnn_scoring)
+        generated_mol_scores = self.read_gnina_results(
+            gnina_result, cnn_scoring=cnn_scoring
+        )
         if ligand_path is not None:
-            generated_mol_scores["high_affinity"] = (
-                list(np.array(generated_mol_scores["vina_score"]) < ligand_scores["vina_score"][0])
+            generated_mol_scores["high_affinity"] = list(
+                np.array(generated_mol_scores["vina_score"])
+                < ligand_scores["vina_score"][0]
             )
         mean_results = {
             key: np.array(values).mean() if values else 0.0
@@ -54,7 +64,7 @@ class GninaEvaluator:
         return mean_results
 
     @staticmethod
-    def read_gnina_results(gnina_result, cnn_scoring= False):
+    def read_gnina_results(gnina_result, cnn_scoring=False):
 
         if cnn_scoring:
             metrics = {
@@ -62,14 +72,12 @@ class GninaEvaluator:
                 "gnina_score": [],
                 "cnn_score": [],
                 "minimisation_rmsd": [],
-
             }
         else:
             metrics = {
                 "vina_score": [],
-
             }
-        
+
         if gnina_result.returncode != 0:
             print(gnina_result.stderr)
             return metrics

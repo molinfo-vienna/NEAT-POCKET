@@ -9,8 +9,8 @@ Creates one folder per test pocket with the same layout as generation_conditiona
 
 import logging
 import os
-import torch
 
+import torch
 from rdkit import Chem
 from torch_geometric.data import Batch
 
@@ -27,16 +27,18 @@ MODEL2 = "drugflow"
 MODEL3 = "pocket2mol"
 MODEL4 = "targetdiff"
 
+
 def setup_looger(name, filename, level=logging.INFO):
     if os.path.exists(filename):
         os.remove(filename)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     handler = logging.FileHandler(filename)
     handler.setFormatter(formatter)
     logger = logging.getLogger(name)
     logger.addHandler(handler)
     logger.setLevel(level)
     return logger
+
 
 mapping = {
     1: 1,
@@ -57,7 +59,9 @@ mapping = {
     83: 16,
 }
 
-split = torch.load(os.path.join(os.getcwd(), "data", "CROSSDOCKED", "raw", "split_by_name.pt"))
+split = torch.load(
+    os.path.join(os.getcwd(), "data", "CROSSDOCKED", "raw", "split_by_name.pt")
+)
 pocket_name_id_mapping = {}
 for i, (pocket_name, ligand_name) in enumerate(split["test"]):
     pocket_name = ligand_name.split("/")[1].split(".")[0]
@@ -68,7 +72,9 @@ for MODEL in [MODEL1, MODEL2, MODEL3, MODEL4]:
 
     os.makedirs(os.path.join(OUT_DIR, MODEL, "conditional"), exist_ok=True)
 
-    logging_filename = os.path.join(OUT_DIR, MODEL, "conditional", "export_benchmark_data.log")
+    logging_filename = os.path.join(
+        OUT_DIR, MODEL, "conditional", "export_benchmark_data.log"
+    )
     logger = setup_looger(MODEL, logging_filename)
     logger.info(f"Exporting {MODEL} benchmark data...")
 
@@ -96,7 +102,7 @@ for MODEL in [MODEL1, MODEL2, MODEL3, MODEL4]:
                 generated_mol = Chem.SDMolSupplier(generated_mol_file)[0]
                 generated_mol = _add_hydrogens(generated_mol)
                 generated_mols.append(generated_mol)
-        
+
         # Make the output directory
         pocket_id = pocket_name_id_mapping[pocket_dir]
         output_dir = os.path.join(OUT_DIR, MODEL, "conditional", f"pocket_{pocket_id}")
@@ -104,14 +110,19 @@ for MODEL in [MODEL1, MODEL2, MODEL3, MODEL4]:
 
         # Copy the pocket file to the output directory and rename it to pocket.pdb
         os.system(f"cp {pocket_file} {output_dir}")
-        os.rename(os.path.join(output_dir, "0_pocket.pdb"), os.path.join(output_dir, "pocket.pdb"))
+        os.rename(
+            os.path.join(output_dir, "0_pocket.pdb"),
+            os.path.join(output_dir, "pocket.pdb"),
+        )
 
         # Save the generated molecules as an SDF file
         writer = Chem.SDWriter(os.path.join(output_dir, "generated_mols.sdf"))
         for mol in generated_mols:
             if mol is not None:
                 # Set aromaticity flags; careful: SanitizeMol is in place
-                Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_SETAROMATICITY)
+                Chem.SanitizeMol(
+                    mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_SETAROMATICITY
+                )
                 if mol is None:
                     num_failed_ligands_hydrogenating += 1
                     continue
@@ -122,7 +133,9 @@ for MODEL in [MODEL1, MODEL2, MODEL3, MODEL4]:
         writer.close()
 
         # Copy the correct reference ligand to the output directory
-        reference_ligand_file = os.path.join(reference_ligands_folder, f"pocket_{pocket_id}", f"ligand.sdf")
+        reference_ligand_file = os.path.join(
+            reference_ligands_folder, f"pocket_{pocket_id}", f"ligand.sdf"
+        )
         os.system(f"cp {reference_ligand_file} {output_dir}")
 
         # Convert the generated molecules to a NEAT Batch object and save generated molecules as a pt file
@@ -133,7 +146,12 @@ for MODEL in [MODEL1, MODEL2, MODEL3, MODEL4]:
             if mol is None:
                 continue
             conformer = mol.GetConformer()
-            x.append(torch.tensor([mapping[atom.GetAtomicNum()] for atom in mol.GetAtoms()], dtype=torch.long))
+            x.append(
+                torch.tensor(
+                    [mapping[atom.GetAtomicNum()] for atom in mol.GetAtoms()],
+                    dtype=torch.long,
+                )
+            )
             sub_pos = []
             for atom in mol.GetAtoms():
                 coords = conformer.GetAtomPosition(atom.GetIdx())
@@ -148,6 +166,12 @@ for MODEL in [MODEL1, MODEL2, MODEL3, MODEL4]:
         torch.save(generated_mols, os.path.join(output_dir, "generated_mols.pt"))
 
     logger.info(f"{num_total_ligands} ligands found across all pockets.")
-    logger.info(f"{num_failed_ligands_reading} ligands failed to load across all pockets.")
-    logger.info(f"{num_failed_ligands_hydrogenating} ligands failed to hydrogenate across all pockets.")
-    logger.info(f"{num_total_ligands - num_failed_ligands_reading - num_failed_ligands_hydrogenating} ligands successfully loaded across all pockets.")
+    logger.info(
+        f"{num_failed_ligands_reading} ligands failed to load across all pockets."
+    )
+    logger.info(
+        f"{num_failed_ligands_hydrogenating} ligands failed to hydrogenate across all pockets."
+    )
+    logger.info(
+        f"{num_total_ligands - num_failed_ligands_reading - num_failed_ligands_hydrogenating} ligands successfully loaded across all pockets."
+    )

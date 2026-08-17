@@ -12,12 +12,11 @@ from torch_geometric.transforms import Distance
 from torch_geometric.utils import coalesce
 
 from .augmentation import RandomRotationAugmentation
+from .dataset_crossdocked import CrossDockedDataSet
 from .dataset_geom import GEOMDataSet
 from .dataset_qm9 import QM9DataSet
-from .dataset_crossdocked import CrossDockedDataSet
 from .dataset_spindr import SpindrDataSet
 from .splitting import SourceTargetSplitter
-
 
 
 def bond_prediction_batch_transform(
@@ -34,9 +33,9 @@ def bond_prediction_batch_transform(
     # (1) Compute radius edges
     rad_edge_index = radius_graph(batch.pos, r=radius, batch=batch.batch, loop=False)
     rad_edge_labels = torch.zeros(
-        rad_edge_index.size(1), 
-        device=batch.edge_labels.device, 
-        dtype=batch.edge_labels.dtype
+        rad_edge_index.size(1),
+        device=batch.edge_labels.device,
+        dtype=batch.edge_labels.dtype,
     )
 
     # (2) Combine original molecular edges and new radius edges
@@ -45,10 +44,10 @@ def bond_prediction_batch_transform(
 
     # (3) Deduplicate (coalesce) edges, keeping original labels (max reduction)
     new_edge_index, new_edge_labels = coalesce(
-        combined_edge_index, 
-        combined_edge_labels, 
+        combined_edge_index,
+        combined_edge_labels,
         num_nodes=batch.num_nodes,
-        reduce="max"
+        reduce="max",
     )
 
     batch.edge_index = new_edge_index
@@ -281,9 +280,7 @@ class DataModule(LightningDataModule):
                 noise_std=self.flow_matching_noise_std,
                 source_set_perturbation=self.source_set_perturbation_std,
                 perturbation_factor=self.source_set_perturbation_fraction,
-                follow_batch=(
-                    ["pocket_pos"] if follow_pocket_batch else None
-                ),
+                follow_batch=(["pocket_pos"] if follow_pocket_batch else None),
             )
 
         elif self.task == "bond_prediction":
@@ -328,7 +325,7 @@ class DataModule(LightningDataModule):
                 print(f"Number of training graphs: {len(self.training_data)}")
                 print(f"Number of validation graphs: {len(self.validation_data)}")
                 print(f"Number of test graphs: {len(self.test_data)}")
-                
+
             elif str(self.data_set).upper() == "SPINDR":
                 print("Using Spindr dataset.")
                 self.training_data = SpindrDataSet(self.data_path, split="train")

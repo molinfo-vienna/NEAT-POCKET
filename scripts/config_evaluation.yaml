@@ -1,13 +1,13 @@
-data_path: output/version_129_cfg05_null
+data_path: output/version_134_cfg05_null
 data_subdir: conditional
 data_set: SPINDR
 num_workers: 4
 compute_drugflow_clashes: true
 compute_edm: true
 compute_novelty: true
-compute_posebusters: false
+compute_posebusters: true
 compute_posecheck: true
-compute_strain: false
+compute_strain: true
 compute_physchem: true
 compute_vina: true
 add_hydrogens: false

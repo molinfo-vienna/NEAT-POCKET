@@ -13,6 +13,7 @@ RDLogger.DisableLog("rdApp.*")
 ROOT = os.getcwd()
 PREFIXES_DIR = os.path.join(ROOT, "prefixes")
 
+
 def get_ring_system_components(mol: Chem.Mol) -> list[set[int]]:
     """Find sets of atoms constituting ring systems.
 

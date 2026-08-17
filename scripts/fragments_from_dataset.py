@@ -1,14 +1,14 @@
-"""Precompute BRICS fragments from CrossDocked test ligands for FBDD generation.
+f"""Precompute BRICS fragments from CrossDocked or SPINDR test ligands for FBDD generation.
 
 For each test pocket:
   1. Center the pocket and shift the reference ligand into that frame.
   2. Break the ligand with BRICS and keep the largest, second-largest,
      and smallest fragments (dummy atoms stripped).
-  3. Write fragments/{fragment_type}/{pdb_code}.sdf.
+  3. Write fragments/DATASET/FRAGMENT_TYPE/PDB_CODE.sdf.
 
 Also writes:
-  - fragments/fragment_statistics.png
-  - fragments/fragments_from_crossdocked.log
+  - fragments/DATASET/fragment_statistics.png
+  - fragments/DATASET/fragments_logs.log
 
 Run this before generation_conditional.py when fragment_type is set.
 """
@@ -83,9 +83,7 @@ def plot_fragment_statistics(
             [mol.GetNumHeavyAtoms() for mol in ligand_list], dtype=float
         )
         counts_by_type[fragment_type] = frag_atom_counts
-        relative_by_type[fragment_type] = frag_atom_counts / (
-            ligand_atom_counts + 1e-9
-        )
+        relative_by_type[fragment_type] = frag_atom_counts / (ligand_atom_counts + 1e-9)
         global_max_atoms = max(global_max_atoms, int(np.max(frag_atom_counts)))
 
     abs_bins = np.arange(0, global_max_atoms + 2)
@@ -134,9 +132,7 @@ def plot_fragment_statistics(
             color=color,
             rwidth=0.8,
         )
-        ax_rel.axvline(
-            relative_sizes.mean(), color=color, linestyle="--", linewidth=3
-        )
+        ax_rel.axvline(relative_sizes.mean(), color=color, linestyle="--", linewidth=3)
         ax_rel.set_xlim(0.0, 1.0)
         ax_rel.set_xlabel("Relative size (fraction of ligand heavy atoms)")
         ax_rel.set_ylabel("Frequency")
@@ -187,7 +183,7 @@ def get_fragments_with_brics(mol: Chem.Mol) -> dict[str, Chem.Mol]:
     # No cleavable BRICS bond: treat the whole ligand as every rank.
     if not fragments or len(fragments) <= 1:
         print("No fragments found; returning the full molecule for all ranks.")
-        #return {fragment_type: mol for fragment_type in FRAGMENT_TYPES}
+        # return {fragment_type: mol for fragment_type in FRAGMENT_TYPES}
         return None
 
     clean_frags = [
@@ -214,11 +210,10 @@ def write_fragment(fragment: Chem.Mol, out_sdf_file: str) -> None:
 
 
 def extract_fragments(dataset: str) -> None:
-    """Extract and save BRICS fragments from the CrossDocked test set.
+    """Extract and save BRICS fragments from the CrossDocked or SPINDR test set.
 
     Args:
-        args: Optional config_file (uses data_set from the conditional
-            generation config by default).
+        dataset: Dataset name (CrossDocked or SPINDR).
     """
     # --- Data ---
 
@@ -240,7 +235,7 @@ def extract_fragments(dataset: str) -> None:
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[
             logging.FileHandler(
-                os.path.join(fragments_dir, "fragments_from_crossdocked.log"),
+                os.path.join(fragments_dir, f"fragments_logs.log"),
                 mode="w",
             ),
             logging.StreamHandler(),
@@ -260,7 +255,7 @@ def extract_fragments(dataset: str) -> None:
         pdb_code = test_data.get_pdb_code_from_data_point(test_data[data_idx])
         in_pdb_file = test_data.get_pocket_path_from_data_point(test_data[data_idx])
         out_pdb_file = os.path.join(tmp_dir, f"{pdb_code}_pocket.pdb")
-        
+
         if in_pdb_file.endswith(".cif"):
             pocket_center = cif_2_pdb(in_pdb_file, out_pdb_file, return_center=True)
         elif in_pdb_file.endswith(".pdb"):
@@ -287,9 +282,7 @@ def extract_fragments(dataset: str) -> None:
             logging.warning(f"No fragments found for {pdb_code}; skipping.")
             continue
         for fragment_type in FRAGMENT_TYPES:
-            out_sdf_file = os.path.join(
-                fragments_dir, fragment_type, f"{pdb_code}.sdf"
-            )
+            out_sdf_file = os.path.join(fragments_dir, fragment_type, f"{pdb_code}.sdf")
             try:
                 write_fragment(fragments[fragment_type], out_sdf_file)
             except Exception as e:
@@ -325,7 +318,7 @@ def extract_fragments(dataset: str) -> None:
         plot_fragment_statistics(
             fragments_by_type,
             ligands_by_type,
-            os.path.join(fragments_dir, "fragment_statistics.png"),
+            os.path.join(fragments_dir, f"fragment_statistics.png"),
         )
     else:
         logging.warning("No fragments were written; skipping statistics plot.")
@@ -335,7 +328,12 @@ def extract_fragments(dataset: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="SPINDR", type=str, help="Dataset name (default: SPINDR)")
+    parser.add_argument(
+        "--dataset",
+        default="SPINDR",
+        type=str,
+        help="Dataset name (CrossDocked or SPINDR). Default: SPINDR.",
+    )
     args = parser.parse_args()
 
     start_time = datetime.now()

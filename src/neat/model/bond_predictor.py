@@ -4,6 +4,7 @@ import math
 
 import torch
 import torch.nn as nn
+from e3nn.nn.models.v2103.gate_points_networks import SimpleNetwork
 from lightning import LightningModule
 from torch import Tensor
 from torch.nn import functional as F
@@ -11,7 +12,6 @@ from torch.optim import AdamW
 from torch_geometric.data import Data
 from torch_geometric.nn import GINEConv, radius_graph
 from torch_geometric.transforms import Distance
-from e3nn.nn.models.v2103.gate_points_networks import SimpleNetwork
 
 # Bond types: 0=no bond, 1=single, 2=double, 3=triple, 4=aromatic
 NUM_BOND_TYPES = 4
@@ -60,7 +60,6 @@ class BondPredictor(LightningModule):
             nn.Linear(n_embd, NUM_BOND_TYPES),
         )
 
-
     def _get_edge_attr(self, data: Data) -> Tensor:
         """Get edge attributes (distances). Compute from pos if not in data."""
         edge_attr = getattr(data, "edge_attr", None)
@@ -101,7 +100,6 @@ class BondPredictor(LightningModule):
         bond_logits = self.bond_mlp(edge_features)
 
         return bond_logits
-    
 
     @torch.no_grad()
     def predict_bonds(
@@ -133,19 +131,18 @@ class BondPredictor(LightningModule):
 
         logits = self(data)
         bond_probs = F.softmax(logits, dim=-1)
-        no_bonds_mask = (bond_probs[:, 0] > 0.99)
+        no_bonds_mask = bond_probs[:, 0] > 0.99
         bond_probs = bond_probs[~no_bonds_mask]
         pair_indices = data.edge_index.t()
         pair_indices = pair_indices[~no_bonds_mask]
 
         return bond_probs, pair_indices
 
-
     def training_step(self, batch: Data, batch_idx: int) -> Tensor:
         bond_logits = self(batch)
         loss = F.cross_entropy(bond_logits, batch.edge_labels.long(), reduction="mean")
         self.log("train/loss", loss, prog_bar=True, on_step=True)
-        
+
         return loss
 
     def validation_step(self, batch: Data, batch_idx: int) -> Tensor:
@@ -155,7 +152,7 @@ class BondPredictor(LightningModule):
         pred_bonds = bond_logits.argmax(dim=1)
         acc_bonds = (pred_bonds == batch.edge_labels).float().mean()
         self.log("val/acc_bonds", acc_bonds, prog_bar=True)
-        
+
         return loss
 
     def configure_optimizers(self):

@@ -16,7 +16,7 @@ plt.rcParams["font.size"] = 18
 
 ROOT = Path(os.getcwd())
 FPSCORES_PATH = ROOT / "scripts" / "data_analysis" / "fpscores.pkl.gz"
-OUTPUT_PATH = ROOT / "output" / "data_analysis"
+OUTPUT_PATH = ROOT / "output" / "data_analysis_spindr"
 
 if not OUTPUT_PATH.exists():
     OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
@@ -30,29 +30,25 @@ logging.info("Starting data analysis...\n")
 
 palette = sns.color_palette("rocket")
 COLOR_SCHEME = {
-    "Pocket2Mol": palette[0],
-    "TargetDiff": palette[1],
-    "DiffSBDD": palette[2],
-    "DrugFlow": palette[4],
+    "FLOWR": palette[2],
     "NEAT": palette[5],
-}  # we skip 3 because it's too similar to 2 and 4
+}
 
 METHODS = list(COLOR_SCHEME.keys())
 COLORS = list(COLOR_SCHEME.values())
 
 
 def bar_relative_by_method(ax, values, methods=None, colors=None):
-    """Bar plot of deviations from CrossDocked (baseline at y=0)."""
+    """Bar plot of deviations from SPINDR (baseline at y=0)."""
     methods = METHODS if methods is None else methods
     colors = COLORS if colors is None else colors
     for method, value, color in zip(methods, values, colors):
         ax.bar(method, value, color=color, label=method)
     ax.tick_params(axis="x", labelrotation=45)
     ax.axhline(0, color="black", linewidth=1, linestyle="-")
-    # Keep y=0 centered so the baseline is aligned across subplots.
-    max_abs = max((abs(v) for v in values), default=0.0) or 1.0
-    limit = max_abs * 1.05
-    ax.set_ylim(-limit, limit)
+    max_abs = max(abs(v) for v in values) if values else 0.0
+    if max_abs > 0:
+        ax.set_ylim(-max_abs - (0.05 * max_abs), max_abs + (0.05 * max_abs))
 
 
 def bar_absolute_by_method(ax, values, methods=None, colors=None):
@@ -341,11 +337,11 @@ def js_divergence(reference, samples, bin_edges):
 
 def get_mols(path):
     mols = []
-    if "crossdocked" in str(path):
-        # Special loading for CrossDocked data
-        mols_file = os.path.join(path, "ligands_rdkit_default.sdf")
+    if "spindr" in str(path):
+        # Special loading for SPINDR data
+        mols_file = os.path.join(path, "ligands.sdf")
         supplier = SDMolSupplier(mols_file, removeHs=False, sanitize=True)
-        mols.extend([mol for mol in supplier])
+        mols.extend([mol for mol in supplier if mol is not None])
     else:
         # Normal loading for other data
         for dir in os.listdir(path):
@@ -356,15 +352,7 @@ def get_mols(path):
                     logging.warning(f"No generated mols file found for {path}/{dir}")
                     continue
                 supplier = SDMolSupplier(mols_file, removeHs=False, sanitize=True)
-                mols.extend([mol for mol in supplier])
-        if (
-            "diffsbdd" in str(path)
-            or "drugflow" in str(path)
-            or "pocket2mol" in str(path)
-            or "targetdiff" in str(path)
-        ):
-            # Add hydrogens with the RDKit default AddHs method
-            mols = [Chem.AddHs(mol, addCoords=True) for mol in mols if mol is not None]
+                mols.extend([mol for mol in supplier if mol is not None])
     return mols
 
 
@@ -394,7 +382,7 @@ def grouped_bar_by_method(
 
 
 def grouped_bar_deviation_by_method(ax, categories, fractions_by_method):
-    """Grouped bar plot of deviations from CrossDocked (baseline at y=0)."""
+    """Grouped bar plot of deviations from SPINDR (baseline at y=0)."""
     grouped_bar_by_method(
         ax,
         categories,
@@ -406,7 +394,7 @@ def grouped_bar_deviation_by_method(ax, categories, fractions_by_method):
 
 
 def ranks_by_closeness(abs_devs_by_method):
-    """Rank methods by absolute deviation from CrossDocked (1 = closest)."""
+    """Rank methods by absolute deviation from SPINDR (1 = closest)."""
     abs_devs = np.array([abs_devs_by_method[m] for m in METHODS])
     order = np.argsort(abs_devs, kind="mergesort")
     return {METHODS[idx]: rank for rank, idx in enumerate(order, start=1)}
@@ -426,29 +414,17 @@ def main() -> None:
 
     ### Load data ###
 
-    crossdocked_path = ROOT / "output" / "crossdocked_all_ligands"
-    mols_crossdocked = get_mols(crossdocked_path)
+    spindr_path = ROOT / "output" / "spindr_all_ligands"
+    mols_spindr = get_mols(spindr_path)
 
-    pocket2mol_path = ROOT / "output" / "pocket2mol" / "conditional"
-    mols_pocket2mol = get_mols(pocket2mol_path)
+    flowr_path = ROOT / "output" / "flowr_sample_from_train_dist" / "conditional"
+    mols_flowr = get_mols(flowr_path)
 
-    targetdiff_path = ROOT / "output" / "targetdiff" / "conditional"
-    mols_targetdiff = get_mols(targetdiff_path)
-
-    diffsbdd_path = ROOT / "output" / "diffsbdd" / "conditional"
-    mols_diffsbdd = get_mols(diffsbdd_path)
-
-    drugflow_path = ROOT / "output" / "drugflow" / "conditional"
-    mols_drugflow = get_mols(drugflow_path)
-
-    neat_path = ROOT / "output" / "version_126_cfg05_greedy" / "conditional"
+    neat_path = ROOT / "output" / "version_134_cfg05_null" / "conditional"
     mols_neat = get_mols(neat_path)
 
-    logging.info(f"CrossDocked: {len(mols_crossdocked)} molecules")
-    logging.info(f"Pocket2Mol: {len(mols_pocket2mol)} molecules")
-    logging.info(f"TargetDiff: {len(mols_targetdiff)} molecules")
-    logging.info(f"DiffSBDD: {len(mols_diffsbdd)} molecules")
-    logging.info(f"DrugFlow: {len(mols_drugflow)} molecules")
+    logging.info(f"SPINDR: {len(mols_spindr)} molecules")
+    logging.info(f"FLOWR: {len(mols_flowr)} molecules")
     logging.info(f"NEAT: {len(mols_neat)} molecules")
 
     ### Read fragment scores ###
@@ -457,70 +433,27 @@ def main() -> None:
 
     ### Compute statistics ###
 
-    fragment_scores_crossdocked = compute_property_list(
-        mols_crossdocked,
-        "CrossDocked",
+    fragment_scores_spindr = compute_property_list(
+        mols_spindr,
+        "SPINDR",
         "fragment score",
         lambda mol: compute_fragment_score(mol, fpscores),
     )
-    general_stats_crossdocked = compute_property_lists(
-        mols_crossdocked, "CrossDocked", GENERAL_STAT_FUNCS
+    general_stats_spindr = compute_property_lists(
+        mols_spindr, "SPINDR", GENERAL_STAT_FUNCS
     )
-    ring_stats_crossdocked = compute_property_lists(
-        mols_crossdocked, "CrossDocked", RING_STAT_FUNCS
-    )
+    ring_stats_spindr = compute_property_lists(mols_spindr, "SPINDR", RING_STAT_FUNCS)
 
-    fragment_scores_pocket2mol = compute_property_list(
-        mols_pocket2mol,
-        "Pocket2Mol",
+    fragment_scores_flowr = compute_property_list(
+        mols_flowr,
+        "FLOWR",
         "fragment score",
         lambda mol: compute_fragment_score(mol, fpscores),
     )
-    general_stats_pocket2mol = compute_property_lists(
-        mols_pocket2mol, "Pocket2Mol", GENERAL_STAT_FUNCS
+    general_stats_flowr = compute_property_lists(
+        mols_flowr, "FLOWR", GENERAL_STAT_FUNCS
     )
-    ring_stats_pocket2mol = compute_property_lists(
-        mols_pocket2mol, "Pocket2Mol", RING_STAT_FUNCS
-    )
-
-    fragment_scores_targetdiff = compute_property_list(
-        mols_targetdiff,
-        "TargetDiff",
-        "fragment score",
-        lambda mol: compute_fragment_score(mol, fpscores),
-    )
-    general_stats_targetdiff = compute_property_lists(
-        mols_targetdiff, "TargetDiff", GENERAL_STAT_FUNCS
-    )
-    ring_stats_targetdiff = compute_property_lists(
-        mols_targetdiff, "TargetDiff", RING_STAT_FUNCS
-    )
-
-    fragment_scores_diffsbdd = compute_property_list(
-        mols_diffsbdd,
-        "DiffSBDD",
-        "fragment score",
-        lambda mol: compute_fragment_score(mol, fpscores),
-    )
-    general_stats_diffsbdd = compute_property_lists(
-        mols_diffsbdd, "DiffSBDD", GENERAL_STAT_FUNCS
-    )
-    ring_stats_diffsbdd = compute_property_lists(
-        mols_diffsbdd, "DiffSBDD", RING_STAT_FUNCS
-    )
-
-    fragment_scores_drugflow = compute_property_list(
-        mols_drugflow,
-        "DrugFlow",
-        "fragment score",
-        lambda mol: compute_fragment_score(mol, fpscores),
-    )
-    general_stats_drugflow = compute_property_lists(
-        mols_drugflow, "DrugFlow", GENERAL_STAT_FUNCS
-    )
-    ring_stats_drugflow = compute_property_lists(
-        mols_drugflow, "DrugFlow", RING_STAT_FUNCS
-    )
+    ring_stats_flowr = compute_property_lists(mols_flowr, "FLOWR", RING_STAT_FUNCS)
 
     fragment_scores_neat = compute_property_list(
         mols_neat,
@@ -532,28 +465,10 @@ def main() -> None:
     ring_stats_neat = compute_property_lists(mols_neat, "NEAT", RING_STAT_FUNCS)
 
     logging.info("\nOmitted molecule-property pairs:")
-    log_missing_property_counts(
-        "CrossDocked", general_stats_crossdocked, len(mols_crossdocked)
-    )
-    log_missing_property_counts(
-        "CrossDocked", ring_stats_crossdocked, len(mols_crossdocked)
-    )
-    log_missing_property_counts(
-        "Pocket2Mol", general_stats_pocket2mol, len(mols_pocket2mol)
-    )
-    log_missing_property_counts(
-        "Pocket2Mol", ring_stats_pocket2mol, len(mols_pocket2mol)
-    )
-    log_missing_property_counts(
-        "TargetDiff", general_stats_targetdiff, len(mols_targetdiff)
-    )
-    log_missing_property_counts(
-        "TargetDiff", ring_stats_targetdiff, len(mols_targetdiff)
-    )
-    log_missing_property_counts("DiffSBDD", general_stats_diffsbdd, len(mols_diffsbdd))
-    log_missing_property_counts("DiffSBDD", ring_stats_diffsbdd, len(mols_diffsbdd))
-    log_missing_property_counts("DrugFlow", general_stats_drugflow, len(mols_drugflow))
-    log_missing_property_counts("DrugFlow", ring_stats_drugflow, len(mols_drugflow))
+    log_missing_property_counts("SPINDR", general_stats_spindr, len(mols_spindr))
+    log_missing_property_counts("SPINDR", ring_stats_spindr, len(mols_spindr))
+    log_missing_property_counts("FLOWR", general_stats_flowr, len(mols_flowr))
+    log_missing_property_counts("FLOWR", ring_stats_flowr, len(mols_flowr))
     log_missing_property_counts("NEAT", general_stats_neat, len(mols_neat))
     log_missing_property_counts("NEAT", ring_stats_neat, len(mols_neat))
 
@@ -562,35 +477,13 @@ def main() -> None:
     general_stat_names = [name for name, _ in GENERAL_STAT_FUNCS]
     ring_stat_names = [name for name, _ in RING_STAT_FUNCS]
 
-    avg_fragment_scores_crossdocked = mean_or_nan(fragment_scores_crossdocked)
-    avg_general_stats_crossdocked = property_means(
-        general_stats_crossdocked, general_stat_names
-    )
-    avg_ring_stats_crossdocked = property_means(ring_stats_crossdocked, ring_stat_names)
+    avg_fragment_scores_spindr = mean_or_nan(fragment_scores_spindr)
+    avg_general_stats_spindr = property_means(general_stats_spindr, general_stat_names)
+    avg_ring_stats_spindr = property_means(ring_stats_spindr, ring_stat_names)
 
-    avg_fragment_scores_pocket2mol = mean_or_nan(fragment_scores_pocket2mol)
-    avg_general_stats_pocket2mol = property_means(
-        general_stats_pocket2mol, general_stat_names
-    )
-    avg_ring_stats_pocket2mol = property_means(ring_stats_pocket2mol, ring_stat_names)
-
-    avg_fragment_scores_targetdiff = mean_or_nan(fragment_scores_targetdiff)
-    avg_general_stats_targetdiff = property_means(
-        general_stats_targetdiff, general_stat_names
-    )
-    avg_ring_stats_targetdiff = property_means(ring_stats_targetdiff, ring_stat_names)
-
-    avg_fragment_scores_diffsbdd = mean_or_nan(fragment_scores_diffsbdd)
-    avg_general_stats_diffsbdd = property_means(
-        general_stats_diffsbdd, general_stat_names
-    )
-    avg_ring_stats_diffsbdd = property_means(ring_stats_diffsbdd, ring_stat_names)
-
-    avg_fragment_scores_drugflow = mean_or_nan(fragment_scores_drugflow)
-    avg_general_stats_drugflow = property_means(
-        general_stats_drugflow, general_stat_names
-    )
-    avg_ring_stats_drugflow = property_means(ring_stats_drugflow, ring_stat_names)
+    avg_fragment_scores_flowr = mean_or_nan(fragment_scores_flowr)
+    avg_general_stats_flowr = property_means(general_stats_flowr, general_stat_names)
+    avg_ring_stats_flowr = property_means(ring_stats_flowr, ring_stat_names)
 
     avg_fragment_scores_neat = mean_or_nan(fragment_scores_neat)
     avg_general_stats_neat = property_means(general_stats_neat, general_stat_names)
@@ -599,35 +492,23 @@ def main() -> None:
     ### Log average statistics ###
 
     logging.info(f"\nFragment scores (min, mean, max):")
-    logging.info(
-        f"\tCrossDocked: {format_distribution_summary(fragment_scores_crossdocked)}"
-    )
-    logging.info(
-        f"\tPocket2Mol: {format_distribution_summary(fragment_scores_pocket2mol)}"
-    )
-    logging.info(
-        f"\tTargetDiff: {format_distribution_summary(fragment_scores_targetdiff)}"
-    )
-    logging.info(f"\tDiffSBDD: {format_distribution_summary(fragment_scores_diffsbdd)}")
-    logging.info(f"\tDrugFlow: {format_distribution_summary(fragment_scores_drugflow)}")
+    logging.info(f"\tSPINDR: {format_distribution_summary(fragment_scores_spindr)}")
+    logging.info(f"\tFLOWR: {format_distribution_summary(fragment_scores_flowr)}")
     logging.info(f"\tNEAT: {format_distribution_summary(fragment_scores_neat)}")
 
     ### Compute and log Jensen-Shannon divergence of fragment scores ###
 
     fragment_scores_by_method = {
-        "CrossDocked": fragment_scores_crossdocked,
-        "Pocket2Mol": fragment_scores_pocket2mol,
-        "TargetDiff": fragment_scores_targetdiff,
-        "DiffSBDD": fragment_scores_diffsbdd,
-        "DrugFlow": fragment_scores_drugflow,
+        "SPINDR": fragment_scores_spindr,
+        "FLOWR": fragment_scores_flowr,
         "NEAT": fragment_scores_neat,
     }
     fragment_score_js = compute_js_divergence_by_method(
-        fragment_scores_crossdocked, fragment_scores_by_method
+        fragment_scores_spindr, fragment_scores_by_method
     )
 
     logging.info(
-        "\nFragment score Jensen-Shannon divergence from CrossDocked "
+        "\nFragment score Jensen-Shannon divergence from SPINDR "
         "(base 2, 0 = identical, 1 = maximally different):"
     )
     for method, js in sorted(
@@ -640,11 +521,8 @@ def main() -> None:
     # 1. General statistics (absolute)
 
     avg_general_by_method = {
-        "CrossDocked": avg_general_stats_crossdocked,
-        "Pocket2Mol": avg_general_stats_pocket2mol,
-        "TargetDiff": avg_general_stats_targetdiff,
-        "DiffSBDD": avg_general_stats_diffsbdd,
-        "DrugFlow": avg_general_stats_drugflow,
+        "SPINDR": avg_general_stats_spindr,
+        "FLOWR": avg_general_stats_flowr,
         "NEAT": avg_general_stats_neat,
     }
     general_ylabels = [
@@ -661,11 +539,8 @@ def main() -> None:
     ]
 
     avg_ring_by_method = {
-        "CrossDocked": avg_ring_stats_crossdocked,
-        "Pocket2Mol": avg_ring_stats_pocket2mol,
-        "TargetDiff": avg_ring_stats_targetdiff,
-        "DiffSBDD": avg_ring_stats_diffsbdd,
-        "DrugFlow": avg_ring_stats_drugflow,
+        "SPINDR": avg_ring_stats_spindr,
+        "FLOWR": avg_ring_stats_flowr,
         "NEAT": avg_ring_stats_neat,
     }
     ring_stat_indices = [0, 1, 2, 10, 11]
@@ -698,11 +573,8 @@ def main() -> None:
     # 2. General statistics (relative)
 
     avg_general_by_method = {
-        "CrossDocked": avg_general_stats_crossdocked,
-        "Pocket2Mol": avg_general_stats_pocket2mol,
-        "TargetDiff": avg_general_stats_targetdiff,
-        "DiffSBDD": avg_general_stats_diffsbdd,
-        "DrugFlow": avg_general_stats_drugflow,
+        "SPINDR": avg_general_stats_spindr,
+        "FLOWR": avg_general_stats_flowr,
         "NEAT": avg_general_stats_neat,
     }
     general_ylabels = [
@@ -719,11 +591,8 @@ def main() -> None:
     ]
 
     avg_ring_by_method = {
-        "CrossDocked": avg_ring_stats_crossdocked,
-        "Pocket2Mol": avg_ring_stats_pocket2mol,
-        "TargetDiff": avg_ring_stats_targetdiff,
-        "DiffSBDD": avg_ring_stats_diffsbdd,
-        "DrugFlow": avg_ring_stats_drugflow,
+        "SPINDR": avg_ring_stats_spindr,
+        "FLOWR": avg_ring_stats_flowr,
         "NEAT": avg_ring_stats_neat,
     }
     ring_stat_indices = [0, 1, 2, 10, 11]
@@ -738,13 +607,13 @@ def main() -> None:
     fig, ax = plt.subplots(nrows=3, ncols=5, figsize=(30, 18))
     for i, ylabel in enumerate(general_ylabels):
         row, col = divmod(i, 5)
-        baseline = avg_general_by_method["CrossDocked"][i]
+        baseline = avg_general_by_method["SPINDR"][i]
         deviations = [avg_general_by_method[method][i] - baseline for method in METHODS]
         bar_relative_by_method(ax[row, col], deviations)
         ax[row, col].set_ylabel(ylabel)
 
     for i, (stat_idx, ylabel) in enumerate(zip(ring_stat_indices, ring_ylabels)):
-        baseline = avg_ring_by_method["CrossDocked"][stat_idx]
+        baseline = avg_ring_by_method["SPINDR"][stat_idx]
         deviations = [
             avg_ring_by_method[method][stat_idx] - baseline for method in METHODS
         ]
@@ -770,11 +639,8 @@ def main() -> None:
     }
 
     mols_by_method = {
-        "CrossDocked": mols_crossdocked,
-        "Pocket2Mol": mols_pocket2mol,
-        "TargetDiff": mols_targetdiff,
-        "DiffSBDD": mols_diffsbdd,
-        "DrugFlow": mols_drugflow,
+        "SPINDR": mols_spindr,
+        "FLOWR": mols_flowr,
         "NEAT": mols_neat,
     }
     atom_fractions_by_method = {
@@ -817,18 +683,15 @@ def main() -> None:
     ring_size_deviations_by_method = {
         method: {
             label: ring_sizes_by_method[method][label]
-            - ring_sizes_by_method["CrossDocked"][label]
+            - ring_sizes_by_method["SPINDR"][label]
             for label in ring_size_labels
         }
         for method in METHODS
     }
 
     mols_by_method = {
-        "CrossDocked": mols_crossdocked,
-        "Pocket2Mol": mols_pocket2mol,
-        "TargetDiff": mols_targetdiff,
-        "DiffSBDD": mols_diffsbdd,
-        "DrugFlow": mols_drugflow,
+        "SPINDR": mols_spindr,
+        "FLOWR": mols_flowr,
         "NEAT": mols_neat,
     }
     atom_fractions_by_method = {
@@ -847,7 +710,7 @@ def main() -> None:
     atom_fraction_deviations_by_method = {
         method: {
             symbol: atom_fractions_by_method[method].get(symbol, 0.0)
-            - atom_fractions_by_method["CrossDocked"].get(symbol, 0.0)
+            - atom_fractions_by_method["SPINDR"].get(symbol, 0.0)
             for symbol in atom_types
         }
         for method in METHODS
@@ -881,12 +744,12 @@ def main() -> None:
     plt.savefig(OUTPUT_PATH / "ring_sizes_and_atom_fractions_relative.png")
     plt.show()
 
-    # 5. Rank methods by closeness to CrossDocked
+    # 5. Rank methods by closeness to SPINDR
 
     ranks_per_stat = {}
 
     for i, name in enumerate(general_stat_names):
-        baseline = avg_general_by_method["CrossDocked"][i]
+        baseline = avg_general_by_method["SPINDR"][i]
         abs_devs = {
             method: abs(avg_general_by_method[method][i] - baseline)
             for method in METHODS
@@ -894,7 +757,7 @@ def main() -> None:
         ranks_per_stat[f"general/{name}"] = ranks_by_closeness(abs_devs)
 
     for i, name in enumerate(ring_stat_names):
-        baseline = avg_ring_by_method["CrossDocked"][i]
+        baseline = avg_ring_by_method["SPINDR"][i]
         abs_devs = {
             method: abs(avg_ring_by_method[method][i] - baseline) for method in METHODS
         }
@@ -913,7 +776,7 @@ def main() -> None:
     }
 
     logging.info(
-        f"\nMethod ranks by closeness to CrossDocked "
+        f"\nMethod ranks by closeness to SPINDR "
         f"(1 = closest; {len(ranks_per_stat)} statistics):"
     )
     for stat_name, ranks in ranks_per_stat.items():
@@ -929,39 +792,12 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(30, 12))
 
     ax.hist(
-        fragment_scores_pocket2mol,
+        fragment_scores_flowr,
         bins=100,
-        label="Pocket2Mol",
+        label="FLOWR",
         histtype="step",
         density=True,
-        color=COLOR_SCHEME["Pocket2Mol"],
-        linewidth=2,
-    )
-    ax.hist(
-        fragment_scores_targetdiff,
-        bins=100,
-        label="TargetDiff",
-        histtype="step",
-        density=True,
-        color=COLOR_SCHEME["TargetDiff"],
-        linewidth=2,
-    )
-    ax.hist(
-        fragment_scores_diffsbdd,
-        bins=100,
-        label="DiffSBDD",
-        histtype="step",
-        density=True,
-        color=COLOR_SCHEME["DiffSBDD"],
-        linewidth=2,
-    )
-    ax.hist(
-        fragment_scores_drugflow,
-        bins=100,
-        label="DrugFlow",
-        histtype="step",
-        density=True,
-        color=COLOR_SCHEME["DrugFlow"],
+        color=COLOR_SCHEME["FLOWR"],
         linewidth=2,
     )
     ax.hist(
@@ -974,18 +810,7 @@ def main() -> None:
         linewidth=3,
     )
 
-    mean_pocket2mol = safe_draw_median(
-        ax, fragment_scores_pocket2mol, COLOR_SCHEME["Pocket2Mol"]
-    )
-    mean_targetdiff = safe_draw_median(
-        ax, fragment_scores_targetdiff, COLOR_SCHEME["TargetDiff"]
-    )
-    mean_diffsbdd = safe_draw_median(
-        ax, fragment_scores_diffsbdd, COLOR_SCHEME["DiffSBDD"]
-    )
-    mean_drugflow = safe_draw_median(
-        ax, fragment_scores_drugflow, COLOR_SCHEME["DrugFlow"]
-    )
+    mean_flowr = safe_draw_median(ax, fragment_scores_flowr, COLOR_SCHEME["FLOWR"])
     mean_neat = safe_draw_median(ax, fragment_scores_neat, COLOR_SCHEME["NEAT"])
 
     ax.set_xlabel("Fragment score")

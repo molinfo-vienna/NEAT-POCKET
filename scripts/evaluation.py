@@ -4,7 +4,7 @@ Workflow:
   1. Load scripts/config_evaluation.yaml (or --config).
   2. Iterate result subdirectories under data_path/data_subdir whose names
      start with seed_, prefix_, or pocket_ (see RESULT_SUBDIR_PREFIXES).
-  3. For each subdirectory: build RDKit mols from generated_mols.pt (or load 
+  3. For each subdirectory: build RDKit mols from generated_mols.pt (or load
      from .sdf), compute selected metrics, write evaluation_results.txt and
      visualization images.
   4. Aggregate per-subdir scores into evaluation_summary.txt (mean ± 95% CI).
@@ -22,40 +22,29 @@ from __future__ import annotations
 
 import argparse
 import copy
+import logging
 import os
+import tempfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Iterator
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from functools import partial
-from rdkit import Chem
-from tqdm import tqdm
-import logging
-import tempfile
-
 
 import numpy as np
 import py3Dmol
 import rdkit
 import yaml
-from scipy import stats
 from posebusters import PoseBusters
-from posecheck import (
-    PoseCheck,
-)  # Required import; omitting posecheck can cause a segmentation fault.
-from rdkit.Chem import (
-    AllChem,
-    Descriptors,
-    Draw,
-    Mol,
-    MolToSmiles,
-    QED,
-    rdDepictor,
-    SanitizeMol,
-    SDMolSupplier,
-)
+from posecheck import \
+    PoseCheck  # Required import; omitting posecheck can cause a segmentation fault.
+from rdkit import Chem
+from rdkit.Chem import (QED, AllChem, Descriptors, Draw, Mol, MolToSmiles,
+                        SanitizeMol, SDMolSupplier, rdDepictor)
 from rdkit.Contrib.SA_Score import sascorer
+from scipy import stats
+from tqdm import tqdm
 
 from neat.dataset import DataModule
 from neat.model.molecule_builder import MoleculeBuilder
@@ -119,10 +108,7 @@ def iter_result_subdirs(data_path: Path) -> Iterator[Path]:
 # ---------------------------------------------------------------------------
 
 
-def save_2d_molecules_visualizations_to_png(
-    subdir: Path, 
-    mols: list
-) -> None:
+def save_2d_molecules_visualizations_to_png(subdir: Path, mols: list) -> None:
     """Save 2D grid images (with and without hydrogens) for the first N mols."""
     subset = mols[:NUM_MOLECULES_PLOTTED]
 
@@ -226,7 +212,7 @@ def compute_validity_uniqueness_novelty(
 
     # Validity computed as number of valid molecules / total number of molecules
     # Valid molecules are those that are not None, can be sanitized, and can be converted to a canonical SMILES string
-    
+
     validity_flag_list = [False] * total_mols
     for i, mol in enumerate(mols):
         if mol is not None:
@@ -371,11 +357,11 @@ def write_subdir_results(
 
         if run.drugflow is not None:
             _write_dict_metrics(
-                f, 
-                "DrugFlow metrics", 
-                run.drugflow, 
-                as_percent=False, 
-                percent_keys={"no_clashes"}
+                f,
+                "DrugFlow metrics",
+                run.drugflow,
+                as_percent=False,
+                percent_keys={"no_clashes"},
             )
 
         if run.vina is not None:
@@ -492,7 +478,7 @@ def write_summary(
                 aggregate.rdkit_valid_x_unique,
                 aggregate.rdkit_valid_x_unique_x_novel or None,
                 include_novelty=compute_novelty,
-            )   
+            )
         else:
             f.write("RDKit metrics: No data available\n")
 
@@ -531,11 +517,11 @@ def write_summary(
         if compute_drugflow_clashes:
             if aggregate.drugflow:
                 _write_aggregate_dict_metrics(
-                    f, 
-                    "DrugFlow metrics", 
-                    aggregate.drugflow, 
-                    as_percent=False, 
-                    percent_keys={"no_clashes"}
+                    f,
+                    "DrugFlow metrics",
+                    aggregate.drugflow,
+                    as_percent=False,
+                    percent_keys={"no_clashes"},
                 )
             else:
                 f.write("DrugFlow metrics: No data available\n")
@@ -644,10 +630,13 @@ def _compute_rdkit_metrics(
     mols: list[Mol], reference_smiles: list[str] | None
 ) -> tuple[RdkitMetrics, list[bool | None]]:
     """Wrap validity/uniqueness/novelty into an RdkitMetrics dataclass."""
-    valid,valid_x_unique, valid_x_unique_x_novel, validity_flag_list = compute_validity_uniqueness_novelty(
-        mols, reference_smiles
+    valid, valid_x_unique, valid_x_unique_x_novel, validity_flag_list = (
+        compute_validity_uniqueness_novelty(mols, reference_smiles)
     )
-    return RdkitMetrics(valid, valid_x_unique, valid_x_unique_x_novel), validity_flag_list
+    return (
+        RdkitMetrics(valid, valid_x_unique, valid_x_unique_x_novel),
+        validity_flag_list,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -753,8 +742,8 @@ def evaluate_subdirectory(
 
     # Pockets skipped during FBDD generation may leave an empty directory
     # (no generated_mols.*). Skip those rather than crashing.
-    generated_file = subdir / "generated_mols.sdf" 
-    
+    generated_file = subdir / "generated_mols.sdf"
+
     if not generated_file.exists():
         print(f"Skipping {subdir.name}: missing {generated_file.name}")
         return None
@@ -772,7 +761,7 @@ def evaluate_subdirectory(
             continue
     if len(mols) < 100:
         mols += [None] * (100 - len(mols))  # Pad with None if fewer than 100 molecules
-    
+
     if add_hydrogens:
         save_molecules_to_sdf(mols, subdir / "generated_mols_with_hs.sdf")
 
@@ -782,7 +771,7 @@ def evaluate_subdirectory(
         x, pos, batch = builder.load_tensor_from_file(subdir)
     except FileNotFoundError as e:
         tensor_file_available = False
-        
+
     if compute_edm and tensor_file_available:
         atom_stability, mol_stability, edm_valid, edm_unique, _ = (
             compute_edm_metrics_from_tensors(x, pos, batch, params["data_set"].upper())
@@ -793,24 +782,22 @@ def evaluate_subdirectory(
             valid=edm_valid,
             valid_x_unique=edm_valid * edm_unique,
         )
-    
-    result.rdkit, validity_flag_list = _compute_rdkit_metrics(
-        mols, reference_smiles
-    )
-    
+
+    result.rdkit, validity_flag_list = _compute_rdkit_metrics(mols, reference_smiles)
+
     mols = [mol for mol, is_valid in zip(mols, validity_flag_list) if is_valid]
-    
+
     with tempfile.NamedTemporaryFile(suffix=".sdf", delete=False) as tmp:
         mol_sdf_path = tmp.name
-        
+
     writer = Chem.SDWriter(mol_sdf_path)
     for mol in mols:
         if mol is not None:
             writer.write(mol)
     writer.close()
-    
+
     pocket_path = subdir / "pocket.pdb"
-    
+
     if compute_posebusters:
         result.posebusters = run_posebusters(pocket_path, mol_sdf_path)
 
@@ -822,7 +809,9 @@ def evaluate_subdirectory(
         result.rdkit_x_posebusters = result.rdkit.valid * result.posebusters["all"]
 
     if compute_posecheck:
-        result.posecheck = compute_posecheck_metrics_from_mols(mols, str(pocket_path), compute_strain)
+        result.posecheck = compute_posecheck_metrics_from_mols(
+            mols, str(pocket_path), compute_strain
+        )
 
     if compute_drugflow_clashes:
         clash_evaluator = ClashEvaluator()
@@ -924,7 +913,7 @@ def eval_worker(
                 compute_physchem=compute_physchem,
                 compute_vina=compute_vina,
                 reference_smiles=reference_smiles,
-                add_hydrogens=add_hydrogens
+                add_hydrogens=add_hydrogens,
             )
         finally:
             # Always restore the low-level streams back to the terminal
@@ -1000,11 +989,9 @@ def evaluate(args: argparse.Namespace) -> None:
                     runs_dict[original_index] = None
 
         runs = [
-            runs_dict[i]
-            for i in sorted(runs_dict.keys())
-            if runs_dict[i] is not None
+            runs_dict[i] for i in sorted(runs_dict.keys()) if runs_dict[i] is not None
         ]
-    
+
     else:
         for subdir in iter_result_subdirs(data_path):
             print(f"Evaluating {subdir.name}...")
@@ -1021,7 +1008,7 @@ def evaluate(args: argparse.Namespace) -> None:
                     compute_physchem=compute_physchem,
                     compute_vina=compute_vina,
                     reference_smiles=reference_smiles,
-                    add_hydrogens=params.get("add_hydrogens", False)
+                    add_hydrogens=params.get("add_hydrogens", False),
                 )
             except Exception as e:
                 print(f"Skipping {subdir.name}: {e}")

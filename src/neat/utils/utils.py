@@ -1,9 +1,9 @@
 from pathlib import Path
 
-import numpy as np
-from Bio.PDB import PDBParser, PDBIO
 import biotite.structure.io.pdb as pdb
 import biotite.structure.io.pdbx as pdbx
+import numpy as np
+from Bio.PDB import PDBIO, PDBParser
 from rdkit.Chem import SDWriter
 
 
@@ -37,22 +37,23 @@ def center_pdb(input_path, output_path, return_center=False):
 
     if return_center:
         return geometric_center
-    
+
+
 def cif_2_pdb(input_path, output_path, return_center=False):
     # 1. Initialize the parser and load the structure
     file = pdbx.CIFFile.read(str(input_path))
     cif_model = pdbx.get_structure(file, model=1)
     com = np.mean(cif_model.coord, axis=0)
     cif_model.coord -= com
-    
+
     import string
+
     # 3. Remap multi-character chain IDs to 1-character IDs
     unique_chains = list(dict.fromkeys(cif_model.chain_id))
     alphabet = string.ascii_uppercase + string.ascii_lowercase + string.digits
 
     chain_map = {
-        old_id: alphabet[i % len(alphabet)] 
-        for i, old_id in enumerate(unique_chains)
+        old_id: alphabet[i % len(alphabet)] for i, old_id in enumerate(unique_chains)
     }
 
     # Update the chain IDs in place
@@ -61,11 +62,12 @@ def cif_2_pdb(input_path, output_path, return_center=False):
     # 4. Save and print to console
     output_pdb = pdb.PDBFile()
     pdb.set_structure(output_pdb, cif_model)
-    
+
     output_pdb.write(str(output_path))
-    
+
     if return_center:
         return com
+
 
 def save_molecules_to_sdf(mols: list, file_path: Path) -> None:
     """Write non-None RDKit molecules to an SDF file."""

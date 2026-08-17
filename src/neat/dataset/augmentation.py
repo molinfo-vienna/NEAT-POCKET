@@ -12,9 +12,7 @@ class RandomRotationAugmentation:
         pass
 
     def rotate_molecule_randomly(
-        self, 
-        positions: torch.Tensor, 
-        batch_idx: torch.Tensor
+        self, positions: torch.Tensor, batch_idx: torch.Tensor
     ) -> torch.Tensor:
         """Rotate and translate the positions of nodes in a batch of PyG graphs w.r.t. their centers.
 
@@ -81,9 +79,9 @@ class RandomRotationAugmentation:
         def _apply(pos: torch.Tensor, batch_idx: torch.Tensor) -> torch.Tensor:
             centered = pos - graph_centers[batch_idx]
             node_rotation_matrices = rot_operator[batch_idx]
-            rotated = torch.bmm(
-                node_rotation_matrices, centered.unsqueeze(-1)
-            ).squeeze(-1)
+            rotated = torch.bmm(node_rotation_matrices, centered.unsqueeze(-1)).squeeze(
+                -1
+            )
             return rotated + graph_centers[batch_idx]
 
         return _apply(ligand_pos, ligand_batch), _apply(pocket_pos, pocket_batch)
