@@ -5,7 +5,7 @@ data
 fragments
 logs 
 notebooks
-output
+output*
 plotting
 trained_models
 evaluation.log
