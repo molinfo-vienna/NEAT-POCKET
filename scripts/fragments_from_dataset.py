@@ -268,7 +268,7 @@ def extract_fragments(dataset: str) -> None:
         supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False, sanitize=True)
         rdmol = supplier[0]
         rdmol = _largest_fragment(rdmol)
-        if dataset.upper() == "CrossDocked":
+        if dataset.upper() == "CROSSDOCKED":
             rdmol = Chem.AddHs(rdmol, addCoords=True)
 
         conformer = rdmol.GetConformer()
