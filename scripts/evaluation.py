@@ -186,64 +186,95 @@ def save_3d_molecules_visualizations_to_html(
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class RdkitMetrics:
+    """RDKit validity / uniqueness / optional novelty for one subdirectory."""
+
+    valid: float
+    unique: float
+    novel: float | None
+    valid_x_unique: float
+    valid_x_unique_x_novel: float | None = None
+
+
 def compute_validity_uniqueness_novelty(
     mols: list[Mol],
     reference_smiles: list[str] | None = None,
-) -> tuple[float, float, float | None, list[bool | None]]:
-    """Compute RDKit validity / uniqueness / novelty fractions.
+) -> tuple[RdkitMetrics, list[bool | None]]:
+    """Compute RDKit validity, uniqueness, and optional novelty metrics.
 
-    Validity: sanitizable mols with a canonical SMILES, over all mols.
-    Uniqueness: unique valid canonical SMILES, over all mols.
-    Novelty (optional): unique valid SMILES absent from reference_smiles,
-    over all mols.
+    All fractions are in [0, 1]. Unique and Novel are conditional rates 
+    among valid molecules and valid unique molecules respectively. 
+    Compound metrics are over all generated molecules.
 
     Args:
         mols: RDKit molecules (None entries count as invalid).
         reference_smiles: Training SMILES for novelty; None skips novelty.
 
     Returns:
-        (valid, valid_x_unique, valid_x_unique_x_novel_or_None, validity_flags)
-        where validity_flags[i] is True iff mols[i] passed validity checks.
+        (RdkitMetrics, validity_flags) where validity_flags[i] is True iff
+        mols[i] passed validity checks.
     """
+    total_mols = len(mols)
+    if total_mols == 0:
+        return (
+            RdkitMetrics(
+                valid=0.0,
+                valid_x_unique=0.0,
+                unique=0.0,
+                novel=None,
+                valid_x_unique_x_novel=None,
+            ),
+            [],
+        )
 
     smiles: list[str] = []
-    num_valid = 0
-    total_mols = len(mols)
-
-    # Validity computed as number of valid molecules / total number of molecules
-    # Valid molecules are those that are not None, can be sanitized, and can be converted to a canonical SMILES string
-
     validity_flag_list = [False] * total_mols
     for i, mol in enumerate(mols):
-        if mol is not None:
-            mol_copy = copy.deepcopy(mol)
-            sanitization_flag = SanitizeMol(mol_copy, catchErrors=True)
-            if int(sanitization_flag) != 0:
-                continue
-            smile = MolToSmiles(mol, canonical=True)
-            if smiles is not None:
-                smiles.append(smile)
-                num_valid += 1
-                validity_flag_list[i] = True
+        if mol is None:
+            continue
+        mol_copy = copy.deepcopy(mol)
+        sanitization_flag = SanitizeMol(mol_copy, catchErrors=True)
+        if int(sanitization_flag) != 0:
+            continue
+        smiles.append(MolToSmiles(mol, canonical=True))
+        validity_flag_list[i] = True
 
-    p_valid = num_valid / total_mols
-
-    # Uniqueness computed as number of unique canonical SMILES strings / total number of molecules
-    unique_smiles = set[str](smiles)
+    num_valid = len(smiles)
+    unique_smiles = set(smiles)
     num_unique = len(unique_smiles)
-    p_valid_unique = num_unique / total_mols
 
-    # Novelty computed as number of unique canonical SMILES strings that are not in the reference set / number of valid molecules
-    # Validity x uniqueness x novelty computed as number of unique canonical SMILES strings that are not in the reference set / total number of molecules
+    valid = num_valid / total_mols
+    unique = num_unique / num_valid if num_valid else 0.0
+    valid_x_unique = num_unique / total_mols
+
     if reference_smiles is None:
-        return p_valid, p_valid_unique, None, validity_flag_list
+        return (
+            RdkitMetrics(
+                valid=valid,
+                unique=unique,
+                novel=None,
+                valid_x_unique=valid_x_unique,
+                valid_x_unique_x_novel=None,
+            ),
+            validity_flag_list,
+        )
 
     ref_set = set(reference_smiles)
     num_novel = len(unique_smiles - ref_set)
+    novel = num_novel / num_unique if num_unique else 0.0
+    valid_x_unique_x_novel = num_novel / total_mols
 
-    p_valid_unique_novel = num_novel / total_mols
-
-    return p_valid, p_valid_unique, p_valid_unique_novel, validity_flag_list
+    return (
+        RdkitMetrics(
+            valid=valid,
+            unique=unique,
+            novel=novel,
+            valid_x_unique=valid_x_unique,
+            valid_x_unique_x_novel=valid_x_unique_x_novel,
+        ),
+        validity_flag_list,
+    )
 
 
 def compute_mean_and_95_ci(data: list[float]) -> tuple[float, float]:
@@ -302,6 +333,9 @@ def _write_rdkit_metrics(
     """Write a single-run RDKit validity/uniqueness(/novelty) block."""
     f.write(f"\n{title}:\n")
     f.write(f"Valid: {pct(metrics.valid)}\n")
+    f.write(f"Unique: {pct(metrics.unique)}\n")
+    if include_novelty and metrics.novel is not None:
+        f.write(f"Novel: {pct(metrics.novel)}\n")
     f.write(f"Valid x unique: {pct(metrics.valid_x_unique)}\n")
     if include_novelty and metrics.valid_x_unique_x_novel is not None:
         f.write(f"Valid x unique x novel: {pct(metrics.valid_x_unique_x_novel)}\n")
@@ -401,6 +435,8 @@ def _write_aggregate_rdkit_metrics(
     f,
     title: str,
     valid: list[float],
+    unique: list[float],
+    novel: list[float] | None,
     valid_x_unique: list[float],
     valid_x_unique_x_novel: list[float] | None,
     *,
@@ -408,13 +444,23 @@ def _write_aggregate_rdkit_metrics(
 ) -> None:
     """Write mean ± 95% CI for RDKit metrics across subdirectories."""
     valid_mean, valid_ci = compute_mean_and_95_ci(valid)
-    unique_mean, unique_ci = compute_mean_and_95_ci(valid_x_unique)
+    unique_mean, unique_ci = compute_mean_and_95_ci(unique)
+    valid_x_unique_mean, valid_x_unique_ci = compute_mean_and_95_ci(valid_x_unique)
     f.write(f"\n{title}:\n")
     f.write(f"Valid: {pct(valid_mean)} ± {pct(valid_ci)}\n")
-    f.write(f"Valid x unique: {pct(unique_mean)} ± {pct(unique_ci)}\n")
+    f.write(f"Unique: {pct(unique_mean)} ± {pct(unique_ci)}\n")
+    if include_novelty and novel:
+        novel_mean, novel_ci = compute_mean_and_95_ci(novel)
+        f.write(f"Novel: {pct(novel_mean)} ± {pct(novel_ci)}\n")
+    f.write(f"Valid x unique: {pct(valid_x_unique_mean)} ± {pct(valid_x_unique_ci)}\n")
     if include_novelty and valid_x_unique_x_novel:
-        novel_mean, novel_ci = compute_mean_and_95_ci(valid_x_unique_x_novel)
-        f.write(f"Valid x unique x novel: {pct(novel_mean)} ± {pct(novel_ci)}\n")
+        valid_x_unique_x_novel_mean, valid_x_unique_x_novel_ci = (
+            compute_mean_and_95_ci(valid_x_unique_x_novel)
+        )
+        f.write(
+            "Valid x unique x novel: "
+            f"{pct(valid_x_unique_x_novel_mean)} ± {pct(valid_x_unique_x_novel_ci)}\n"
+        )
 
 
 def _write_aggregate_dict_metrics(
@@ -475,6 +521,8 @@ def write_summary(
                 f,
                 "RDKit metrics",
                 aggregate.rdkit_valid,
+                aggregate.rdkit_unique,
+                aggregate.rdkit_novel or None,
                 aggregate.rdkit_valid_x_unique,
                 aggregate.rdkit_valid_x_unique_x_novel or None,
                 include_novelty=compute_novelty,
@@ -551,15 +599,6 @@ class EdmMetrics:
 
 
 @dataclass
-class RdkitMetrics:
-    """RDKit validity / uniqueness / optional novelty for one subdirectory."""
-
-    valid: float
-    valid_x_unique: float
-    valid_x_unique_x_novel: float | None = None
-
-
-@dataclass
 class SubdirRunResult:
     """All metric blocks computed for a single seed/prefix/pocket directory."""
 
@@ -588,6 +627,8 @@ class AggregateResults:
     drugflow: list[dict[str, float]] = field(default_factory=list)
     vina: list[dict[str, float]] = field(default_factory=list)
     rdkit_valid: list[float] = field(default_factory=list)
+    rdkit_unique: list[float] = field(default_factory=list)
+    rdkit_novel: list[float] = field(default_factory=list)
     rdkit_valid_x_unique: list[float] = field(default_factory=list)
     rdkit_valid_x_unique_x_novel: list[float] = field(default_factory=list)
 
@@ -619,24 +660,14 @@ class AggregateResults:
 
         if run.rdkit is not None:
             self.rdkit_valid.append(run.rdkit.valid)
+            self.rdkit_unique.append(run.rdkit.unique)
+            if run.rdkit.novel is not None:
+                self.rdkit_novel.append(run.rdkit.novel)
             self.rdkit_valid_x_unique.append(run.rdkit.valid_x_unique)
             if run.rdkit.valid_x_unique_x_novel is not None:
                 self.rdkit_valid_x_unique_x_novel.append(
                     run.rdkit.valid_x_unique_x_novel
                 )
-
-
-def _compute_rdkit_metrics(
-    mols: list[Mol], reference_smiles: list[str] | None
-) -> tuple[RdkitMetrics, list[bool | None]]:
-    """Wrap validity/uniqueness/novelty into an RdkitMetrics dataclass."""
-    valid, valid_x_unique, valid_x_unique_x_novel, validity_flag_list = (
-        compute_validity_uniqueness_novelty(mols, reference_smiles)
-    )
-    return (
-        RdkitMetrics(valid, valid_x_unique, valid_x_unique_x_novel),
-        validity_flag_list,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +814,9 @@ def evaluate_subdirectory(
             valid_x_unique=edm_valid * edm_unique,
         )
 
-    result.rdkit, validity_flag_list = _compute_rdkit_metrics(mols, reference_smiles)
+    result.rdkit, validity_flag_list = compute_validity_uniqueness_novelty(
+        mols, reference_smiles
+    )
 
     mols = [mol for mol, is_valid in zip(mols, validity_flag_list) if is_valid]
 
