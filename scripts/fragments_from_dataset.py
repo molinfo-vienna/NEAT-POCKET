@@ -225,7 +225,7 @@ def extract_fragments(dataset: str) -> None:
     test_data = datamodule.test_data
 
     # Output layout: fragments/{largest,second_largest,smallest}/{pdb}.sdf
-    fragments_dir = os.path.join(FRAGMENTS_DIR, dataset)
+    fragments_dir = os.path.join(FRAGMENTS_DIR, str(dataset).upper())
     os.makedirs(fragments_dir, exist_ok=True)
     for fragment_type in FRAGMENT_TYPES:
         os.makedirs(os.path.join(fragments_dir, fragment_type), exist_ok=True)
@@ -265,11 +265,11 @@ def extract_fragments(dataset: str) -> None:
 
         # Mirror ligand prep used at generation time so fragment coords match.
         in_sdf_file = test_data.get_ligand_path_from_data_point(test_data[data_idx])
-        supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False, sanitize=False)
+        supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False, sanitize=True)
         rdmol = supplier[0]
         rdmol = _largest_fragment(rdmol)
-        rdmol = Chem.AddHs(rdmol, addCoords=True)
-        Chem.Kekulize(rdmol, clearAromaticFlags=True)
+        if dataset == "CrossDocked":
+            rdmol = Chem.AddHs(rdmol, addCoords=True)
 
         conformer = rdmol.GetConformer()
         for i in range(rdmol.GetNumAtoms()):
