@@ -24,6 +24,16 @@ def bond_prediction_batch_transform(
     radius: float,
     noise_ratio: float = 0.0,
 ) -> Batch:
+    """Transform a batch of graphs for bond prediction.
+
+    Args:
+        batch (Batch): Batch of graphs.
+        radius (float): Radius for edge computation.
+        noise_ratio (float, optional): Ratio of noise to add to coordinates. Defaults to 0.0.
+
+    Returns:
+        Batch: Transformed batch of graphs.
+    """
     # (0) Coordinate noise
     if noise_ratio > 0:
         noise_std = noise_ratio * radius
@@ -72,8 +82,8 @@ def source_target_split_batch_transform(
     batch: Batch,
     source_target_split: str,
     noise_std: float,
-    source_set_perturbation: float,
-    perturbation_factor: float,
+    source_set_perturbation_std: float,
+    source_set_perturbation_fraction: float,
 ) -> Batch:
     """Transform a batch of graphs by:
 
@@ -86,6 +96,8 @@ def source_target_split_batch_transform(
         batch (Batch): Batch of graphs.
         source_target_split (str): Source-target split mode.
         noise_std (float): Standard deviation of the initial Gaussian noise in the flow matching process.
+        source_set_perturbation_std (float): Standard deviation of the Gaussian noise added to the source set positions.
+        source_set_perturbation_fraction (float): Fraction of the source set positions to perturb.
 
     Returns:
         Batch: Transformed batch of graphs.
@@ -113,12 +125,11 @@ def source_target_split_batch_transform(
             batch.pos, batch.batch
         )
 
-    # (2) Create source-target split
+    # (2.1) Create source-target split
     splitter = SourceTargetSplitter(splitting_mode=source_target_split)
-
     source_ptr, target_ptr = splitter.create_source_target_split(batch)
 
-    # Modify a random subset in the batch for start token prediction
+    # (2.2) Modify a random subset in the batch for start token prediction
     # For the first token, we have an empty source set and a full target set
     start_token_mask = torch.rand(batch_size) < 0.025
     corresponding_indices = torch.arange(batch.x.size(0), device=batch.x.device)[
@@ -130,20 +141,21 @@ def source_target_split_batch_transform(
         torch.cat((target_ptr, corresponding_indices)), sorted=True
     )
 
+    # (2.3) Store source and target pointers in the batch object
     batch.source_ptr = source_ptr
     batch.target_ptr = target_ptr
     batch.start_token_mask = start_token_mask
 
-    # (2.1) Introduce noisy into the source set positions by adding Gaussian noise
-    if perturbation_factor is not None and source_set_perturbation is not None:
-        source_set_noise = source_set_perturbation * torch.randn_like(
+    # (2.4) Perturb source set positions by adding Gaussian noise
+    if source_set_perturbation_fraction is not None and source_set_perturbation_std is not None:
+        source_set_noise = source_set_perturbation_std * torch.randn_like(
             batch.pos[batch.source_ptr]
         )
-        dropout_mask = torch.rand_like(batch.source_ptr.float()) > perturbation_factor
+        dropout_mask = torch.rand_like(batch.source_ptr.float()) > source_set_perturbation_fraction
         source_set_noise[dropout_mask] *= 0.0
         batch.pos[batch.source_ptr] += source_set_noise
 
-    # (3) Recenter positions w.r.t. the source set atoms
+    # (2.5) Recenter positions w.r.t. the source set atoms
     mean_pos = global_mean_pool(
         batch.pos[batch.source_ptr], batch.batch[batch.source_ptr], size=batch_size
     )
@@ -156,7 +168,7 @@ def source_target_split_batch_transform(
     ):
         batch.pocket_pos = batch.pocket_pos - mean_pos[batch.pocket_pos_batch]
 
-    # (4) Determine source sets with empty target sets, these have stop tokens
+    # (3) Determine source sets with empty target sets, these have stop tokens
     target_set_mask = torch.zeros_like(
         batch.batch, device=batch.batch.device, dtype=torch.bool
     )
@@ -165,7 +177,7 @@ def source_target_split_batch_transform(
     stop_tokens = ~(torch.isin(torch.arange(0, len(batch)), torch.unique(batch_target)))
     batch.stop_tokens = stop_tokens
 
-    # (5) Couple positions in the target set with random positions via linear sum assignment
+    # (4) Couple positions in the target set with random positions via linear sum assignment
     pos_target = batch.pos[target_set_mask]
     batch_target = batch_target.long()
     pos_random = noise_std * torch.randn_like(pos_target)
@@ -187,8 +199,8 @@ def source_target_split_collate_fn(
     batch: list,
     source_target_split: str,
     noise_std: float,
-    source_set_perturbation: float,
-    perturbation_factor: float,
+    source_set_perturbation_std: float,
+    source_set_perturbation_fraction: float,
     follow_batch: list[str] | None = None,
 ) -> Batch:
     fb = follow_batch or []
@@ -200,8 +212,8 @@ def source_target_split_collate_fn(
         batch,
         source_target_split,
         noise_std,
-        source_set_perturbation,
-        perturbation_factor,
+        source_set_perturbation_std,
+        source_set_perturbation_fraction,
     )
 
 
@@ -210,7 +222,7 @@ class DataModule(LightningDataModule):
 
     Args:
         data_dir (str): Directory containing the data.
-        data_set (str): Dataset to use ("QM9" or "GEOM" or "CROSSDOCKED"). Default is "QM9".
+        data_set (str): Dataset to use ("QM9", "GEOM", "CROSSDOCKED", or "SPINDR"). Default is "QM9".
         batch_size (int): Batch size for the data loader. Default is 32.
         num_workers (int): Number of workers for the data loader. Default is 1.
         task (str): Task to perform ("neat" or "bond_prediction"). Default is "neat".
@@ -278,8 +290,8 @@ class DataModule(LightningDataModule):
                 source_target_split_collate_fn,
                 source_target_split=self.source_target_split,
                 noise_std=self.flow_matching_noise_std,
-                source_set_perturbation=self.source_set_perturbation_std,
-                perturbation_factor=self.source_set_perturbation_fraction,
+                source_set_perturbation_std=self.source_set_perturbation_std,
+                source_set_perturbation_fraction=self.source_set_perturbation_fraction,
                 follow_batch=(["pocket_pos"] if follow_pocket_batch else None),
             )
 
