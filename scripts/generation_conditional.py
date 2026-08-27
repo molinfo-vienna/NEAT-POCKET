@@ -146,6 +146,12 @@ def generate(args: argparse.Namespace) -> None:
         if f.endswith(".ckpt") and f.startswith("periodic-epoch")
     ]
     if not pt_files:
+        pt_files = [
+            f
+            for f in os.listdir(checkpoints_dir)
+            if f.endswith(".ckpt") and "best-val-loss" in f
+        ]
+    if not pt_files:
         raise FileNotFoundError(f"No .ckpt files found in {checkpoints_dir}")
 
     checkpoints_path = os.path.join(checkpoints_dir, pt_files[0])
