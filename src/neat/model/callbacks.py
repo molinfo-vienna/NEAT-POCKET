@@ -232,3 +232,34 @@ class GenerationMonitor(Callback):
                 smiles = Chem.MolToSmiles(mol, canonical=True)
                 unique_smiles.add(smiles)
         return len(unique_smiles)
+
+
+class UnfreezeModelCallback(Callback):
+    def __init__(self, unfreeze_epoch: int):
+        super().__init__()
+        self.unfreeze_epoch = unfreeze_epoch
+        self._unfrozen = False
+
+    def on_train_epoch_start(
+        self, trainer: Trainer, pl_module: LightningModule
+    ) -> None:
+        # Check if we have hit the target epoch and haven't unfrozen yet
+        if trainer.current_epoch >= self.unfreeze_epoch and not self._unfrozen:
+            print(
+                f"\n[Callback] Epoch {trainer.current_epoch}: Unfreezing all layers and updating optimizer."
+            )
+
+            # 1. Unfreeze all parameters in the model
+            for param in pl_module.parameters():
+                param.requires_grad = True
+
+            # 2. Update the optimizer(s) so they track the newly unfrozen parameters
+            # We clear the old parameter groups and re-add all parameters.
+            for optimizer in trainer.optimizers:
+                optimizer.param_groups.clear()
+                # If you use multiple parameter groups (e.g., different learning rates),
+                # you would need to recreate that specific structure here.
+                optimizer.add_param_group({"params": pl_module.parameters()})
+
+            # Mark as done so we don't repeat this every epoch after
+            self._unfrozen = True

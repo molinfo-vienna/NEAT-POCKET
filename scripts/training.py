@@ -8,7 +8,6 @@ Workflow:
   5. Load the pretrained model if provided.
   6. Initialize the callbacks.
   7. Train the model.
-  8. Save the model.
 """
 
 import argparse
@@ -17,17 +16,14 @@ import os
 import torch
 import torch_geometric
 import yaml
-from lightning import LightningModule, Trainer, seed_everything
-from lightning.pytorch.callbacks import (Callback, LearningRateMonitor,
-                                         ModelCheckpoint)
+from lightning import Trainer, seed_everything
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers.tensorboard import TensorBoardLogger
 
 from neat.dataset import DataModule
-from neat.model import NEAT, GenerationMonitor
-from neat.model.bond_predictor import BondPredictor
+from neat.model import NEAT, GenerationMonitor, UnfreezeModelCallback
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
 torch.set_float32_matmul_precision("medium")
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
@@ -36,37 +32,6 @@ seed_everything(42)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROOT = os.getcwd()
-
-
-class UnfreezeModelCallback(Callback):
-    def __init__(self, unfreeze_epoch: int):
-        super().__init__()
-        self.unfreeze_epoch = unfreeze_epoch
-        self._unfrozen = False
-
-    def on_train_epoch_start(
-        self, trainer: Trainer, pl_module: LightningModule
-    ) -> None:
-        # Check if we have hit the target epoch and haven't unfrozen yet
-        if trainer.current_epoch >= self.unfreeze_epoch and not self._unfrozen:
-            print(
-                f"\n[Callback] Epoch {trainer.current_epoch}: Unfreezing all layers and updating optimizer."
-            )
-
-            # 1. Unfreeze all parameters in the model
-            for param in pl_module.parameters():
-                param.requires_grad = True
-
-            # 2. Update the optimizer(s) so they track the newly unfrozen parameters
-            # We clear the old parameter groups and re-add all parameters.
-            for optimizer in trainer.optimizers:
-                optimizer.param_groups.clear()
-                # If you use multiple parameter groups (e.g., different learning rates),
-                # you would need to recreate that specific structure here.
-                optimizer.add_param_group({"params": pl_module.parameters()})
-
-            # Mark as done so we don't repeat this every epoch after
-            self._unfrozen = True
 
 
 def train(args: argparse.Namespace) -> None:
@@ -79,6 +44,7 @@ def train(args: argparse.Namespace) -> None:
         None
     """
 
+    # (1) Load configuration
     if args.config_file is not None:
         config_file_path = args.config_file
         print(f"Using config file: {config_file_path}")
@@ -92,6 +58,7 @@ def train(args: argparse.Namespace) -> None:
         Loader=yaml.FullLoader,
     )
 
+    # (2) Load data module
     datamodule = DataModule(
         os.path.join(ROOT, "data"),
         params["data_set"],
@@ -103,12 +70,12 @@ def train(args: argparse.Namespace) -> None:
     )
     datamodule.setup()
 
-    # Initialize the model
+    # (3) Initialize the model
     accumulate_grad_batches = params.pop("accumulate_grad_batches")
     params["vocab_size"] = datamodule.vocab_size
     model = MODEL(**params)
 
-    # if path to bond predictor is provided, get checkpoints to pass them to the GenerationMonitor callback
+    # (4) If path to bond predictor is provided, get checkpoints to pass them to the GenerationMonitor callback
     bond_predictor_dir = params.get("bond_predictor_dir", None)
     if bond_predictor_dir is not None:
         bond_predictor_dir = os.path.join(ROOT, bond_predictor_dir, "checkpoints")
@@ -118,7 +85,7 @@ def train(args: argparse.Namespace) -> None:
         bond_predictor_path = os.path.join(bond_predictor_dir, pt_files[0])
         print(f"Using checkpoint file: {bond_predictor_path}")
 
-    # If path to pretrained weights is provided, load them
+    # (5) If path to pretrained unconditional model is provided, load weights and transfer them to the conditional model
     pretrained_model_path = params.get("pretrained_model_path", None)
     if pretrained_model_path is not None:
         checkpoints_dir = os.path.join(ROOT, pretrained_model_path, "checkpoints")
@@ -137,6 +104,7 @@ def train(args: argparse.Namespace) -> None:
         )
         model.initialize_from_pretrained_model(pretrained_model)
 
+    # (6) Initialize the callbacks
     tb_logger = TensorBoardLogger(
         os.path.join(ROOT, "logs"),
         name=f"{MODEL.__name__}",
@@ -184,6 +152,7 @@ def train(args: argparse.Namespace) -> None:
         unfreeze_callback,
     ]
 
+    # (7) Model training and logging
     trainer = Trainer(
         devices=[0],
         max_epochs=params["max_epochs"],
@@ -195,7 +164,6 @@ def train(args: argparse.Namespace) -> None:
         gradient_clip_val=1.0,
         precision="bf16-mixed",
     )
-
     trainer.fit(model=model, datamodule=datamodule)
 
 
