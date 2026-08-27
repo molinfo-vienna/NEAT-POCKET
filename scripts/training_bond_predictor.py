@@ -1,4 +1,4 @@
-"""Train bond predictor models on QM9 and GEOM datasets.
+"""Train bond predictor models on the respective datasets.
 
 Uses DataModule with task="bond_prediction" which precomputes radius-graph edges
 and edge labels. The BondPredictor predicts bond type per edge.
@@ -33,7 +33,7 @@ ROOT = os.getcwd()
 
 
 def train(args: argparse.Namespace) -> None:
-    """Train bond predictor models on QM9 and GEOM datasets.
+    """Train bond predictor models on the respective datasets.
 
     Args:
         args (argparse.Namespace): Command line arguments.
@@ -41,6 +41,8 @@ def train(args: argparse.Namespace) -> None:
     Returns:
         None
     """
+    
+    # (1) Load configuration
     config_path = args.config_file or os.path.join(
         ROOT, "scripts", "config_bond_predictor.yaml"
     )
@@ -51,6 +53,7 @@ def train(args: argparse.Namespace) -> None:
         Loader=yaml.FullLoader,
     )
 
+    # (2) Load dataset
     dataset_name = str(params.get("data_set")).upper()
     data_dir = os.path.join(ROOT, "data")
     print(f"Loading {dataset_name}...")
@@ -65,12 +68,12 @@ def train(args: argparse.Namespace) -> None:
         bond_predictor_noise_ratio=params.get("noise_ratio", 0.0),
     )
     datamodule.setup()
-
     print(
         f"Train: {len(datamodule.training_data)}, Val: {len(datamodule.validation_data)}"
     )
     params["vocab_size"] = datamodule.vocab_size
 
+    # (3) Initialize model and set up callbacks
     model = BondPredictor(**params)
 
     log_dir = os.path.join(ROOT, "logs", "BondPredictor")
@@ -97,6 +100,7 @@ def train(args: argparse.Namespace) -> None:
         LearningRateMonitor(logging_interval="epoch"),
     ]
 
+    # (4) Train model and save best checkpoint
     trainer = Trainer(
         devices=[0] if torch.cuda.is_available() else "auto",
         max_epochs=params["max_epochs"],
@@ -106,7 +110,6 @@ def train(args: argparse.Namespace) -> None:
         callbacks=callbacks,
         gradient_clip_val=1.0,
     )
-
     trainer.fit(model=model, datamodule=datamodule)
     print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
 
