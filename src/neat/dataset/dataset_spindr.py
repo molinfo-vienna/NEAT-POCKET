@@ -23,22 +23,30 @@ SEED = 0
 
 
 def _process_protein_ligand_complex(pocket_path: Path, ligand_path: Path, split_name: str) -> Data | None:
+    """Construct PyG Data object from raw protein-ligand complex
+
+    Args:
+        pocket_path (Path): Path to the pocket file (CIF format)
+        ligand_path (Path): Path to the ligand file (SD format)
+        split_name (str): Name of the split to which the complex belongs
+
+    Returns:
+        Data | None: PyG Data object representing the protein-ligand complex or None if processing fails
+    """
 
     logger = logging.getLogger(__name__)
 
     if not pocket_path.is_file() or not ligand_path.is_file():
         return None
 
-    ### Load ligand and clean ligand ###
-
+    # (1) Load ligand and do sanitization checks
     suppl = Chem.SDMolSupplier(str(ligand_path), sanitize=True, removeHs=False)
     if suppl is None or len(suppl) == 0:
         logger.warning(f"Ligand {ligand_path}: cannot be loaded or sanitized by RDKit.")
         return None
-
     rdmol = suppl[0]
-
     rdmol = _largest_fragment(rdmol)
+    
     if rdmol is None:
         logger.warning(f"Ligand {ligand_path}: largest fragment is None.")
         return None
@@ -55,15 +63,17 @@ def _process_protein_ligand_complex(pocket_path: Path, ligand_path: Path, split_
             )
             return None
 
-    ### Process ligand into graph ###
+    # (2) Construct ligand graph object
     lig_x, lig_pos, lig_charge = _ligand_features(rdmol, get_charge=True)
     if lig_x is None or lig_pos is None:
         logger.warning(f"Ligand {ligand_path}: cannot get features.")
         return None
+    
     edge_index, edge_labels = _ligand_edges(rdmol)
     if edge_index is None or edge_labels is None:
         logger.warning(f"Ligand {ligand_path}: cannot get edges.")
         return None
+    
     if edge_index.numel() == 0:
         G = nx.Graph()
         G.add_nodes_from(range(rdmol.GetNumAtoms()))
@@ -71,13 +81,15 @@ def _process_protein_ligand_complex(pocket_path: Path, ligand_path: Path, split_
         G = nx.Graph()
         for i, j in edge_index.t().tolist():
             G.add_edge(i, j)
+            
     eccentricity = torch.tensor(
         [nx.eccentricity(G, n) for n in range(rdmol.GetNumAtoms())],
         dtype=torch.long,
     )
+    
     smiles = Chem.MolToSmiles(rdmol, canonical=True)
 
-    ### Load pocket ###
+    # (3) Load pocket and construct point cloud object
     file = pdbx.CIFFile.read(str(pocket_path))
     cif_model = pdbx.get_structure(file, model=1)
     pt = Chem.GetPeriodicTable()
@@ -104,6 +116,7 @@ def _process_protein_ligand_complex(pocket_path: Path, ligand_path: Path, split_
     ):
         return None
 
+    # (4) Center both to the ligand's COM, and store the complex name
     com = lig_pos.mean(dim=0, keepdim=True)
     lig_pos = lig_pos - com
     pocket_pos = pocket_pos - com
@@ -251,6 +264,8 @@ class SpindrDataSet(InMemoryDataset):
     def _process_split(
         self, pairs, datadir: Path, split_name: str, num_workers=8
     ) -> list[Data]:
+        """Parallelized dataset processing using Dask. Sequential fallback if num_workers <= 1."""
+        
         data_list: list[Data] = []
         failed: int = 0
 
@@ -276,8 +291,7 @@ class SpindrDataSet(InMemoryDataset):
             client.forward_logging(logger_name=__name__)
             print(f"Dask cluster initialized with {num_workers} workers.")
 
-            # 1. Submit tasks eagerly as Futures (this doesn't build a massive graph)
-            # Make sure '_process_pair' is the standalone function we discussed!
+            # 1. Submit tasks as futures
             futures = [
                 client.submit(
                     _process_protein_ligand_complex,
@@ -291,18 +305,16 @@ class SpindrDataSet(InMemoryDataset):
             data_list = []
             failed = 0
 
-            # 2. Track progress in real-time as tasks finish
+            # 2. Track progress as tasks finish
             with tqdm(total=len(futures), desc="Processing complexes") as pbar:
-                # as_completed yields futures the exact second they finish
                 for future in as_completed(futures):
                     try:
-                        result = future.result()  # Grab the actual output
+                        result = future.result()  
                         if result is not None:
                             data_list.append(result)
                         else:
                             failed += 1
                     except Exception as e:
-                        # This catches worker crashes or unhandled code exceptions
                         failed += 1
 
                     pbar.update(1)
@@ -316,6 +328,16 @@ class SpindrDataSet(InMemoryDataset):
 
     @staticmethod
     def collate_pocket_info(pocket_list, samples_per_pocket=1, device="cpu"):
+        """PyG style batching of a list of pocket objects.
+
+        Args:
+            pocket_list (list): List of PyG data objects representing pockets.
+            samples_per_pocket (int, optional): Number of repeats per pocket. Defaults to 1.
+            device (str, optional): Device to move the tensors to. Defaults to "cpu".
+
+        Returns:
+            dict: Collated pocket information.
+        """
         pocket_x = torch.cat(
             [
                 data_point.pocket_x.to(device).repeat(samples_per_pocket)

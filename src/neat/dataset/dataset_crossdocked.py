@@ -286,6 +286,7 @@ class CrossDockedDataSet(InMemoryDataset):
         self, pairs, datadir: Path, split_name: str, num_workers=8
     ) -> list[Data]:
         """Parallelized dataset processing using Dask. Sequential fallback if num_workers <= 1."""
+        
         data_list: list[Data] = []
         failed: int = 0
 
