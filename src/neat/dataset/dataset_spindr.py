@@ -22,7 +22,7 @@ RDLogger.DisableLog("rdApp.*")
 SEED = 0
 
 
-def _process_pair(pocket_path: Path, ligand_path: Path, split_name: str) -> Data | None:
+def _process_protein_ligand_complex(pocket_path: Path, ligand_path: Path, split_name: str) -> Data | None:
 
     logger = logging.getLogger(__name__)
 
@@ -260,7 +260,7 @@ class SpindrDataSet(InMemoryDataset):
                 pocket_path = datadir / pocket_fn
                 ligand_path = datadir / ligand_fn
                 try:
-                    data = _process_pair(pocket_path, ligand_path, split_name)
+                    data = _process_protein_ligand_complex(pocket_path, ligand_path, split_name)
                     if data is not None:
                         data_list.append(data)
                     else:
@@ -280,7 +280,7 @@ class SpindrDataSet(InMemoryDataset):
             # Make sure '_process_pair' is the standalone function we discussed!
             futures = [
                 client.submit(
-                    _process_pair,
+                    _process_protein_ligand_complex,
                     datadir / pocket_fn,
                     datadir / ligand_fn,
                     split_name,

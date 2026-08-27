@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from Bio.PDB.Polypeptide import is_aa
+from Bio.PDB.Model import Model
 import logging
-import torch
+import numpy as np
 from rdkit import Chem
+import torch
 
 
 RDKIT_BOND_TO_ID = {
@@ -133,3 +136,82 @@ def _ligand_edges(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
     except Exception as e:
         logger.warning(f"Ligand {mol}: cannot get edges: {e}")
         return None, None
+    
+def _pdb_heavy_element_symbol(atom) -> str | None:
+    e = (getattr(atom, "element", None) or "").strip().upper()
+    if e:
+        if len(e) > 1:
+            return e
+        return e
+    name = atom.get_name().strip()
+    if not name:
+        return None
+    if len(name) >= 2 and name[:2].upper() in ("FE", "ZN", "MG", "CA", "MN", "CO"):
+        return name[:2].upper()
+    c0 = name[0].upper()
+    if c0 in "CNOSHP":
+        return c0
+    return None
+
+
+def _encode_pocket_atom(symbol: str | None, vocabulary: dict[int, int]) -> int:
+    if symbol is None or symbol.upper() == "H":
+        return 0
+    sym = symbol.strip()
+    pt = Chem.GetPeriodicTable()
+    try:
+        if len(sym) == 1:
+            n = pt.GetAtomicNumber(sym.upper())
+        else:
+            n = pt.GetAtomicNumber(sym[:1].upper() + sym[1:].lower())
+    except Exception:
+        return 0
+    return int(vocabulary.get(n, 0))
+
+
+def _get_pocket_features_from_biopython_model(
+    pdb_model: Model,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    # (atom_type, atom_coords, residue_type, residue_id)
+    selected: list[tuple[int, np.ndarray, int, int]] = []
+    residue_id = 0
+    logger = logging.getLogger(__name__)
+    try:
+        for chain in pdb_model.get_chains():
+            for residue in chain.get_residues():
+                if not is_aa(residue.get_resname(), standard=True):
+                    continue
+                resname = residue.get_resname().strip().upper()
+                residue_type = AA_VOCABULARY.get(resname, AA_VOCABULARY_UNK)
+
+                heavy = [
+                    a
+                    for a in residue.get_atoms()
+                    if _pdb_heavy_element_symbol(a) not in (None, "H")
+                ]
+                if not heavy:
+                    continue
+
+                for atom in heavy:
+                    atom_type = _pdb_heavy_element_symbol(atom)
+                    atom_type_encoded = _encode_pocket_atom(atom_type, ATOM_VOCABULARY)
+                    atom_coords = np.asarray(atom.get_coord(), dtype=np.float32)
+                    selected.append(
+                        (atom_type_encoded, atom_coords, residue_id, residue_type)
+                    )
+                residue_id += 1
+
+        if not selected:
+            logger.warning(f"Pocket {pdb_model}: no atoms selected.")
+            return None, None, None, None
+
+        pocket_x = torch.tensor([t[0] for t in selected], dtype=torch.long)
+        pocket_pos = torch.from_numpy(np.stack([t[1] for t in selected], axis=0))
+        pocket_residue_id = torch.tensor([t[2] for t in selected], dtype=torch.long)
+        pocket_residue_type = torch.tensor([t[3] for t in selected], dtype=torch.long)
+
+        return pocket_x, pocket_pos, pocket_residue_id, pocket_residue_type
+
+    except Exception as e:
+        logger.warning(f"Pocket {pdb_model}: cannot get features: {e}")
+        return None, None, None, None
