@@ -5,7 +5,6 @@ bond_predictor_dir: logs/BondPredictor/SPINDR
 cfg_dropout: 0.2
 clash_penalty: 4.0
 clash_penalty_margin: 0.0
-cross_attn_with_null_token: true
 data_set: SPINDR
 dropout: 0.1
 freeze_pretrained: true
