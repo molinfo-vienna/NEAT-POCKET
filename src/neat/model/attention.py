@@ -113,6 +113,78 @@ class MaskedBidirectionalAttention(nn.Module):
         return y
 
 
+class MaskedCrossAttention(nn.Module):
+    """Masked Cross-Attention module.
+
+    Queries are projected from a primary stream ``x`` (ligand source
+    tokens) and keys/values are projected from a context stream (pocket
+    residue tokens). An optional attention mask supports key padding so that
+    queries do not attend to padded context tokens.
+
+    Args:
+        n_embd (int): Embedding dimension shared between query and context.
+        n_head (int): Number of attention heads.
+        dropout (float): Dropout rate.
+        bias (bool): Whether to include bias terms in linear layers.
+
+    Returns:
+        nn.Module: A Masked Cross-Attention module.
+    """
+
+    def __init__(
+        self,
+        n_embd: int,
+        n_head: int,
+        dropout: float,
+        bias: bool,
+    ) -> None:
+        super().__init__()
+        assert n_embd % n_head == 0
+        self.q_proj = nn.Linear(n_embd, n_embd, bias=bias)
+        self.kv_proj = nn.Linear(n_embd, 2 * n_embd, bias=bias)
+        self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
+        self.attn_dropout = nn.Dropout(dropout)
+        self.resid_dropout = nn.Dropout(dropout)
+        self.n_head = n_head
+        self.n_embd = n_embd
+        self.dropout = dropout
+
+    def forward(
+        self,
+        query_input: torch.Tensor,
+        kv_input: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        B, T_q, C = query_input.size()
+        _, T_k, _ = kv_input.size()
+
+        q = self.q_proj(query_input)
+        k, v = self.kv_proj(kv_input).split(self.n_embd, dim=2)
+
+        q = q.view(B, T_q, self.n_head, C // self.n_head).transpose(
+            1, 2
+        )  # (B, nh, T_q, hs)
+        k = k.view(B, T_k, self.n_head, C // self.n_head).transpose(
+            1, 2
+        )  # (B, nh, T_k, hs)
+        v = v.view(B, T_k, self.n_head, C // self.n_head).transpose(
+            1, 2
+        )  # (B, nh, T_k, hs)
+
+        y = torch.nn.functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout if self.training else 0,
+            is_causal=False,
+        )
+        y = y.transpose(1, 2).contiguous().view(B, T_q, C)
+
+        y = self.resid_dropout(self.c_proj(y))
+        return y
+    
+
 class BidirectionalAttentionBlock(nn.Module):
     """A transformer block with masked bidirectional attention.
 
@@ -214,75 +286,3 @@ class BidirectionalAttentionBlock(nn.Module):
         )
         x = x + ffn_projection
         return x
-
-
-class MaskedCrossAttention(nn.Module):
-    """Masked Cross-Attention module.
-
-    Queries are projected from a primary stream ``x`` (ligand source
-    tokens) and keys/values are projected from a context stream (pocket
-    residue tokens). An optional attention mask supports key padding so that
-    queries do not attend to padded context tokens.
-
-    Args:
-        n_embd (int): Embedding dimension shared between query and context.
-        n_head (int): Number of attention heads.
-        dropout (float): Dropout rate.
-        bias (bool): Whether to include bias terms in linear layers.
-
-    Returns:
-        nn.Module: A Masked Cross-Attention module.
-    """
-
-    def __init__(
-        self,
-        n_embd: int,
-        n_head: int,
-        dropout: float,
-        bias: bool,
-    ) -> None:
-        super().__init__()
-        assert n_embd % n_head == 0
-        self.q_proj = nn.Linear(n_embd, n_embd, bias=bias)
-        self.kv_proj = nn.Linear(n_embd, 2 * n_embd, bias=bias)
-        self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
-        self.attn_dropout = nn.Dropout(dropout)
-        self.resid_dropout = nn.Dropout(dropout)
-        self.n_head = n_head
-        self.n_embd = n_embd
-        self.dropout = dropout
-
-    def forward(
-        self,
-        query_input: torch.Tensor,
-        kv_input: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        B, T_q, C = query_input.size()
-        _, T_k, _ = kv_input.size()
-
-        q = self.q_proj(query_input)
-        k, v = self.kv_proj(kv_input).split(self.n_embd, dim=2)
-
-        q = q.view(B, T_q, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T_q, hs)
-        k = k.view(B, T_k, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T_k, hs)
-        v = v.view(B, T_k, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T_k, hs)
-
-        y = torch.nn.functional.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=self.dropout if self.training else 0,
-            is_causal=False,
-        )
-        y = y.transpose(1, 2).contiguous().view(B, T_q, C)
-
-        y = self.resid_dropout(self.c_proj(y))
-        return y
