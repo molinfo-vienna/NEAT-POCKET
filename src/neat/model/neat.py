@@ -1050,183 +1050,6 @@ class NEAT(LightningModule):
 
         return output_fm
 
-    def configure_optimizers(self, betas=(0.9, 0.999)) -> Optimizer:
-        """Same configurations as in NanoGPT"""
-        # start with all of the candidate parameters
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        # filter out those that do not require grad
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        optim_groups = [
-            {"params": decay_params, "weight_decay": self.hparams.weight_decay},
-            {"params": nodecay_params, "weight_decay": 0.0},
-        ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(
-            f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters"
-        )
-        print(
-            f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters"
-        )
-        # Create AdamW optimizer and use the fused version if it is available
-        # fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
-        # use_fused = fused_available and device_type == "cuda"
-        # extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(
-            optim_groups,
-            lr=self.hparams.learning_rate,
-            betas=betas,
-            # fused=True,
-        )
-
-        def lr_lambda(epoch):
-            # 1) linear warmup for warmup_iters steps
-            warmup_epochs = self.hparams.lr_warmup_epochs
-            min_lr = self.hparams.lr_min_ratio
-            lr_decay_epochs = self.hparams.lr_decay_epochs
-            if epoch < warmup_epochs:
-                return (epoch + 1) / (warmup_epochs + 1)
-            # 2) if it > lr_decay_iters, return min learning rate
-            if epoch > lr_decay_epochs:
-                return min_lr
-            # 3) in between, use cosine decay down to min learning rate
-            decay_ratio = (epoch - warmup_epochs) / (lr_decay_epochs - warmup_epochs)
-            assert 0 <= decay_ratio <= 1
-            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
-            return min_lr + coeff * (1.0 - min_lr)
-
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-
-        return [optimizer], [scheduler]
-
-    def on_before_optimizer_step(
-        self, optimizer: Optimizer, optimizer_idx: int = None
-    ) -> None:
-        """Compute the gradient norm before clipping.
-
-        Args:
-            optimizer (Optimizer): The optimizer to use.
-            optimizer_idx (int): The index of the optimizer.
-
-        Returns:
-            None
-        """
-        grad_norm = 0
-        for param in self.parameters():
-            if param.grad is not None:
-                grad_norm += param.grad.norm(2).item() ** 2
-        grad_norm = grad_norm**0.5
-
-        self.log(
-            "train/grad_norm",
-            grad_norm,
-            on_step=True,
-            on_epoch=False,
-            prog_bar=True,
-            logger=True,
-        )
-
-    def shared_step(self, batch: Data, batch_idx: int) -> Tensor:
-        """Shared step for training and validation"""
-        loss, loss_ce, loss_fm, clash_penalty = self(batch)
-
-        return loss, loss_ce, loss_fm, clash_penalty
-
-    def on_train_start(self) -> None:
-        """Initialization of the logger"""
-        self.logger.log_hyperparams(
-            self.hparams,
-            {"train/train_loss": torch.inf, "val/val_loss": torch.inf},
-        )
-
-    def training_step(self, batch: Data, batch_idx: int) -> Tensor:
-        """Training step and logging"""
-        loss, loss_ce, loss_fm, clash_penalty = self.shared_step(batch, batch_idx)
-
-        self.log(
-            "train/train_loss",
-            loss,
-            prog_bar=True,
-            on_step=True,
-            on_epoch=False,
-            batch_size=len(batch),
-            reduce_fx="mean",
-        )
-        self.log(
-            "train/train_loss_ce",
-            loss_ce,
-            prog_bar=True,
-            on_step=True,
-            on_epoch=False,
-            batch_size=len(batch),
-            reduce_fx="mean",
-        )
-        self.log(
-            "train/train_loss_fm",
-            loss_fm,
-            prog_bar=True,
-            on_step=True,
-            on_epoch=False,
-            batch_size=len(batch),
-            reduce_fx="mean",
-        )
-        if clash_penalty is not None:
-            self.log(
-                "train/clash_penalty",
-                clash_penalty,
-                prog_bar=True,
-                on_step=True,
-                on_epoch=False,
-                batch_size=len(batch),
-                reduce_fx="mean",
-            )
-
-        return loss
-
-    def validation_step(self, batch: Data, batch_idx: int) -> Tensor:
-        """Validation step and logging"""
-        loss, loss_ce, loss_fm, clash_penalty = self.shared_step(batch, batch_idx)
-
-        self.log(
-            "val/val_loss",
-            loss,
-            prog_bar=True,
-            on_step=False,
-            on_epoch=True,
-            batch_size=len(batch),
-        )
-        self.log(
-            "val/val_loss_fm",
-            loss_fm,
-            prog_bar=True,
-            on_step=False,
-            on_epoch=True,
-            batch_size=len(batch),
-        )
-        self.log(
-            "val/val_loss_ce",
-            loss_ce,
-            prog_bar=True,
-            on_step=False,
-            on_epoch=True,
-            batch_size=len(batch),
-        )
-        if clash_penalty is not None:
-            self.log(
-                "val/clash_penalty",
-                clash_penalty,
-                prog_bar=True,
-                on_step=False,
-                on_epoch=True,
-                batch_size=len(batch),
-            )
-
-        return loss
-
     @torch.no_grad()
     def generate(
         self,
@@ -1659,3 +1482,180 @@ class NEAT(LightningModule):
         if t >= w_cutoff:
             w = torch.zeros_like(t)
         return w
+
+    def configure_optimizers(self, betas=(0.9, 0.999)) -> Optimizer:
+        """Same configurations as in NanoGPT"""
+        # start with all of the candidate parameters
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        # filter out those that do not require grad
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {"params": decay_params, "weight_decay": self.hparams.weight_decay},
+            {"params": nodecay_params, "weight_decay": 0.0},
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(
+            f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters"
+        )
+        print(
+            f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters"
+        )
+        # Create AdamW optimizer and use the fused version if it is available
+        # fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
+        # use_fused = fused_available and device_type == "cuda"
+        # extra_args = dict(fused=True) if use_fused else dict()
+        optimizer = torch.optim.AdamW(
+            optim_groups,
+            lr=self.hparams.learning_rate,
+            betas=betas,
+            # fused=True,
+        )
+
+        def lr_lambda(epoch):
+            # 1) linear warmup for warmup_iters steps
+            warmup_epochs = self.hparams.lr_warmup_epochs
+            min_lr = self.hparams.lr_min_ratio
+            lr_decay_epochs = self.hparams.lr_decay_epochs
+            if epoch < warmup_epochs:
+                return (epoch + 1) / (warmup_epochs + 1)
+            # 2) if it > lr_decay_iters, return min learning rate
+            if epoch > lr_decay_epochs:
+                return min_lr
+            # 3) in between, use cosine decay down to min learning rate
+            decay_ratio = (epoch - warmup_epochs) / (lr_decay_epochs - warmup_epochs)
+            assert 0 <= decay_ratio <= 1
+            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
+            return min_lr + coeff * (1.0 - min_lr)
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+        return [optimizer], [scheduler]
+
+    def on_before_optimizer_step(
+        self, optimizer: Optimizer, optimizer_idx: int = None
+    ) -> None:
+        """Compute the gradient norm before clipping.
+
+        Args:
+            optimizer (Optimizer): The optimizer to use.
+            optimizer_idx (int): The index of the optimizer.
+
+        Returns:
+            None
+        """
+        grad_norm = 0
+        for param in self.parameters():
+            if param.grad is not None:
+                grad_norm += param.grad.norm(2).item() ** 2
+        grad_norm = grad_norm**0.5
+
+        self.log(
+            "train/grad_norm",
+            grad_norm,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=True,
+            logger=True,
+        )
+
+    def shared_step(self, batch: Data, batch_idx: int) -> Tensor:
+        """Shared step for training and validation"""
+        loss, loss_ce, loss_fm, clash_penalty = self(batch)
+
+        return loss, loss_ce, loss_fm, clash_penalty
+
+    def on_train_start(self) -> None:
+        """Initialization of the logger"""
+        self.logger.log_hyperparams(
+            self.hparams,
+            {"train/train_loss": torch.inf, "val/val_loss": torch.inf},
+        )
+
+    def training_step(self, batch: Data, batch_idx: int) -> Tensor:
+        """Training step and logging"""
+        loss, loss_ce, loss_fm, clash_penalty = self.shared_step(batch, batch_idx)
+
+        self.log(
+            "train/train_loss",
+            loss,
+            prog_bar=True,
+            on_step=True,
+            on_epoch=False,
+            batch_size=len(batch),
+            reduce_fx="mean",
+        )
+        self.log(
+            "train/train_loss_ce",
+            loss_ce,
+            prog_bar=True,
+            on_step=True,
+            on_epoch=False,
+            batch_size=len(batch),
+            reduce_fx="mean",
+        )
+        self.log(
+            "train/train_loss_fm",
+            loss_fm,
+            prog_bar=True,
+            on_step=True,
+            on_epoch=False,
+            batch_size=len(batch),
+            reduce_fx="mean",
+        )
+        if clash_penalty is not None:
+            self.log(
+                "train/clash_penalty",
+                clash_penalty,
+                prog_bar=True,
+                on_step=True,
+                on_epoch=False,
+                batch_size=len(batch),
+                reduce_fx="mean",
+            )
+
+        return loss
+
+    def validation_step(self, batch: Data, batch_idx: int) -> Tensor:
+        """Validation step and logging"""
+        loss, loss_ce, loss_fm, clash_penalty = self.shared_step(batch, batch_idx)
+
+        self.log(
+            "val/val_loss",
+            loss,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=len(batch),
+        )
+        self.log(
+            "val/val_loss_fm",
+            loss_fm,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=len(batch),
+        )
+        self.log(
+            "val/val_loss_ce",
+            loss_ce,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=len(batch),
+        )
+        if clash_penalty is not None:
+            self.log(
+                "val/clash_penalty",
+                clash_penalty,
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+                batch_size=len(batch),
+            )
+
+        return loss
