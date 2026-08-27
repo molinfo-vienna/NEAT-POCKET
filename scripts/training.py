@@ -151,9 +151,9 @@ def train(args: argparse.Namespace) -> None:
 
     # (7) Model training and logging
     trainer = Trainer(
-        devices=[0],
+        devices=[0] if torch.cuda.is_available() else "auto",
         max_epochs=params["max_epochs"],
-        accelerator="gpu",
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
         logger=tb_logger,
         log_every_n_steps=10,
         callbacks=callbacks,

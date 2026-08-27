@@ -362,7 +362,7 @@ def main() -> None:
     flowr_path = ROOT / "output" / "flowr_sample_from_train_dist" / "conditional"
     mols_flowr = get_mols(flowr_path)
 
-    neat_path = ROOT / "output" / "version_134_cfg05_null" / "conditional"
+    neat_path = ROOT / "output" / "neat_spindr_cfg05_null" / "conditional"
     mols_neat = get_mols(neat_path)
 
     logging.info(f"SPINDR: {len(mols_spindr)} molecules")

@@ -29,13 +29,13 @@ For more info, visit https://pytorch.org/get-started/locally.
 4. Install NEAT-PC:
 
 ```bash
-pip install .
+pip install -e .
 ```
 
 5. Install additional PyTorch-Geometrics dependencies:
 
 ```bash
-pip install torch_scatter -f https://data.pyg.org/whl/torch-2.9.0+cu130
+pip install pyg_lib torch_cluster torch_scatter -f https://data.pyg.org/whl/torch-2.9.0+cu130.html
 ```
 
 You need to replace the last part (2.9.0+cu130) with your PyTorch version.

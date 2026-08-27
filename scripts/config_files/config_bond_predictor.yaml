@@ -1,5 +1,5 @@
 data_set: SPINDR                                            # Dataset to use for training.
-batch_size: 256                                             # Batch size.
+batch_size: 64                                              # Batch size.
 radius: 2.5                                                 # Radius of the radius graph.
 noise_ratio: 0.05                                           # Ratio of noise to the input coordinates.
 n_embd: 64                                                  # Embedding size.

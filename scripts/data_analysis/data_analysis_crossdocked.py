@@ -382,7 +382,7 @@ def main() -> None:
     drugflow_path = ROOT / "output" / "drugflow" / "conditional"
     mols_drugflow = get_mols(drugflow_path)
 
-    neat_path = ROOT / "output" / "version_126_cfg05_null" / "conditional"
+    neat_path = ROOT / "output" / "neat_crossdocked_cfg05_null" / "conditional"
     mols_neat = get_mols(neat_path)
 
     logging.info(f"CrossDocked: {len(mols_crossdocked)} molecules")

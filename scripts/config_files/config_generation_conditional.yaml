@@ -1,4 +1,4 @@
-checkpoints_path: trained_models/best_spindr                # Path to the trained model weights.
+checkpoints_path: trained_models/neat_spindr                # Path to the trained model weights.
 output_path: output/generated_mols_spindr                   # Path to the output directory.
 data_set: SPINDR                                            # Dataset to use for generation.
 num_molecules: 100                                          # Number of molecules to generate.

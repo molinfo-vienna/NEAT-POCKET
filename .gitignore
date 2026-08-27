@@ -8,7 +8,7 @@ maestro_visualizations
 notebooks
 output*
 plotting
-trained_models
+trained_models*
 evaluation.log
 *.egg-info
 *.env

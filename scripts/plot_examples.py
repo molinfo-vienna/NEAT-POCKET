@@ -103,7 +103,7 @@ MODELS: list[ModelSpec] = [
     ),
     ModelSpec(
         "NEAT (CrossDocked)",
-        ROOT / "output" / "version_126_cfg05_null",
+        ROOT / "output" / "neat_crossdocked_cfg05_null",
         "neat_crossdocked",
     ),
     ModelSpec(
@@ -113,7 +113,7 @@ MODELS: list[ModelSpec] = [
     ),
     ModelSpec(
         "NEAT (SPINDR)",
-        ROOT / "output" / "version_134_cfg05_null",
+        ROOT / "output" / "neat_spindr_cfg05_null",
         "neat_spindr",
     ),
 ]
