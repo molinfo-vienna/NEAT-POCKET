@@ -17,7 +17,7 @@ from torch_geometric.nn.pool import global_mean_pool
 from tqdm import tqdm
 
 from ..dataset.augmentation import RandomRotationAugmentation
-from ..dataset.dataset_crossdocked import ATOM_VOCABULARY
+from ..dataset.dataset_utils import ATOM_VOCABULARY
 from .attention import BidirectionalAttentionBlock
 from .positional_encoding import FourierPositionEncoding
 from .simple_mlp import SimpleMLPAdaLN

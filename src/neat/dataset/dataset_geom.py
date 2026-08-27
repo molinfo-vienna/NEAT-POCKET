@@ -13,12 +13,7 @@ RDLogger.DisableLog("rdApp.*")
 
 SEED = 0
 
-RDKIT_BOND_TO_ID = {
-    Chem.rdchem.BondType.SINGLE: 1,
-    Chem.rdchem.BondType.DOUBLE: 2,
-    Chem.rdchem.BondType.TRIPLE: 3,
-    Chem.rdchem.BondType.AROMATIC: 4,
-}
+from .dataset_utils import RDKIT_BOND_TO_ID, ATOM_VOCABULARY
 
 
 class GEOMDataSet(InMemoryDataset):
@@ -43,24 +38,7 @@ class GEOMDataSet(InMemoryDataset):
     """
 
     GEOM_URL = "https://bits.csb.pitt.edu/files/geom_raw"
-    VOCABULARY = {
-        1: 1,
-        5: 2,
-        6: 3,
-        7: 4,
-        8: 5,
-        9: 6,
-        13: 7,
-        14: 8,
-        15: 9,
-        16: 10,
-        17: 11,
-        33: 12,
-        35: 13,
-        53: 14,
-        80: 15,
-        83: 16,
-    }
+    VOCABULARY = ATOM_VOCABULARY
     NUM_CONFORMERS = 5
 
     def __init__(

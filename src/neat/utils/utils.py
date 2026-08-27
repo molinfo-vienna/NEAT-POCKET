@@ -1,4 +1,5 @@
 from pathlib import Path
+import string
 
 import biotite.structure.io.pdb as pdb
 import biotite.structure.io.pdbx as pdbx
@@ -45,8 +46,6 @@ def cif_2_pdb(input_path, output_path, return_center=False):
     cif_model = pdbx.get_structure(file, model=1)
     com = np.mean(cif_model.coord, axis=0)
     cif_model.coord -= com
-
-    import string
 
     # 3. Remap multi-character chain IDs to 1-character IDs
     unique_chains = list(dict.fromkeys(cif_model.chain_id))

@@ -14,16 +14,10 @@ from rdkit.Chem import rdDetermineBonds
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
 
+from .dataset_utils import RDKIT_BOND_TO_ID
+
 RDLogger.DisableLog("rdApp.*")
-
 SEED = 0
-
-RDKIT_BOND_TO_ID = {
-    Chem.rdchem.BondType.SINGLE: 1,
-    Chem.rdchem.BondType.DOUBLE: 2,
-    Chem.rdchem.BondType.TRIPLE: 3,
-    Chem.rdchem.BondType.AROMATIC: 4,
-}
 
 
 class QM9DataSet(InMemoryDataset):

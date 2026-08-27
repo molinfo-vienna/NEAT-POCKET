@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import logging
 import os
 import random
@@ -10,77 +9,25 @@ from pathlib import Path
 import gdown
 import networkx as nx
 import numpy as np
-import openbabel
 import torch
 from Bio.PDB import PDBParser
 from Bio.PDB.Polypeptide import is_aa
 from dask.distributed import Client, LocalCluster, as_completed
 from rdkit import Chem, RDLogger
-from rdkit.Chem import AllChem
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
 
+from .dataset_utils import (
+    ATOM_VOCABULARY, 
+    AA_VOCABULARY, 
+    AA_VOCABULARY_UNK, 
+    _largest_fragment,
+    _ligand_features,
+    _ligand_edges,
+)
+
 RDLogger.DisableLog("rdApp.*")
-
 SEED = 0
-
-RDKIT_BOND_TO_ID = {
-    Chem.rdchem.BondType.SINGLE: 1,
-    Chem.rdchem.BondType.DOUBLE: 2,
-    Chem.rdchem.BondType.TRIPLE: 3,
-    Chem.rdchem.BondType.AROMATIC: 4,
-}
-
-ATOM_VOCABULARY = {
-    1: 1,  # H
-    5: 2,  # B
-    6: 3,  # C
-    7: 4,  # N
-    8: 5,  # O
-    9: 6,  # F
-    13: 7,  # Al
-    14: 8,  # Si
-    15: 9,  # P
-    16: 10,  # S
-    17: 11,  # Cl
-    33: 12,  # As
-    35: 13,  # Br
-    53: 14,  # I
-    80: 15,  # Hg
-    83: 16,  # Bi
-}
-
-# Standard 20 amino acids + unknown
-AA_VOCABULARY = {
-    "ALA": 0,
-    "ARG": 1,
-    "ASN": 2,
-    "ASP": 3,
-    "CYS": 4,
-    "GLN": 5,
-    "GLU": 6,
-    "GLY": 7,
-    "HIS": 8,
-    "ILE": 9,
-    "LEU": 10,
-    "LYS": 11,
-    "MET": 12,
-    "PHE": 13,
-    "PRO": 14,
-    "SER": 15,
-    "THR": 16,
-    "TRP": 17,
-    "TYR": 18,
-    "VAL": 19,
-}
-AA_VOCABULARY_UNK = 20
-
-
-def _largest_fragment(mol: Chem.Mol) -> Chem.Mol | None:
-    frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=True)
-    if not frags:
-        return None
-    return max(frags, key=lambda m: m.GetNumHeavyAtoms())
 
 
 def _pdb_heavy_element_symbol(atom) -> str | None:
@@ -113,141 +60,6 @@ def _encode_pocket_atom(symbol: str | None, vocabulary: dict[int, int]) -> int:
     except Exception:
         return 0
     return int(vocabulary.get(n, 0))
-
-
-def _add_hydrogens_with_rdkit(mol: Chem.Mol, max_attempts: int = 50) -> Chem.Mol:
-    try:
-        mol_h = Chem.AddHs(mol)
-        AllChem.ConstrainedEmbed(mol_h, mol, maxAttempts=max_attempts)
-        return mol_h
-    except Exception as e:
-        return None
-
-
-def _add_hydrogens_with_openbabel(mol: Chem.Mol) -> Chem.Mol:
-
-    try:
-        # Convert RDKit molecule to OpenBabel molecule
-        ob_conversion = openbabel.OBConversion()
-        ob_conversion.SetInFormat("mol")
-        ob_conversion.SetOutFormat("mol")
-
-        # Generate a temporary MOL file from RDKit molecule
-        mol_block = Chem.MolToMolBlock(mol)
-        ob_mol = openbabel.OBMol()
-        ob_conversion.ReadString(ob_mol, mol_block)
-
-        # Add hydrogens using OpenBabel
-        ob_mol.AddHydrogens()
-
-        # Convert OpenBabel molecule back to RDKit molecule
-        updated_mol_block = ob_conversion.WriteString(ob_mol)
-        updated_rdkit_mol = Chem.MolFromMolBlock(updated_mol_block, removeHs=False)
-
-        # Return the updated RDKit molecule
-        return updated_rdkit_mol
-
-    except Exception:
-        return None
-
-
-def _ligand_features(
-    mol: Chem.Mol, get_charge: bool
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    logger = logging.getLogger(__name__)
-    try:
-        n = mol.GetNumAtoms()
-        x = torch.tensor(
-            [ATOM_VOCABULARY[a.GetAtomicNum()] for a in mol.GetAtoms()],
-            dtype=torch.long,
-        )
-        conf = mol.GetConformer()
-        pos = torch.zeros((n, 3), dtype=torch.float32)
-        for i in range(n):
-            p = conf.GetAtomPosition(i)
-            pos[i, 0] = p.x
-            pos[i, 1] = p.y
-            pos[i, 2] = p.z
-        if get_charge:
-            charge = torch.tensor(
-                [a.GetFormalCharge() for a in mol.GetAtoms()],
-                dtype=torch.float32,
-            )
-            return x, pos, charge
-        else:
-            return x, pos
-    except Exception as e:
-        logger.warning(f"Ligand {mol}: cannot get features: {e}")
-        if get_charge:
-            return None, None, None
-        else:
-            return None, None
-
-
-# def _ligand_edges(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
-#     logger = logging.getLogger(__name__)
-#     try:
-#         edge_index: list[tuple[int, int]] = []
-#         edge_labels: list[int] = []
-#         for bond in mol.GetBonds():
-#             i = bond.GetBeginAtomIdx()
-#             j = bond.GetEndAtomIdx()
-#             edge_index.append((i, j))
-#             edge_index.append((j, i))
-#             bt = RDKIT_BOND_TO_ID.get(bond.GetBondType(), 0)
-#             edge_labels.append(bt)
-#             edge_labels.append(bt)
-#         if not edge_index:
-#             return (
-#                 torch.empty(2, 0, dtype=torch.long),
-#                 torch.empty(0, dtype=torch.long),
-#             )
-#         edge_index_t = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
-#         edge_labels_t = torch.tensor(edge_labels, dtype=torch.long)
-#         return edge_index_t, edge_labels_t
-#     except Exception as e:
-#         logger.warning(f"Ligand {mol}: cannot get edges: {e}")
-#         return None, None
-
-
-def _ligand_edges(mol: Chem.Mol) -> tuple[torch.Tensor, torch.Tensor]:
-    logger = logging.getLogger(__name__)
-    try:
-        # 1. Create a copy to prevent in-place mutation of the input molecule
-        mol_kekule = Chem.Mol(mol)
-
-        # 2. Convert aromatic bonds to explicit single/double bonds
-        Chem.Kekulize(mol_kekule, clearAromaticFlags=True)
-
-        edge_index: list[tuple[int, int]] = []
-        edge_labels: list[int] = []
-
-        # 3. Iterate over the kekulized copy
-        for bond in mol_kekule.GetBonds():
-            i = bond.GetBeginAtomIdx()
-            j = bond.GetEndAtomIdx()
-
-            edge_index.append((i, j))
-            edge_index.append((j, i))
-
-            bt = RDKIT_BOND_TO_ID.get(bond.GetBondType(), 0)
-            edge_labels.append(bt)
-            edge_labels.append(bt)
-
-        if not edge_index:
-            return (
-                torch.empty(2, 0, dtype=torch.long),
-                torch.empty(0, dtype=torch.long),
-            )
-
-        edge_index_t = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
-        edge_labels_t = torch.tensor(edge_labels, dtype=torch.long)
-
-        return edge_index_t, edge_labels_t
-
-    except Exception as e:
-        logger.warning(f"Ligand {mol}: cannot get edges: {e}")
-        return None, None
 
 
 def _pocket_features(
@@ -421,8 +233,6 @@ class CrossDockedDataSet(InMemoryDataset):
             indicating whether the data object should be included in the final
             dataset. (default: :obj:`None`)
         split (str): One of 'train', or 'test' to specify the dataset split.
-        pocket_dist_cutoff: Include a standard residue if any of its heavy atoms are
-            within this distance (Å) of any ligand heavy atom.
     """
 
     CROSS_DOCKED_ID = "10KGuj15mxOJ2FBsduun2Lggzx0yPreEU"
@@ -435,10 +245,8 @@ class CrossDockedDataSet(InMemoryDataset):
         pre_transform=None,
         pre_filter=None,
         split: str = "train",
-        pocket_dist_cutoff: float = 6.0,
     ):
         self.split = split
-        self.pocket_dist_cutoff = pocket_dist_cutoff
         super().__init__(root, transform, pre_transform, pre_filter)
         split = split.lower()
         if split == "train":
@@ -554,11 +362,6 @@ class CrossDockedDataSet(InMemoryDataset):
     ) -> list[Data]:
         data_list: list[Data] = []
         failed: int = 0
-
-        # if split_name == "test":
-        #     add_hydrogens = False
-        # else:
-        #     add_hydrogens = True
 
         add_hydrogens = True
 

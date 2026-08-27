@@ -1,32 +1,24 @@
 from __future__ import annotations
 
-import copy
 import logging
 import os
-import random
 import subprocess
 import tarfile
 from pathlib import Path
 
 import biotite.structure.io.pdbx as pdbx
 import networkx as nx
-import numpy as np
-import openbabel
 import torch
-from Bio.PDB import PDBParser
-from Bio.PDB.Polypeptide import is_aa
 from dask.distributed import Client, LocalCluster, as_completed
 from rdkit import Chem, RDLogger
-from rdkit.Chem import AllChem
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
 
-from .dataset_crossdocked import (AA_VOCABULARY, ATOM_VOCABULARY,
+from .dataset_utils import (AA_VOCABULARY, ATOM_VOCABULARY,
                                   _largest_fragment, _ligand_edges,
                                   _ligand_features)
 
 RDLogger.DisableLog("rdApp.*")
-
 SEED = 0
 
 

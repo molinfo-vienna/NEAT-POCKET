@@ -28,7 +28,7 @@ from rdkit import Chem
 from rdkit.Chem import BRICS, SDWriter
 
 from neat.dataset import DataModule
-from neat.dataset.dataset_crossdocked import _largest_fragment
+from neat.dataset.dataset_utils import _largest_fragment
 from neat.utils import center_pdb, cif_2_pdb
 
 plt.rcParams["font.size"] = 18

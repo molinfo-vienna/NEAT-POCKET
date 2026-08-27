@@ -26,8 +26,8 @@ from rdkit import Chem
 from torch_geometric.data import Batch
 
 from neat.dataset import DataModule
-from neat.dataset.dataset_crossdocked import (_largest_fragment,
-                                              _ligand_features)
+from neat.dataset.dataset_utils import (_largest_fragment,
+                                        _ligand_features)
 from neat.model import NEAT
 from neat.model.bond_predictor import BondPredictor
 from neat.model.molecule_builder import MoleculeBuilder
