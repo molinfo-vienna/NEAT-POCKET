@@ -3,9 +3,9 @@ requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "neat"
-version = "1.1.0"
-description = "Neighborhood-Guided, Efficient, Autoregressive Set Transformer for 3D Molecular Generation"
+name = "neat-pc"
+version = "1.0.0"
+description = "Pocket-Conditioned 3D Molecular Generation with a Neighborhood-Guided, Efficient, Autoregressive Set Transformer"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT License"}
@@ -15,9 +15,18 @@ authors = [
 ]
 
 dependencies = [
+    "biopython==1.87",
+    "biotite==1.6.0",
+    "dask==2026.3.0",
+    "distributed==2026.3.0",
+    "e3nn==0.6.0",
+    "gdown==6.0.0",
     "lightning==2.5.5",
+    "matplotlib==3.10.9",
     "networkx==3.5",
     "numpy==1.26.4",
+    "posebusters==0.6.5",
+    "posecheck==1.3.1",
     "pyYAML==6.0.3",
     "py3dmol==2.5.3",
     "rdkit==2025.9.1",
@@ -25,13 +34,8 @@ dependencies = [
     "torch_geometric",  # version managed by torch
     "tqdm==4.67.1",
     "tensorboard===2.20.0",
-    "posebusters==0.6.5",
-    "gdown==6.0.0",
-    "biopython==1.87",
+    "seaborn==0.13.2",
     "setuptools==80.10.2",
-    "posecheck",
-    "dask",
-    "distributed",
 ]
 
 [project.optional-dependencies]
@@ -39,9 +43,7 @@ vis = [
     "ipykernel==7.0.1",
     "ipython==9.6.0",
     "ipywidgets==8.1.7",
-    "matplotlib==3.10.7",
     "pillow==12.0.0",
-    "seaborn==0.13.2",
 ]
 
 [tool.setuptools]

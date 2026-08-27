@@ -1,16 +1,17 @@
 """Conditional pocket-conditioned molecule generation with NEAT.
 
 Workflow:
-  1. Load a trained checkpoint and the CrossDocked test set.
+  1. Load a trained checkpoint.
   2. For each pocket chunk: center the pocket/ligand, optionally load a
      precomputed BRICS fragment, and run model.generate().
-  3. Save generated_mols.pt per pocket under output/.../conditional/.
+  3. Save generated_mols.pt and generated_mols.sdf per pocket under output/.../conditional/.
+     If conditional generation is performed, then also saves ligand.sdf and pocket.pdb.
 
-Fragment-based (FBDD) generation is controlled by `fragment_type` in
+Fragment-based generation is controlled by `fragment_type` in
 config_generation_conditional.yaml:
   - null: standard pocket-conditioned generation (no fragment seed)
   - largest | second_largest | smallest: seed generation from that
-    precomputed fragment (see scripts/fragments_from_crossdocked.py)
+    precomputed fragment (see scripts/fragments_from_dataset.py)
 """
 
 import argparse
@@ -43,6 +44,7 @@ seed_everything(42)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROOT = os.getcwd()
+DEFAULT_CONFIG = os.path.join(ROOT, "scripts", "config_files", "config_generation_conditional.yaml")
 FRAGMENTS_DIR = os.path.join(ROOT, "fragments")
 FRAGMENT_TYPES = ("largest", "second_largest", "smallest")
 
@@ -128,17 +130,11 @@ def generate(args: argparse.Namespace) -> None:
             scripts/config_generation_conditional.yaml.
     """
     # --- Config & model ---
-    if args.config_file is not None:
-        CONFIG_FILE_PATH = args.config_file
-        print(f"Using config file: {CONFIG_FILE_PATH}")
-    else:
-        CONFIG_FILE_PATH = os.path.join(
-            ROOT, "scripts", "config_generation_conditional.yaml"
-        )
-        print(f"Using default config file: {CONFIG_FILE_PATH}")
+    config_path = args.config_file or DEFAULT_CONFIG
+    print(f"Using config: {config_path}")
 
     params = yaml.load(
-        open(CONFIG_FILE_PATH, "r"),
+        open(config_path, "r"),
         Loader=yaml.FullLoader,
     )
 

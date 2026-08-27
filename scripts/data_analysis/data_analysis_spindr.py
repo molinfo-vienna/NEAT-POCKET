@@ -1,21 +1,16 @@
-import gzip
 import logging
 import os
-import pickle
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from rdkit import Chem
-from rdkit.Chem import (QED, SDMolSupplier, rdFingerprintGenerator,
-                        rdMolDescriptors)
-from scipy.spatial.distance import jensenshannon
+from rdkit.Chem import QED, SDMolSupplier, rdMolDescriptors
 
 plt.rcParams["font.size"] = 18
 
 ROOT = Path(os.getcwd())
-FPSCORES_PATH = ROOT / "scripts" / "data_analysis" / "fpscores.pkl.gz"
 OUTPUT_PATH = ROOT / "output" / "data_analysis_spindr"
 
 if not OUTPUT_PATH.exists():
@@ -78,19 +73,6 @@ def compute_atom_fractions(mols):
             counts[symbol] = counts.get(symbol, 0) + 1
     total = sum(counts.values())
     return {symbol: safe_fraction(count, total) for symbol, count in counts.items()}
-
-
-def compute_fragment_score(mol, fpscores):
-    mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=2)
-    sfp = mfpgen.GetSparseCountFingerprint(mol)
-    frag_score = 0
-    num_frag_bits = 0
-    sfp_nze = sfp.GetNonzeroElements()
-    for id, count in sfp_nze.items():
-        num_frag_bits += count
-        frag_score += fpscores.get(id, -4) * count
-
-    return safe_fraction(frag_score, num_frag_bits)
 
 
 def get_ring_counts(mol):
@@ -305,36 +287,6 @@ def safe_draw_median(ax, values, color):
     return median
 
 
-def compute_js_divergence_by_method(reference_values, values_by_method):
-    valid_value_sets = [values for values in values_by_method.values() if values.size]
-    if not reference_values.size or not valid_value_sets:
-        return {method: np.nan for method in METHODS}
-
-    all_values = np.concatenate(valid_value_sets)
-    bin_edges = np.histogram_bin_edges(all_values, bins=100)
-    js_by_method = {}
-    for method in METHODS:
-        values = values_by_method[method]
-        if not values.size:
-            logging.warning(
-                "Skipping fragment score Jensen-Shannon divergence for %s: no valid values",
-                method,
-            )
-            js_by_method[method] = np.nan
-            continue
-        js_by_method[method] = js_divergence(reference_values, values, bin_edges)
-    return js_by_method
-
-
-def js_divergence(reference, samples, bin_edges):
-    """Jensen-Shannon divergence between two 1D sample distributions (base 2, in [0, 1])."""
-    hist_ref, _ = np.histogram(reference, bins=bin_edges, density=False)
-    hist_samp, _ = np.histogram(samples, bins=bin_edges, density=False)
-    p = hist_ref / hist_ref.sum()
-    q = hist_samp / hist_samp.sum()
-    return float(jensenshannon(p, q, base=2) ** 2)
-
-
 def get_mols(path):
     mols = []
     if "spindr" in str(path):
@@ -400,16 +352,6 @@ def ranks_by_closeness(abs_devs_by_method):
     return {METHODS[idx]: rank for rank, idx in enumerate(order, start=1)}
 
 
-def readFragmentScores(name=FPSCORES_PATH):
-
-    data = pickle.load(gzip.open(name))
-    outDict = {}
-    for i in data:
-        for j in range(1, len(i)):
-            outDict[i[j]] = float(i[0])
-    return outDict
-
-
 def main() -> None:
 
     ### Load data ###
@@ -427,40 +369,18 @@ def main() -> None:
     logging.info(f"FLOWR: {len(mols_flowr)} molecules")
     logging.info(f"NEAT: {len(mols_neat)} molecules")
 
-    ### Read fragment scores ###
-
-    fpscores = readFragmentScores()
-
     ### Compute statistics ###
 
-    fragment_scores_spindr = compute_property_list(
-        mols_spindr,
-        "SPINDR",
-        "fragment score",
-        lambda mol: compute_fragment_score(mol, fpscores),
-    )
     general_stats_spindr = compute_property_lists(
         mols_spindr, "SPINDR", GENERAL_STAT_FUNCS
     )
     ring_stats_spindr = compute_property_lists(mols_spindr, "SPINDR", RING_STAT_FUNCS)
 
-    fragment_scores_flowr = compute_property_list(
-        mols_flowr,
-        "FLOWR",
-        "fragment score",
-        lambda mol: compute_fragment_score(mol, fpscores),
-    )
     general_stats_flowr = compute_property_lists(
         mols_flowr, "FLOWR", GENERAL_STAT_FUNCS
     )
     ring_stats_flowr = compute_property_lists(mols_flowr, "FLOWR", RING_STAT_FUNCS)
 
-    fragment_scores_neat = compute_property_list(
-        mols_neat,
-        "NEAT",
-        "fragment score",
-        lambda mol: compute_fragment_score(mol, fpscores),
-    )
     general_stats_neat = compute_property_lists(mols_neat, "NEAT", GENERAL_STAT_FUNCS)
     ring_stats_neat = compute_property_lists(mols_neat, "NEAT", RING_STAT_FUNCS)
 
@@ -477,44 +397,14 @@ def main() -> None:
     general_stat_names = [name for name, _ in GENERAL_STAT_FUNCS]
     ring_stat_names = [name for name, _ in RING_STAT_FUNCS]
 
-    avg_fragment_scores_spindr = mean_or_nan(fragment_scores_spindr)
     avg_general_stats_spindr = property_means(general_stats_spindr, general_stat_names)
     avg_ring_stats_spindr = property_means(ring_stats_spindr, ring_stat_names)
 
-    avg_fragment_scores_flowr = mean_or_nan(fragment_scores_flowr)
     avg_general_stats_flowr = property_means(general_stats_flowr, general_stat_names)
     avg_ring_stats_flowr = property_means(ring_stats_flowr, ring_stat_names)
 
-    avg_fragment_scores_neat = mean_or_nan(fragment_scores_neat)
     avg_general_stats_neat = property_means(general_stats_neat, general_stat_names)
     avg_ring_stats_neat = property_means(ring_stats_neat, ring_stat_names)
-
-    ### Log average statistics ###
-
-    logging.info(f"\nFragment scores (min, mean, max):")
-    logging.info(f"\tSPINDR: {format_distribution_summary(fragment_scores_spindr)}")
-    logging.info(f"\tFLOWR: {format_distribution_summary(fragment_scores_flowr)}")
-    logging.info(f"\tNEAT: {format_distribution_summary(fragment_scores_neat)}")
-
-    ### Compute and log Jensen-Shannon divergence of fragment scores ###
-
-    fragment_scores_by_method = {
-        "SPINDR": fragment_scores_spindr,
-        "FLOWR": fragment_scores_flowr,
-        "NEAT": fragment_scores_neat,
-    }
-    fragment_score_js = compute_js_divergence_by_method(
-        fragment_scores_spindr, fragment_scores_by_method
-    )
-
-    logging.info(
-        "\nFragment score Jensen-Shannon divergence from SPINDR "
-        "(base 2, 0 = identical, 1 = maximally different):"
-    )
-    for method, js in sorted(
-        fragment_score_js.items(), key=lambda x: np.inf if np.isnan(x[1]) else x[1]
-    ):
-        logging.info(f"\t{method}: {js:.6f}")
 
     ### Plot statistics ###
 
@@ -786,40 +676,6 @@ def main() -> None:
     logging.info("\nAverage ranks (lower is better):")
     for method, avg_rank in sorted(avg_ranks.items(), key=lambda x: x[1]):
         logging.info(f"\t{method}: {avg_rank:.3f}")
-
-    # 6. Fragment score distribution
-
-    fig, ax = plt.subplots(figsize=(30, 12))
-
-    ax.hist(
-        fragment_scores_flowr,
-        bins=100,
-        label="FLOWR",
-        histtype="step",
-        density=True,
-        color=COLOR_SCHEME["FLOWR"],
-        linewidth=2,
-    )
-    ax.hist(
-        fragment_scores_neat,
-        bins=100,
-        label="NEAT",
-        histtype="step",
-        density=True,
-        color=COLOR_SCHEME["NEAT"],
-        linewidth=3,
-    )
-
-    mean_flowr = safe_draw_median(ax, fragment_scores_flowr, COLOR_SCHEME["FLOWR"])
-    mean_neat = safe_draw_median(ax, fragment_scores_neat, COLOR_SCHEME["NEAT"])
-
-    ax.set_xlabel("Fragment score")
-    ax.set_ylabel("Density")
-    ax.legend()
-    plt.tight_layout()
-    plt.savefig(OUTPUT_PATH / "fragment_score_distribution.png")
-    plt.show()
-
 
 if __name__ == "__main__":
     main()

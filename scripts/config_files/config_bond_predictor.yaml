@@ -1,0 +1,14 @@
+data_set: SPINDR                                            # Dataset to use for training.
+batch_size: 256                                             # Batch size.
+radius: 2.5                                                 # Radius of the radius graph.
+noise_ratio: 0.05                                           # Ratio of noise to the input coordinates.
+n_embd: 64                                                  # Embedding size.
+n_conv_layers: 3                                            # Number of convolutional layers.
+dropout: 0.1                                                # Dropout rate.
+learning_rate: 1.0e-3                                       # Learning rate.
+weight_decay: 1.0e-6                                        # Weight decay.
+max_epochs: 100                                             # Maximum number of epochs.
+lr_warmup_epochs: 5                                         # Number of epochs to linearly warm up the learning rate.
+lr_min_ratio: 0.1                                           # Minimum ratio of the learning rate after decay.
+early_stopping_patience: 20                                 # Number of epochs to wait before early stopping.
+early_stopping_min_delta: 1.0e-3                            # Minimum delta for early stopping.

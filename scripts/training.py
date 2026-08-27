@@ -32,6 +32,7 @@ seed_everything(42)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROOT = os.getcwd()
+DEFAULT_CONFIG = os.path.join(ROOT, "scripts", "config_files", "config_training.yaml")
 
 
 def train(args: argparse.Namespace) -> None:
@@ -45,16 +46,12 @@ def train(args: argparse.Namespace) -> None:
     """
 
     # (1) Load configuration
-    if args.config_file is not None:
-        config_file_path = args.config_file
-        print(f"Using config file: {config_file_path}")
-    else:
-        config_file_path = os.path.join(ROOT, "scripts", "config_training.yaml")
-        print(f"Using default config file: {config_file_path}")
+    config_path = args.config_file or DEFAULT_CONFIG
+    print(f"Using config: {config_path}")
 
     MODEL = NEAT
     params = yaml.load(
-        open(config_file_path, "r"),
+        open(config_path, "r"),
         Loader=yaml.FullLoader,
     )
 

@@ -1,4 +1,4 @@
-f"""Precompute BRICS fragments from CrossDocked or SPINDR test ligands for FBDD generation.
+f"""Precompute BRICS fragments from CrossDocked or SPINDR test ligands for fragment-based generation.
 
 For each test pocket:
   1. Center the pocket and shift the reference ligand into that frame.
@@ -23,7 +23,6 @@ from typing import List
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-import yaml
 from rdkit import Chem
 from rdkit.Chem import BRICS, SDWriter
 

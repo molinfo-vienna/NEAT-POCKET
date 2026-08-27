@@ -1,0 +1,32 @@
+accumulate_grad_batches: 1                                    # Number of gradient updates to accumulate before performing an update on the model parameters.
+batch_size: 32                                                # Number of samples in a batch.
+bias: true                                                    # Whether to use bias in the model.
+bond_predictor_dir: trained_models/bond_predictor/bp_spindr   # Directory containing the bond predictor model.
+cfg_dropout: 0.2                                              # Dropout rate for the CFG model.
+clash_penalty: 4.0                                            # Penalty for clashes.
+clash_penalty_margin: 0.0                                     # Margin for clashes.
+data_set: SPINDR                                              # Dataset to use for training.
+dropout: 0.1                                                  # Dropout rate for the model.
+freeze_pretrained: true                                       # Whether to freeze the pretrained model for a certain number of epochs.
+global_cond_proj: true                                        # Whether to use a global conditional projection (AdaLN-single).
+learning_rate: 5.0e-05                                        # Learning rate.
+lr_decay_epochs: 5000                                         # Number of epochs to decay the learning rate.
+lr_min_ratio: 0.1                                             # Minimum ratio of the learning rate after decay.
+lr_warmup_epochs: 10                                          # Number of epochs to linearly warm up the learning rate.
+max_epochs: 5000                                              # Maximum number of epochs to train the model.
+n_embd: 768                                                   # Embedding size of the transformer trunk.
+n_embd_fm: 1536                                               # Embedding size of the flow matching head.
+n_head: 12                                                    # Number of attention heads in the transformer trunk.
+n_layer: 12                                                   # Number of layers in the transformer trunk.
+n_layers_fm: 6                                                # Number of layers in the flow matching head.
+noise_std: 2.5                                                # Standard deviation of the noise for the flow matching head.
+perturbation_fraction: 0.5                                    # Fraction of the source-set positions to perturb for the flow matching head.
+perturbation_std: 0.05                                        # Standard deviation of the Gaussian noise added to the source-set positions.
+pocket_n_layer: 4                                             # Number of layers in the residue-level pocket transformer.
+pocket_n_layer_atom_level: 1                                  # Number of layers in the atom-level pocket transformer.
+pretrained_model_path: trained_models/pretrained_geom         # Path to the pretrained model weights.
+residue_pooling: sum                                          # Pooling method for the atom-to-residue-level pocket transformer.
+time_step_resampling: 4                                       # Number of time steps to resample for the flow matching head.
+time_step_sampling: logit_normal                              # Time step sampling method for the flow matching head.
+unfreeze_epoch: 150                                           # Number of epochs after which to unfreeze the pretrained model.
+weight_decay: 1.0e-06                                         # Weight decay.

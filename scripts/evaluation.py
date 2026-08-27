@@ -62,7 +62,7 @@ NUM_MOLECULES_PER_ROW = 5
 PLOT_RESOLUTION = 400
 
 ROOT = Path(os.getcwd())
-DEFAULT_CONFIG = ROOT / "scripts" / "config_evaluation.yaml"
+DEFAULT_CONFIG = ROOT / "scripts" / "config_files" / "config_evaluation.yaml"
 RESULT_SUBDIR_PREFIXES = ("seed", "prefix", "pocket")
 
 

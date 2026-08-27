@@ -1,10 +1,7 @@
-"""Train bond predictor models on the respective datasets.
+"""Train bond predictor models on the respective datasets (QM9, GEOM, CrossDocked, SPINDR).
 
 Uses DataModule with task="bond_prediction" which precomputes radius-graph edges
 and edge labels. The BondPredictor predicts bond type per edge.
-
-Usage:
-    python scripts/training_bond_predictor.py --config scripts/config_bond_predictor.yaml
 """
 
 import argparse
@@ -30,6 +27,7 @@ torch_geometric.seed_everything(42)
 seed_everything(42)
 
 ROOT = os.getcwd()
+DEFAULT_CONFIG = os.path.join(ROOT, "scripts", "config_files", "config_bond_predictor.yaml")
 
 
 def train(args: argparse.Namespace) -> None:
@@ -43,9 +41,7 @@ def train(args: argparse.Namespace) -> None:
     """
     
     # (1) Load configuration
-    config_path = args.config_file or os.path.join(
-        ROOT, "scripts", "config_bond_predictor.yaml"
-    )
+    config_path = args.config_file or DEFAULT_CONFIG
     print(f"Using config: {config_path}")
 
     params = yaml.load(
