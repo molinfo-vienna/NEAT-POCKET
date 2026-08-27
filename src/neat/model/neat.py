@@ -622,7 +622,7 @@ class NEAT(LightningModule):
         )
         for block in self.atom_level_pocket_transformer_blocks:
             x_atom = block(
-                x_atom, attn_mask=attn_mask_atom, pos=None
+                x_atom, attn_mask=attn_mask_atom
             )  # [num_residues, max_atom_count_per_residue, n_embd]
         x_atom = self.layer_norm_after_atom_level_pocket_transformer_blocks(
             x_atom

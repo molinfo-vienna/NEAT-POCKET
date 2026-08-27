@@ -60,7 +60,6 @@ class MaskedBidirectionalAttention(nn.Module):
         n_head: int,
         dropout: float,
         bias: bool,
-        pos_embedder: Optional[nn.Module] = None,
     ) -> None:
         super().__init__()
         assert n_embd % n_head == 0
@@ -74,13 +73,11 @@ class MaskedBidirectionalAttention(nn.Module):
         self.n_head = n_head
         self.n_embd = n_embd
         self.dropout = dropout
-        self.pos_embedder = pos_embedder
 
     def forward(
         self,
         x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
-        pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, T, C = (
             x.size()
@@ -97,9 +94,6 @@ class MaskedBidirectionalAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(
             1, 2
         )  # (B, nh, T, hs)
-
-        if self.pos_embedder and pos is not None:
-            q, k = self.pos_embedder(q, k, pos)
 
         # Apply scaled dot-product attention with the provided attention mask
         y = torch.nn.functional.scaled_dot_product_attention(
@@ -127,7 +121,13 @@ class BidirectionalAttentionBlock(nn.Module):
         n_head (int): Number of attention heads.
         dropout (float): Dropout rate.
         bias (bool): Whether to use bias in the layers.
-        pos_embedder (Optional[nn.Module]): Positional embedder to use. Relates to rope embeddings.
+        enable_cross_attention (bool): Whether to enable cross-attention. Default is False.
+        scale_shift_weights (bool): Cross-attention uses scale and shift tensors for AdaLN. 
+            If true, scale and shift weights are learned at each attention block. This 
+            corresponds to the standard AdaLN implementation. If false, the AdaLN condition is 
+            only modulated by a learned bias at attention block level (the non-linear 
+            mapping should already happen before on a global level). This corresponds to
+            the AdaLN-single implementation, that we use by default. Default is False.
 
     Returns:
         nn.Module: A transformer block module.
@@ -141,13 +141,12 @@ class BidirectionalAttentionBlock(nn.Module):
         bias: bool,
         enable_cross_attention: bool = False,
         scale_shift_weights: bool = False,
-        pos_embedder: Optional[nn.Module] = None,
     ) -> None:
         super().__init__()
         self.scale_shift_weights = scale_shift_weights
         self.ln_1 = nn.LayerNorm(n_embd, bias=False)
         self.attn = MaskedBidirectionalAttention(
-            n_embd, n_head, dropout, bias, pos_embedder
+            n_embd, n_head, dropout, bias
         )
         if enable_cross_attention:
             self.ln_2 = nn.LayerNorm(n_embd, bias=False)
@@ -171,7 +170,6 @@ class BidirectionalAttentionBlock(nn.Module):
         cross_attn_input: Optional[torch.Tensor] = None,
         cross_attn_mask: Optional[torch.Tensor] = None,
         ada_ln_condition: Optional[torch.Tensor] = None,
-        pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # Preliminary: If using cross-attention, we use AdaLN
         if self.cross_attention:
@@ -186,7 +184,7 @@ class BidirectionalAttentionBlock(nn.Module):
         # (1) Self-attention
         norm_x = self.ln_1(x)
         norm_x = norm_x * (1 + alpha_1) + beta_1 if self.cross_attention else norm_x
-        attention_residuals = self.attn(norm_x, attn_mask=attn_mask, pos=pos)
+        attention_residuals = self.attn(norm_x, attn_mask=attn_mask)
         attention_residuals = (
             attention_residuals * (1 + gamma_1)
             if self.cross_attention
