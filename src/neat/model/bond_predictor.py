@@ -1,4 +1,4 @@
-"""Bond predictor GNN: given atom types and coordinates, predict bond types for edges."""
+"""Bond predictor GNN: given atom types and coordinates, predict bond types for edges of a radius graph."""
 
 import math
 
@@ -10,10 +10,10 @@ from torch import Tensor
 from torch.nn import functional as F
 from torch.optim import AdamW
 from torch_geometric.data import Data
-from torch_geometric.nn import GINEConv, radius_graph
+from torch_geometric.nn import radius_graph
 from torch_geometric.transforms import Distance
 
-# Bond types: 0=no bond, 1=single, 2=double, 3=triple, 4=aromatic
+# Bond types: 0=no bond, 1=single, 2=double, 3=triple
 NUM_BOND_TYPES = 4
 
 
@@ -78,7 +78,7 @@ class BondPredictor(LightningModule):
             data: PyG Batch with x, edge_index, edge_attr, edge_labels.
 
         Returns:
-            bond_logits: [num_edges, 5] logits per edge.
+            bond_logits: [num_edges, 4] logits per edge.
         """
         if data.edge_index.shape[1] == 0:
             return torch.zeros(0, NUM_BOND_TYPES, device=data.x.device)
@@ -113,7 +113,7 @@ class BondPredictor(LightningModule):
         """Predict bond types for inference. Builds radius graph from pos/batch.
 
         Returns:
-            bond_types: [num_edges] predicted class (0-4) per edge.
+            bond_types: [num_edges] predicted class (0-3) per edge.
             pair_indices: [num_edges, 2] (src, dst) for each edge.
         """
         if device is None:

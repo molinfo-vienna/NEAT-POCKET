@@ -13,529 +13,15 @@ from tqdm import tqdm
 
 from neat.model import BondPredictor
 
-# Bond type mapping: 0=no bond, 1=single, 2=double, 3=triple
-RDKIT_BOND_TYPES = [
-    None,
-    Chem.rdchem.BondType.SINGLE,
-    Chem.rdchem.BondType.DOUBLE,
-    Chem.rdchem.BondType.TRIPLE,
-]
-
-# Standard maximum valence lookup table by atomic number
-MAX_VALENCE_TABLE = {
-    1: 1,  # H
-    6: 4,  # C
-    7: 4,  # N (allows ammonium / nitro groups)
-    8: 3,  # O
-    9: 1,  # F
-    15: 5,  # P
-    16: 6,  # S
-    17: 1,  # Cl
-    35: 1,  # Br
-    53: 1,  # I
-}
-
-MIN_VALENCE_TABLE = {
-    1: 1,  # H
-    6: 4,  # C (forces tetravalent carbon)
-    7: 3,  # N
-    8: 1,  # O
-    9: 1,  # F
-    15: 3,  # P
-    16: 2,  # S
-    17: 1,  # Cl
-    35: 1,  # Br
-    53: 1,  # I
-}
-
-BOND_ORDERS = np.array([0.0, 1.0, 2.0, 3.0])  # 0=none, 1=single, 2=double, 3=triple
-
-# Allowed neutral valence states for main-group elements
-NEUTRAL_VALENCE_SETS = {
-    1: {1},  # H
-    5: {3},  # B
-    6: {4},  # C
-    7: {3},  # N
-    8: {2},  # O
-    9: {1},  # F
-    14: {4},  # Si
-    15: {3, 5},  # P: 3 (phosphines), 5 (phosphine oxides / phosphates)
-    16: {2, 4, 6},  # S: 2 (thiols/sulfides), 4 (sulfoxides), 6 (sulfones)
-    17: {1},  # Cl
-    35: {1},  # Br
-    53: {1},  # I
-}
-
-# Explicit overrides for non-neutral organic species: (atomic_number, explicit_valence) -> formal_charge
-CHARGED_STATE_LOOKUP = {
-    # Nitrogen
-    (7, 4): 1,  # Quaternary ammonium / pyridinium / nitro N+
-    (7, 2): -1,  # Amide anion N-
-    # Oxygen
-    (8, 1): -1,  # Carboxylate / alkoxide O-
-    (8, 3): 1,  # Oxonium / pyrylium O+
-    # Sulfur
-    (16, 1): -1,  # Thiolate S-
-    (16, 3): 1,  # Sulfonium S+
-    (16, 5): 1,  # Sulfoxonium S+
-    # Phosphorus
-    (15, 4): 1,  # Phosphonium P+
-    (15, 6): -1,  # Hexafluorophosphate P-
-    # Boron
-    (5, 4): -1,  # Borohydride / Tetraphenylborate B-
-}
-
-
-def assign_rule_based_formal_charge(atom: Chem.Atom, explicit_valence: float) -> int:
-    """Assigns formal charges accounting for hypervalent neutral states (P, S, I)
-
-    and standard ionic organic functional groups.
-    """
-    z = atom.GetAtomicNum()
-    val = int(round(explicit_valence))
-
-    # 1. Check if explicit valence matches ANY valid neutral state for this element
-    neutral_valences = NEUTRAL_VALENCE_SETS.get(z)
-    if neutral_valences and val in neutral_valences:
-        return 0
-
-    # 2. Check explicit ionic lookup table
-    if (z, val) in CHARGED_STATE_LOOKUP:
-        return CHARGED_STATE_LOOKUP[(z, val)]
-
-    # Default fallback
-    return 0
-
-
-def solve_bond_ilp_scipy(
-    probs: np.ndarray,
-    edge_pairs: np.ndarray,
-    atomic_nums: np.ndarray,
-    pos: Optional[np.ndarray] = None,
-    max_valence_dict: dict = MAX_VALENCE_TABLE,
-    min_valence_dict: dict = MIN_VALENCE_TABLE,
-    enforce_connectivity: bool = True,
-    min_allene_angle: float = 170.0,
-) -> np.ndarray:
-    """Solves ILP for bond assignment with vectorized geometric angle constraints."""
-    n_edges, n_classes = probs.shape
-    n_atoms = len(atomic_nums)
-    if n_edges == 0:
-        return np.zeros(0, dtype=int)
-
-    min_valences = np.array(
-        [min_valence_dict.get(int(a), 0) for a in atomic_nums], dtype=float
-    )
-    max_valences = np.array(
-        [max_valence_dict.get(int(a), 4) for a in atomic_nums], dtype=float
-    )
-
-    c_bonds = -np.log(np.clip(probs, 1e-8, 1.0)).reshape(-1)
-
-    n_bond_vars = n_edges * n_classes
-    n_flow_vars = (2 * n_edges) if (enforce_connectivity and n_atoms > 1) else 0
-    total_vars = n_bond_vars + n_flow_vars
-
-    c = np.zeros(total_vars)
-    c[:n_bond_vars] = c_bonds
-
-    # Constraint 1: Exactly 1 bond type chosen per edge
-    row_a1 = np.repeat(np.arange(n_edges), n_classes)
-    col_a1 = np.arange(n_classes * n_edges)
-    data_a1 = np.ones(n_classes * n_edges)
-
-    # Constraint 2: Total valence per atom
-    row_a2, col_a2, data_a2 = [], [], []
-    for e_idx, (u, v) in enumerate(edge_pairs):
-        for k in range(n_classes):
-            bo = BOND_ORDERS[k]
-            if bo > 0:
-                var_idx = n_classes * e_idx + k
-                row_a2.extend([u, v])
-                col_a2.extend([var_idx, var_idx])
-                data_a2.extend([bo, bo])
-
-    rows = list(row_a1) + [r + n_edges for r in row_a2]
-    cols = list(col_a1) + col_a2
-    data = list(data_a1) + data_a2
-
-    lb_list = [np.ones(n_edges), min_valences]
-    ub_list = [np.ones(n_edges), max_valences]
-    row_count = n_edges + n_atoms
-
-    # Constraint 3: Graph Connectivity via Single-Commodity Flow
-    if enforce_connectivity and n_atoms > 1:
-        flow_offset = n_bond_vars
-        for i in range(n_atoms):
-            for e_idx, (u, v) in enumerate(edge_pairs):
-                f_uv = flow_offset + 2 * e_idx
-                f_vu = flow_offset + 2 * e_idx + 1
-
-                if u == i:
-                    rows.extend([row_count, row_count])
-                    cols.extend([f_uv, f_vu])
-                    data.extend([1.0, -1.0])
-                elif v == i:
-                    rows.extend([row_count, row_count])
-                    cols.extend([f_vu, f_uv])
-                    data.extend([1.0, -1.0])
-
-            req = float(n_atoms - 1) if i == 0 else -1.0
-            lb_list.append([req])
-            ub_list.append([req])
-            row_count += 1
-
-        big_m = float(n_atoms - 1)
-        for e_idx in range(n_edges):
-            f_uv = flow_offset + 2 * e_idx
-            f_vu = flow_offset + 2 * e_idx + 1
-
-            rows.extend([row_count, row_count])
-            cols.extend([f_uv, f_vu])
-            data.extend([1.0, 1.0])
-
-            for k in range(1, n_classes):
-                rows.append(row_count)
-                cols.append(e_idx * n_classes + k)
-                data.append(-big_m)
-
-            lb_list.append([-np.inf])
-            ub_list.append([0.0])
-            row_count += 1
-
-    # -------------------------------------------------------------
-    # Constraint 4: Vectorized Angle-based exclusion for cumulenes and alkynes
-    # -------------------------------------------------------------
-    if pos is not None and min_allene_angle > 0 and n_edges > 1:
-        SINGLE_BOND_K = 1
-        DOUBLE_BOND_K = 2
-        TRIPLE_BOND_K = 3
-
-        # Deconstruct edges into 2E directed relationships: center -> neighbor
-        centers = np.concatenate([edge_pairs[:, 0], edge_pairs[:, 1]])
-        neighbors = np.concatenate([edge_pairs[:, 1], edge_pairs[:, 0]])
-        e_indices = np.concatenate([np.arange(n_edges), np.arange(n_edges)])
-
-        # Calculate normalized vectors from center to neighbor
-        vecs = pos[neighbors] - pos[centers]
-        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
-        vecs = np.divide(vecs, norms, out=np.zeros_like(vecs), where=norms > 1e-6)
-
-        # Boolean mask (2E x 2E): True if two vectors share the same center
-        same_center = centers[:, None] == centers[None, :]
-        # Ensure we only check unique pairs of DIFFERENT edges
-        valid_pairs = same_center & (e_indices[:, None] < e_indices[None, :])
-
-        idx1, idx2 = np.where(valid_pairs)
-
-        if len(idx1) > 0:
-            # Vectorized dot product for all valid pairs
-            cosines = np.sum(vecs[idx1] * vecs[idx2], axis=1)
-            cosines = np.clip(cosines, -1.0, 1.0)
-            angles = np.degrees(np.arccos(cosines))
-
-            # Mask pairs below the linear threshold
-            violating_mask = angles < min_allene_angle
-
-            bad_e1 = e_indices[idx1[violating_mask]]
-            bad_e2 = e_indices[idx2[violating_mask]]
-
-            n_violations = len(bad_e1)
-            if n_violations > 0:
-                # Add up to 3 constraints per violation:
-                # 1. Double/Double, 2. Single/Triple, 3. Triple/Single
-                rules_per_violation = 3
-                n_new_constraints = n_violations * rules_per_violation
-
-                new_rows = np.repeat(
-                    np.arange(row_count, row_count + n_new_constraints), 2
-                )
-                new_cols = np.empty(n_new_constraints * 2, dtype=int)
-
-                # Rule 1: Double + Double <= 1
-                new_cols[0 : 2 * n_violations : 2] = n_classes * bad_e1 + DOUBLE_BOND_K
-                new_cols[1 : 2 * n_violations : 2] = n_classes * bad_e2 + DOUBLE_BOND_K
-
-                # Rule 2: Single + Triple <= 1
-                new_cols[2 * n_violations : 4 * n_violations : 2] = (
-                    n_classes * bad_e1 + SINGLE_BOND_K
-                )
-                new_cols[2 * n_violations + 1 : 4 * n_violations : 2] = (
-                    n_classes * bad_e2 + TRIPLE_BOND_K
-                )
-
-                # Rule 3: Triple + Single <= 1
-                new_cols[4 * n_violations : 6 * n_violations : 2] = (
-                    n_classes * bad_e1 + TRIPLE_BOND_K
-                )
-                new_cols[4 * n_violations + 1 : 6 * n_violations : 2] = (
-                    n_classes * bad_e2 + SINGLE_BOND_K
-                )
-
-                new_data = np.ones(n_new_constraints * 2)
-
-                rows.extend(new_rows.tolist())
-                cols.extend(new_cols.tolist())
-                data.extend(new_data.tolist())
-
-                lb_list.append(np.full(n_new_constraints, -np.inf))
-                ub_list.append(np.ones(n_new_constraints))
-                row_count += n_new_constraints
-
-    # Assemble Constraints and Bounds
-    A = csc_matrix((data, (rows, cols)), shape=(row_count, total_vars))
-    lb = np.concatenate(lb_list)
-    ub = np.concatenate(ub_list)
-
-    integrality = np.zeros(total_vars)
-    integrality[:n_bond_vars] = 1.0
-
-    bounds_ub = np.ones(total_vars)
-    if enforce_connectivity and n_atoms > 1:
-        bounds_ub[n_bond_vars:] = float(n_atoms - 1)
-
-    bounds = Bounds(np.zeros(total_vars), bounds_ub)
-    constraints = LinearConstraint(A, lb, ub)
-
-    res = milp(
-        c=c,
-        integrality=integrality,
-        bounds=bounds,
-        constraints=constraints,
-        options={"time_limit": 0.2},
-    )
-
-    if res.success:
-        sol = res.x[:n_bond_vars].reshape(n_edges, n_classes)
-        return np.argmax(sol, axis=1)
-
-    print("MILP solver failed or returned infeasible solution.")
-    return None
-
-
-# def solve_bond_ilp_scipy(
-#     probs: np.ndarray,
-#     edge_pairs: np.ndarray,
-#     atomic_nums: np.ndarray,
-#     max_valence_dict: dict = MAX_VALENCE_TABLE,
-#     min_valence_dict: dict = MIN_VALENCE_TABLE,
-#     enforce_connectivity: bool = True,
-# ) -> np.ndarray:
-#     """Solves Integer Linear Program for bond assignment subject to min/max valence
-
-#     constraints and single-commodity flow connectivity constraints.
-#     """
-#     n_edges, n_classes = probs.shape
-#     n_atoms = len(atomic_nums)
-#     if n_edges == 0:
-#         return np.zeros(0, dtype=int)
-
-#     min_valences = np.array(
-#         [min_valence_dict.get(int(a), 0) for a in atomic_nums], dtype=float
-#     )
-#     max_valences = np.array(
-#         [max_valence_dict.get(int(a), 4) for a in atomic_nums], dtype=float
-#     )
-
-#     # Base cost: Minimize -log(P) for chosen bond types
-#     c_bonds = -np.log(np.clip(probs, 1e-8, 1.0)).reshape(-1)
-
-#     n_bond_vars = n_edges * n_classes
-#     # Add 2 flow variables per edge (one for each direction: u -> v and v -> u)
-#     n_flow_vars = (2 * n_edges) if (enforce_connectivity and n_atoms > 1) else 0
-#     total_vars = n_bond_vars + n_flow_vars
-
-#     c = np.zeros(total_vars)
-#     c[:n_bond_vars] = c_bonds  # Flow variables have zero cost
-
-#     # Constraint 1: Exactly 1 bond type chosen per edge
-#     row_a1 = np.repeat(np.arange(n_edges), n_classes)
-#     col_a1 = np.arange(n_classes * n_edges)
-#     data_a1 = np.ones(n_classes * n_edges)
-
-#     # Constraint 2: Total valence per atom
-#     row_a2, col_a2, data_a2 = [], [], []
-#     for e_idx, (u, v) in enumerate(edge_pairs):
-#         for k in range(n_classes):
-#             bo = BOND_ORDERS[k]
-#             if bo > 0:
-#                 var_idx = n_classes * e_idx + k
-#                 row_a2.extend([u, v])
-#                 col_a2.extend([var_idx, var_idx])
-#                 data_a2.extend([bo, bo])
-
-#     rows = list(row_a1) + [r + n_edges for r in row_a2]
-#     cols = list(col_a1) + col_a2
-#     data = list(data_a1) + data_a2
-
-#     lb_list = [np.ones(n_edges), min_valences]
-#     ub_list = [np.ones(n_edges), max_valences]
-#     row_count = n_edges + n_atoms
-
-#     # Constraint 3: Graph Connectivity via Single-Commodity Flow
-#     if enforce_connectivity and n_atoms > 1:
-#         flow_offset = n_bond_vars
-
-#         # 3a. Node Flow Conservation
-#         # Node 0 generates (N - 1) flow. Nodes 1..N-1 consume 1 unit.
-#         for i in range(n_atoms):
-#             for e_idx, (u, v) in enumerate(edge_pairs):
-#                 f_uv = flow_offset + 2 * e_idx
-#                 f_vu = flow_offset + 2 * e_idx + 1
-
-#                 if u == i:
-#                     rows.append(row_count)
-#                     cols.append(f_uv)
-#                     data.append(1.0)  # Outflow
-#                     rows.append(row_count)
-#                     cols.append(f_vu)
-#                     data.append(-1.0)  # Inflow
-#                 elif v == i:
-#                     rows.append(row_count)
-#                     cols.append(f_vu)
-#                     data.append(1.0)  # Outflow
-#                     rows.append(row_count)
-#                     cols.append(f_uv)
-#                     data.append(-1.0)  # Inflow
-
-#             req = float(n_atoms - 1) if i == 0 else -1.0
-#             lb_list.append([req])
-#             ub_list.append([req])
-#             row_count += 1
-
-#         # 3b. Edge Flow Capacity
-#         # Flow can only pass if edge e has a bond (k > 0): f_uv + f_vu <= (N - 1) * sum_{k>0} x_{e,k}
-#         big_m = float(n_atoms - 1)
-#         for e_idx in range(n_edges):
-#             f_uv = flow_offset + 2 * e_idx
-#             f_vu = flow_offset + 2 * e_idx + 1
-
-#             rows.append(row_count)
-#             cols.append(f_uv)
-#             data.append(1.0)
-#             rows.append(row_count)
-#             cols.append(f_vu)
-#             data.append(1.0)
-
-#             # Subtract Big-M * sum_{k>0} x_{e, k}
-#             for k in range(1, n_classes):
-#                 rows.append(row_count)
-#                 cols.append(e_idx * n_classes + k)
-#                 data.append(-big_m)
-
-#             lb_list.append([-np.inf])
-#             ub_list.append([0.0])
-#             row_count += 1
-
-#     # Assemble Constraints and Bounds
-#     A = csc_matrix((data, (rows, cols)), shape=(row_count, total_vars))
-#     lb = np.concatenate(lb_list)
-#     ub = np.concatenate(ub_list)
-
-#     integrality = np.zeros(total_vars)
-#     integrality[:n_bond_vars] = 1.0  # Bond variables are binary integers
-
-#     bounds_ub = np.ones(total_vars)
-#     if enforce_connectivity and n_atoms > 1:
-#         bounds_ub[n_bond_vars:] = float(n_atoms - 1)  # Flow upper bound
-
-#     bounds = Bounds(np.zeros(total_vars), bounds_ub)
-#     constraints = LinearConstraint(A, lb, ub)
-
-#     res = milp(
-#         c=c,
-#         integrality=integrality,
-#         bounds=bounds,
-#         constraints=constraints,
-#         options={"time_limit": 0.2},
-#     )
-
-#     if res.success:
-#         sol = res.x[:n_bond_vars].reshape(n_edges, n_classes)
-#         return np.argmax(sol, axis=1)
-
-#     print("MILP solver failed or returned infeasible solution.")
-#     return None
-
-
-# def solve_bond_ilp_scipy(
-#     probs: np.ndarray,
-#     edge_pairs: np.ndarray,
-#     atomic_nums: np.ndarray,
-#     max_valence_dict: dict = MAX_VALENCE_TABLE,
-#     min_valence_dict: dict = MIN_VALENCE_TABLE,
-# ) -> np.ndarray:
-#     """Solves Integer Linear Program for bond assignment subject to min/max valence constraints."""
-#     n_edges, n_classes = probs.shape
-#     n_atoms = len(atomic_nums)
-#     if n_edges == 0:
-#         return np.zeros(0, dtype=int)
-
-#     # Extract per-atom bounds (defaults fallback to 0 min and 4 max if unmapped)
-#     min_valences = np.array(
-#         [min_valence_dict.get(int(a), 0) for a in atomic_nums], dtype=float
-#     )
-#     max_valences = np.array(
-#         [max_valence_dict.get(int(a), 4) for a in atomic_nums], dtype=float
-#     )
-
-#     # Minimize -log(P) equivalent to maximizing log-probability
-#     c = -np.log(np.clip(probs, 1e-8, 1.0)).reshape(-1)  # [5 * E]
-
-#     # Constraint 1: Exactly 1 bond type chosen per edge -> sum_k x_{e, k} = 1
-#     row_a1 = np.repeat(np.arange(n_edges), n_classes)
-#     col_a1 = np.arange(n_classes * n_edges)
-#     data_a1 = np.ones(n_classes * n_edges)
-
-#     # Constraint 2: Total valence per atom
-#     row_a2 = []
-#     col_a2 = []
-#     data_a2 = []
-
-#     for e_idx, (u, v) in enumerate(edge_pairs):
-#         for k in range(n_classes):
-#             bo = BOND_ORDERS[k]
-#             if bo > 0:
-#                 var_idx = n_classes * e_idx + k
-#                 # Valence contribution to endpoint u
-#                 row_a2.append(u)
-#                 col_a2.append(var_idx)
-#                 data_a2.append(bo)
-#                 # Valence contribution to endpoint v
-#                 row_a2.append(v)
-#                 col_a2.append(var_idx)
-#                 data_a2.append(bo)
-
-#     row_ind = np.concatenate([row_a1, np.array(row_a2, dtype=int) + n_edges])
-#     col_ind = np.concatenate([col_a1, np.array(col_a2, dtype=int)])
-#     data_val = np.concatenate([data_a1, np.array(data_a2, dtype=float)])
-
-#     A = csc_matrix(
-#         (data_val, (row_ind, col_ind)),
-#         shape=(n_edges + n_atoms, n_classes * n_edges),
-#     )
-
-#     # Edges must sum to 1; Atoms must be >= min_valences
-#     lb = np.concatenate([np.ones(n_edges), min_valences])
-#     ub = np.concatenate([np.ones(n_edges), max_valences])
-
-#     constraints = LinearConstraint(A, lb, ub)
-#     integrality = np.ones(n_classes * n_edges)  # Binary / Integer
-#     bounds = Bounds(0, 1)
-
-#     res = milp(c=c, integrality=integrality, bounds=bounds, constraints=constraints, options={'time_limit': 0.1})
-
-#     if res.success:
-#         sol = res.x.reshape(n_edges, n_classes)
-#         return np.argmax(sol, axis=1)
-
-#     # Fallback to standard argmax if MILP solver encounters an numerical anomaly / infeasibility
-#     print("MILP solver failed or returned infeasible solution.")
-#     return None
-
 
 class MoleculeBuilder:
     """Build RDKit molecules from tensors.
+
+    The molecule builder offers two methods for generating RDKit molecules from tensors 
+    of atom types and positions. The first method uses RDKit's built-in xyz2mol algorithm, 
+    while the second method uses a bond predictor model to predict bond types and then 
+    solves an integer linear programming (ILP) problem to assign bonds while 
+    respecting valence constraints.
 
     Args:
         vocab (str): The vocabulary to use. Options are "QM9" and "GEOM".
@@ -577,6 +63,78 @@ class MoleculeBuilder:
             }
         else:
             raise ValueError(f"Unsupported vocabulary: {vocab}")
+        
+        # Bond type mapping: 0=no bond, 1=single, 2=double, 3=triple
+        self.RDKIT_BOND_TYPES = [
+            None,
+            Chem.rdchem.BondType.SINGLE,
+            Chem.rdchem.BondType.DOUBLE,
+            Chem.rdchem.BondType.TRIPLE,
+        ]
+
+        # Standard maximum valence lookup table by atomic number
+        self.MAX_VALENCE_TABLE = {
+            1: 1,  # H
+            6: 4,  # C
+            7: 4,  # N (allows ammonium / nitro groups)
+            8: 3,  # O
+            9: 1,  # F
+            15: 5,  # P
+            16: 6,  # S
+            17: 1,  # Cl
+            35: 1,  # Br
+            53: 1,  # I
+        }
+
+        self.MIN_VALENCE_TABLE = {
+            1: 1,  # H
+            6: 4,  # C (forces tetravalent carbon)
+            7: 3,  # N
+            8: 1,  # O
+            9: 1,  # F
+            15: 3,  # P
+            16: 2,  # S
+            17: 1,  # Cl
+            35: 1,  # Br
+            53: 1,  # I
+        }
+
+        self.BOND_ORDERS = np.array([0.0, 1.0, 2.0, 3.0])  # 0=none, 1=single, 2=double, 3=triple
+
+        # Allowed neutral valence states for main-group elements
+        self.NEUTRAL_VALENCE_SETS = {
+            1: {1},  # H
+            5: {3},  # B
+            6: {4},  # C
+            7: {3},  # N
+            8: {2},  # O
+            9: {1},  # F
+            14: {4},  # Si
+            15: {3, 5},  # P: 3 (phosphines), 5 (phosphine oxides / phosphates)
+            16: {2, 4, 6},  # S: 2 (thiols/sulfides), 4 (sulfoxides), 6 (sulfones)
+            17: {1},  # Cl
+            35: {1},  # Br
+            53: {1},  # I
+        }
+
+        # Explicit overrides for non-neutral organic species: (atomic_number, explicit_valence) -> formal_charge
+        self.CHARGED_STATE_LOOKUP = {
+            # Nitrogen
+            (7, 4): 1,  # Quaternary ammonium / pyridinium / nitro N+
+            (7, 2): -1,  # Amide anion N-
+            # Oxygen
+            (8, 1): -1,  # Carboxylate / alkoxide O-
+            (8, 3): 1,  # Oxonium / pyrylium O+
+            # Sulfur
+            (16, 1): -1,  # Thiolate S-
+            (16, 3): 1,  # Sulfonium S+
+            (16, 5): 1,  # Sulfoxonium S+
+            # Phosphorus
+            (15, 4): 1,  # Phosphonium P+
+            (15, 6): -1,  # Hexafluorophosphate P-
+            # Boron
+            (5, 4): -1,  # Borohydride / Tetraphenylborate B-
+        }
 
         # Atomic numbers for RDKit (element symbol -> atomic number)
         pt = Chem.GetPeriodicTable()
@@ -703,6 +261,8 @@ class MoleculeBuilder:
         Returns:
             list[Mol]: List of RDKit molecules (None for failed conversions).
         """
+        
+        # (1) Initialize the bond predictor model
         if bond_predictor is None and bond_predictor_path is not None:
             ckpt_path = bond_predictor_path
             if os.path.isdir(ckpt_path):
@@ -733,9 +293,9 @@ class MoleculeBuilder:
         )
 
         with torch.no_grad():
+            # (2) Predict bond type probabilities, precompute local mapping for ILP assembly
             probs, pair_indices = bond_predictor.predict_bonds(x, pos, batch, device)
 
-            # Precompute local mapping for ILP assembly
             unique_batches, batch_counts = batch.unique(return_counts=True)
             local_idx = torch.zeros(x.shape[0], dtype=torch.long, device=device)
             for m, b in enumerate(unique_batches):
@@ -750,7 +310,7 @@ class MoleculeBuilder:
                 pair_indices.shape[0], dtype=torch.long, device=device
             )
 
-            # 2. Solve ILP per molecule
+            # (3) Solve ILP per molecule
             for m, b in enumerate(unique_batches):
                 mol_mask = batch == b
                 mol_atom_indices = torch.where(mol_mask)[0]
@@ -794,13 +354,13 @@ class MoleculeBuilder:
                     mol_pos = pos[mol_mask].cpu().numpy()
 
                     # Solve ILP
-                    chosen_bonds = solve_bond_ilp_scipy(
+                    chosen_bonds = self.solve_bond_ilp_scipy(
                         probs=p_undirected,
                         edge_pairs=edge_pairs_local,
                         atomic_nums=mol_atomic_nums,
+                        max_valence_dict=self.MAX_VALENCE_TABLE,
+                        min_valence_dict=self.MIN_VALENCE_TABLE,
                         pos=mol_pos,
-                        max_valence_dict=MAX_VALENCE_TABLE,
-                        min_valence_dict=MIN_VALENCE_TABLE,
                     )
                     if chosen_bonds is None:
                         successful_mols[b] = False
@@ -810,7 +370,7 @@ class MoleculeBuilder:
                     ilp_bond_types[e_fw] = chosen_bonds_tensor
                     ilp_bond_types[e_bw[valid_bw]] = chosen_bonds_tensor[valid_bw]
 
-        # 4. Transfer outputs to CPU for RDKit construction
+        # (4) Transfer outputs to CPU for RDKit construction
         bond_types = ilp_bond_types.cpu()
         pair_indices = pair_indices.cpu()
         x, pos, batch = x.cpu(), pos.cpu(), batch.cpu()
@@ -823,11 +383,12 @@ class MoleculeBuilder:
         if progress_bar:
             iterator = tqdm(iterator, desc="Building molecules (ILP bond predictor)")
 
+        # (5) Build RDKit molecules from ILP bond assignments
         for m in iterator:
             if not successful_mols[m]:
                 mols.append(None)
                 continue
-            # (1) Load molecule-specific data
+            # (5.1)Load molecule-specific data
             b = unique_batches[m].item()
             mol_mask = batch == b
             n = torch.sum(mol_mask).item()
@@ -852,16 +413,16 @@ class MoleculeBuilder:
             j_local = local_idx[bonded_pairs[:, 1]]
             mol_atomic_nums = atomic_nums[mol_mask]
 
-            # (2) Create RDKit RWMol and add atoms
+            # (5.2) Create RDKit RWMol and add atoms
             rwmol = Chem.RWMol()
             for i in range(n):
                 atom = Chem.Atom(int(mol_atomic_nums[i].item()))
                 rwmol.AddAtom(atom)
 
-            # (3) Add bonds based from ILP solution
+            # (5.3) Add bonds based from ILP solution
             for idx in range(bonded_pairs.shape[0]):
                 bt = bonded_types[idx].item()
-                rdkit_bt = RDKIT_BOND_TYPES[bt]
+                rdkit_bt = self.RDKIT_BOND_TYPES[bt]
                 if rdkit_bt is not None:
                     try:
                         rwmol.AddBond(
@@ -873,16 +434,16 @@ class MoleculeBuilder:
 
             rwmol.UpdatePropertyCache(strict=False)
 
-            # (4) Compute explicit valence and assign formal charges via lookup
+            # (5.4) Compute explicit valence and assign formal charges via lookup
             for atom in rwmol.GetAtoms():
                 explicit_val = (
                     atom.GetExplicitValence()
                 )  # Calculates sum of bond orders added
-                charge = assign_rule_based_formal_charge(atom, explicit_val)
+                charge = self.assign_rule_based_formal_charge(atom, explicit_val)
                 if charge != 0:
                     atom.SetFormalCharge(charge)
 
-            # (5) Create conformer and assign 3D coordinates
+            # (5.5) Create conformer and assign 3D coordinates
             try:
                 mol = rwmol.GetMol()
 
@@ -895,7 +456,7 @@ class MoleculeBuilder:
                     )
                 mol.AddConformer(conf, assignId=True)
 
-                # (6) Keep only if sanitizable and single fragment
+                # (5.6) Keep only if sanitizable and single fragment
                 Chem.SanitizeMol(mol)
 
                 if len(Chem.GetMolFrags(mol)) > 1:
@@ -913,3 +474,231 @@ class MoleculeBuilder:
                 break
 
         return mols
+
+    def assign_rule_based_formal_charge(self, atom: Chem.Atom, explicit_valence: float) -> int:
+        """Assigns formal charges accounting for hypervalent neutral states (P, S, I)
+
+        and standard ionic organic functional groups.
+        """
+        z = atom.GetAtomicNum()
+        val = int(round(explicit_valence))
+
+        # 1. Check if explicit valence matches ANY valid neutral state for this element
+        neutral_valences = self.NEUTRAL_VALENCE_SETS.get(z)
+        if neutral_valences and val in neutral_valences:
+            return 0
+
+        # 2. Check explicit ionic lookup table
+        if (z, val) in self.CHARGED_STATE_LOOKUP:
+            return self.CHARGED_STATE_LOOKUP[(z, val)]
+
+        # Default fallback
+        return 0
+
+
+    def solve_bond_ilp_scipy(
+        self, 
+        probs: np.ndarray,
+        edge_pairs: np.ndarray,
+        atomic_nums: np.ndarray,
+        max_valence_dict: dict,
+        min_valence_dict: dict,
+        pos: Optional[np.ndarray] = None,
+        enforce_connectivity: bool = True,
+        min_allene_angle: float = 170.0,
+    ) -> np.ndarray:
+        """Solves ILP for bond assignment with vectorized geometric angle constraints."""
+        
+        n_edges, n_classes = probs.shape
+        n_atoms = len(atomic_nums)
+        if n_edges == 0:
+            return np.zeros(0, dtype=int)
+
+        min_valences = np.array(
+            [min_valence_dict.get(int(a), 0) for a in atomic_nums], dtype=float
+        )
+        max_valences = np.array(
+            [max_valence_dict.get(int(a), 4) for a in atomic_nums], dtype=float
+        )
+
+        c_bonds = -np.log(np.clip(probs, 1e-8, 1.0)).reshape(-1)
+
+        n_bond_vars = n_edges * n_classes
+        n_flow_vars = (2 * n_edges) if (enforce_connectivity and n_atoms > 1) else 0
+        total_vars = n_bond_vars + n_flow_vars
+
+        c = np.zeros(total_vars)
+        c[:n_bond_vars] = c_bonds
+
+        # Constraint 1: Exactly 1 bond type chosen per edge
+        row_a1 = np.repeat(np.arange(n_edges), n_classes)
+        col_a1 = np.arange(n_classes * n_edges)
+        data_a1 = np.ones(n_classes * n_edges)
+
+        # Constraint 2: Total valence per atom
+        row_a2, col_a2, data_a2 = [], [], []
+        for e_idx, (u, v) in enumerate(edge_pairs):
+            for k in range(n_classes):
+                bo = self.BOND_ORDERS[k]
+                if bo > 0:
+                    var_idx = n_classes * e_idx + k
+                    row_a2.extend([u, v])
+                    col_a2.extend([var_idx, var_idx])
+                    data_a2.extend([bo, bo])
+
+        rows = list(row_a1) + [r + n_edges for r in row_a2]
+        cols = list(col_a1) + col_a2
+        data = list(data_a1) + data_a2
+
+        lb_list = [np.ones(n_edges), min_valences]
+        ub_list = [np.ones(n_edges), max_valences]
+        row_count = n_edges + n_atoms
+
+        # Constraint 3: Graph Connectivity via Single-Commodity Flow
+        if enforce_connectivity and n_atoms > 1:
+            flow_offset = n_bond_vars
+            for i in range(n_atoms):
+                for e_idx, (u, v) in enumerate(edge_pairs):
+                    f_uv = flow_offset + 2 * e_idx
+                    f_vu = flow_offset + 2 * e_idx + 1
+
+                    if u == i:
+                        rows.extend([row_count, row_count])
+                        cols.extend([f_uv, f_vu])
+                        data.extend([1.0, -1.0])
+                    elif v == i:
+                        rows.extend([row_count, row_count])
+                        cols.extend([f_vu, f_uv])
+                        data.extend([1.0, -1.0])
+
+                req = float(n_atoms - 1) if i == 0 else -1.0
+                lb_list.append([req])
+                ub_list.append([req])
+                row_count += 1
+
+            big_m = float(n_atoms - 1)
+            for e_idx in range(n_edges):
+                f_uv = flow_offset + 2 * e_idx
+                f_vu = flow_offset + 2 * e_idx + 1
+
+                rows.extend([row_count, row_count])
+                cols.extend([f_uv, f_vu])
+                data.extend([1.0, 1.0])
+
+                for k in range(1, n_classes):
+                    rows.append(row_count)
+                    cols.append(e_idx * n_classes + k)
+                    data.append(-big_m)
+
+                lb_list.append([-np.inf])
+                ub_list.append([0.0])
+                row_count += 1
+
+        # -------------------------------------------------------------
+        # Constraint 4: Vectorized Angle-based exclusion for cumulenes and alkynes
+        # -------------------------------------------------------------
+        if pos is not None and min_allene_angle > 0 and n_edges > 1:
+            SINGLE_BOND_K = 1
+            DOUBLE_BOND_K = 2
+            TRIPLE_BOND_K = 3
+
+            # Deconstruct edges into 2E directed relationships: center -> neighbor
+            centers = np.concatenate([edge_pairs[:, 0], edge_pairs[:, 1]])
+            neighbors = np.concatenate([edge_pairs[:, 1], edge_pairs[:, 0]])
+            e_indices = np.concatenate([np.arange(n_edges), np.arange(n_edges)])
+
+            # Calculate normalized vectors from center to neighbor
+            vecs = pos[neighbors] - pos[centers]
+            norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+            vecs = np.divide(vecs, norms, out=np.zeros_like(vecs), where=norms > 1e-6)
+
+            # Boolean mask (2E x 2E): True if two vectors share the same center
+            same_center = centers[:, None] == centers[None, :]
+            # Ensure we only check unique pairs of DIFFERENT edges
+            valid_pairs = same_center & (e_indices[:, None] < e_indices[None, :])
+
+            idx1, idx2 = np.where(valid_pairs)
+
+            if len(idx1) > 0:
+                # Vectorized dot product for all valid pairs
+                cosines = np.sum(vecs[idx1] * vecs[idx2], axis=1)
+                cosines = np.clip(cosines, -1.0, 1.0)
+                angles = np.degrees(np.arccos(cosines))
+
+                # Mask pairs below the linear threshold
+                violating_mask = angles < min_allene_angle
+
+                bad_e1 = e_indices[idx1[violating_mask]]
+                bad_e2 = e_indices[idx2[violating_mask]]
+
+                n_violations = len(bad_e1)
+                if n_violations > 0:
+                    # Add up to 3 constraints per violation:
+                    # 1. Double/Double, 2. Single/Triple, 3. Triple/Single
+                    rules_per_violation = 3
+                    n_new_constraints = n_violations * rules_per_violation
+
+                    new_rows = np.repeat(
+                        np.arange(row_count, row_count + n_new_constraints), 2
+                    )
+                    new_cols = np.empty(n_new_constraints * 2, dtype=int)
+
+                    # Rule 1: Double + Double <= 1
+                    new_cols[0 : 2 * n_violations : 2] = n_classes * bad_e1 + DOUBLE_BOND_K
+                    new_cols[1 : 2 * n_violations : 2] = n_classes * bad_e2 + DOUBLE_BOND_K
+
+                    # Rule 2: Single + Triple <= 1
+                    new_cols[2 * n_violations : 4 * n_violations : 2] = (
+                        n_classes * bad_e1 + SINGLE_BOND_K
+                    )
+                    new_cols[2 * n_violations + 1 : 4 * n_violations : 2] = (
+                        n_classes * bad_e2 + TRIPLE_BOND_K
+                    )
+
+                    # Rule 3: Triple + Single <= 1
+                    new_cols[4 * n_violations : 6 * n_violations : 2] = (
+                        n_classes * bad_e1 + TRIPLE_BOND_K
+                    )
+                    new_cols[4 * n_violations + 1 : 6 * n_violations : 2] = (
+                        n_classes * bad_e2 + SINGLE_BOND_K
+                    )
+
+                    new_data = np.ones(n_new_constraints * 2)
+
+                    rows.extend(new_rows.tolist())
+                    cols.extend(new_cols.tolist())
+                    data.extend(new_data.tolist())
+
+                    lb_list.append(np.full(n_new_constraints, -np.inf))
+                    ub_list.append(np.ones(n_new_constraints))
+                    row_count += n_new_constraints
+
+        # Assemble Constraints and Bounds
+        A = csc_matrix((data, (rows, cols)), shape=(row_count, total_vars))
+        lb = np.concatenate(lb_list)
+        ub = np.concatenate(ub_list)
+
+        integrality = np.zeros(total_vars)
+        integrality[:n_bond_vars] = 1.0
+
+        bounds_ub = np.ones(total_vars)
+        if enforce_connectivity and n_atoms > 1:
+            bounds_ub[n_bond_vars:] = float(n_atoms - 1)
+
+        bounds = Bounds(np.zeros(total_vars), bounds_ub)
+        constraints = LinearConstraint(A, lb, ub)
+
+        res = milp(
+            c=c,
+            integrality=integrality,
+            bounds=bounds,
+            constraints=constraints,
+            options={"time_limit": 0.2},
+        )
+
+        if res.success:
+            sol = res.x[:n_bond_vars].reshape(n_edges, n_classes)
+            return np.argmax(sol, axis=1)
+
+        print("MILP solver failed or returned infeasible solution.")
+        return None
