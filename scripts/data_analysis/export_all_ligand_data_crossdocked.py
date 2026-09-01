@@ -8,10 +8,9 @@ from tqdm import tqdm
 from neat.dataset.dataset_crossdocked import (_add_hydrogens_with_openbabel,
                                               _add_hydrogens_with_rdkit)
 
-ROOT = Path("/home/rjacob/NEAT-Cond-Dev")
 
 ROOT = os.getcwd()
-INPUT_PATH = os.path.join(ROOT, "data", "CROSSDOCKED", "raw", "crossdocked_pocket10")
+INPUT_DIR = os.path.join(ROOT, "data", "CROSSDOCKED", "raw", "crossdocked_pocket10")
 OUTPUT_DIR = os.path.join(ROOT, "output", "crossdocked_all_ligands")
 DATA_SET = "CROSSDOCKED"
 
@@ -42,8 +41,8 @@ def load_molecules(pairs, datadir):
     )
 
 
-train_mols = load_molecules(pairs_train, INPUT_PATH)
-test_mols = load_molecules(pairs_test, INPUT_PATH)
+train_mols = load_molecules(pairs_train, INPUT_DIR)
+test_mols = load_molecules(pairs_test, INPUT_DIR)
 all_mols = train_mols + test_mols
 
 print(f"Number of train ligands: {len(train_mols)}")
