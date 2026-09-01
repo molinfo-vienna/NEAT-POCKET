@@ -13,7 +13,7 @@ from torch import Tensor
 from torch.nn import functional as F
 from torch.optim import Optimizer
 from torch_geometric.data import Batch, Data
-from torch_geometric.nn.pool import global_mean_pool
+from torch_geometric.nn.pool import global_mean_pool, global_add_pool
 from tqdm import tqdm
 
 from ..dataset.augmentation import RandomRotationAugmentation
@@ -424,25 +424,8 @@ class NEAT(LightningModule):
             )
             pocket_residue_id = pocket_residue_id + id_offsets[pocket_batch]
 
-        # (2) Compute atom counts of the source sets
-        atom_count_source = torch.bincount(
-            batch_source, minlength=batch_size
-        )  # [batch_size]
 
-        # (3) Reshape the input to [batch_size, max_atom_count, n_embd].
-        # The output tensor is padded with zeros for all source sets with less atoms
-        # than the largest source atom set in the batch. The atom mask keeps track of
-        # which entries correspond to atoms and padding.
-        dim = [len(atom_count_source), atom_count_source.max(), self.hparams.n_embd]
-        x = torch.zeros(dim, device=device)  # [batch_size, max_atom_count, n_embd]
-        context_range = torch.arange(
-            atom_count_source.max(), device=atom_count_source.device
-        ).unsqueeze(0)
-        atom_mask = context_range < atom_count_source.unsqueeze(
-            1
-        )  # [batch_size, max_atom_count]
-
-        # (4) Embed the atom types and positions
+        # (2) Embed the atom types and positions
         atom_type_embedding = self.atom_type_embedding_layer(
             x_source
         )  # [n_source_atoms, n_embd]
@@ -450,43 +433,27 @@ class NEAT(LightningModule):
             pos_source
         )  # [n_source_atoms, n_embd]
 
-        # (5) Combine the atom type embedding and the positional embedding
+        # (3) Combine the atom type embedding and the positional embedding
         input_embedding = (
             atom_type_embedding + positional_embedding
         )  # [n_source_atoms, n_embd]
 
-        # (6) Apply the dropout layer
+        # (4) Apply the dropout layer
         input_embedding = self.dropout_layer(
             input_embedding
         )  # [n_source_atoms, n_embd]
 
-        # (7) Apply the atom mask to the input embedding
-        x[atom_mask] = input_embedding  # [batch_size, max_atom_count, n_embd]
+        # (5) Insert start tokens
+        x_source, batch_source = self.prepend_start_token(
+            input_embedding, batch_source, self.start_token_embedding, batch_size
+        )  # [n_source_atoms + batch_size, n_embd], [n_source_atoms + batch_size]
 
-        # (8) Concatenate start token embedding to the transformer input.
-        x = torch.cat(
-            [self.start_token_embedding.expand(batch_size, 1, -1), x], dim=1
-        )  # [batch_size, max_atom_count + 1, n_embd]
-        atom_mask = torch.cat(
-            [torch.ones(batch_size, 1, device=device, dtype=torch.bool), atom_mask],
-            dim=1,
-        )  # [batch_size, max_atom_count + 1]
-
-        # (9) Create the attention mask for the transformer blocks.
-        # The attention mask is used in the transformer blocks and is the outer product of the atom mask.
-        attn_mask = atom_mask.unsqueeze(1) * atom_mask.unsqueeze(
-            2
-        )  # [batch_size, max_atom_count, max_atom_count]
-        attn_mask = attn_mask.unsqueeze(1).expand(
-            -1, self.hparams.n_head, -1, -1
-        )  # [batch_size, n_head, max_atom_count, max_atom_count]
-
-        # (10.1) If we are given pocket information, encode the pocket with a lightweight
-        #        transformer. This yields the atom-level pocket representations and a
-        #        cross-attention mask for the cross-attention layers, and a global pocket 
-        #        conditioning vector for the AdaLN layers.
+        # (6.1) If we are given pocket information, encode the pocket with a lightweight
+        #        transformer. This yields the atom-level pocket representations for the 
+        #        cross-attention layers, and a global pocket conditioning vector for the 
+        # AdaLN layers.
         if pocket_info is not None:
-            x_residues, residue_mask = self.compute_residue_representations(
+            x_pocket = self.compute_pocket_representation(
                 batch_size=batch_size,
                 device=device,
                 pocket_x=pocket_x,
@@ -494,78 +461,151 @@ class NEAT(LightningModule):
                 pocket_residue_id=pocket_residue_id,
                 pocket_residue_type=pocket_residue_type,
                 pocket_batch=pocket_batch,
-            )
-            ada_ln_condition = x_residues.sum(dim=1)  # [batch_size, n_embd]
+            )  # [n_pocket_atoms, n_embd]
+            ada_ln_condition = global_add_pool(
+                x_pocket, pocket_batch
+            )  # [batch_size, n_embd]
 
             if cfg_mask is not None:
-                x_residues[cfg_mask] = 0
-                residue_mask[cfg_mask] = 0
-                ada_ln_condition[cfg_mask] = self.null_condition_embedding
-                x_residues[cfg_mask, 0] = self.null_condition_embedding
-                residue_mask[cfg_mask, 0] = 1
-            cross_attn_mask = residue_mask.unsqueeze(1) * atom_mask.unsqueeze(
-                2
-            )  # [batch_size, max_residue_count, max_atom_count]
-            cross_attn_mask = cross_attn_mask.unsqueeze(1).expand(
-                -1, self.hparams.n_head, -1, -1
-            )  # [batch_size, n_head, max_residue_count, max_atom_count]
+                ada_ln_condition[cfg_mask] = self.null_condition_embedding # [batch_size, n_embd]
+                x_pocket, pocket_batch = self.cfg_dropout(x_pocket, pocket_batch, cfg_mask, self.null_condition_embedding) # [n_pocket_atoms, n_embd], [n_pocket_atoms]
         
-        # (10.2) Without pocket information, we can still use the pocket-conditioned model with
-        #        null condition embedding for AdaLN layers and cross-attention layers.
+        # (6.2) Without pocket information, we can still use the pocket-conditioned model with
+        #       null condition embedding for AdaLN layers and cross-attention layers.
         elif self.enable_cross_attention:
-            x_residues = None
-            cross_attn_mask = None
-            ada_ln_condition = self.null_condition_embedding.expand(batch_size, -1)
-            x_residues = self.null_condition_embedding.unsqueeze(0).expand(
-                batch_size, -1, -1
-            )  # [batch_size, 1, n_embd]
-            residue_mask = torch.ones(
-                (batch_size, 1), device=device, dtype=torch.bool
-            )  # [batch_size, 1]
-            # (12) Create a cross-attention mask for the pocket residues
-            cross_attn_mask = residue_mask.unsqueeze(1) * atom_mask.unsqueeze(
-                2
-            )  # [batch_size, max_residue_count, max_atom_count]
-            cross_attn_mask = cross_attn_mask.unsqueeze(1).expand(
-                -1, self.hparams.n_head, -1, -1
-            )  # [batch_size, n_head, max_residue_count, max_atom_count]
-            
-        # (10.3) If we are not using cross-attention, we can skip the pocket encoding and AdaLN 
-        #        conditioning. This is equivalent to the unconditional base model.
+            x_pocket = None
+            ada_ln_condition = self.null_condition_embedding.expand(batch_size, -1) # [batch_size, n_embd]
+            x_pocket = self.null_condition_embedding.expand(
+                batch_size, -1
+            )  # [batch_size, n_embd]
+            pocket_batch = torch.arange(batch_size, device=device)  # [batch_size]
+   
+        # (6.3) If we are not using cross-attention, we can skip the pocket encoding and AdaLN 
+        #       conditioning. This is equivalent to the unconditional base model.
         else:
-            x_residues = None
-            cross_attn_mask = None
+            x_pocket = None
             ada_ln_condition = None
 
-        # (11) By default, we use AdaLN-single conditioning. Here we project the 
+        # (7) By default, we use AdaLN-single conditioning. Here we project the 
         #      global pocket representation to the AdaLN scale and shift parameters.
         if self.hparams.global_cond_proj:
             ada_ln_condition = self.global_condition_projection(
                 ada_ln_condition
             )  # [batch_size, n_embd * 8]
 
-        # (12) Pass through the transformer blocks
+        # (8) Pass through the transformer blocks
         for block in self.transformer_blocks:
-            x = block(
-                x,
-                attn_mask=attn_mask,
-                cross_attn_input=x_residues,
-                cross_attn_mask=cross_attn_mask,
+            x_source = block(
+                x_source,
+                batch=batch_source,
+                cross_attn_input=x_pocket,
+                cross_attn_batch=pocket_batch,
                 ada_ln_condition=ada_ln_condition,
-            )  # [batch_size, max_atom_count + 1, n_embd]
-        x = self.layer_norm_after_transformer_blocks(
-            x
-        )  # [batch_size, max_atom_count + 1, n_embd]
+            ) # [n_source_atoms + batch_size, n_embd]  
+        x_source = self.layer_norm_after_transformer_blocks(
+            x_source
+        ) # [n_source_atoms + batch_size, n_embd] 
 
-        # (13) Apply the atom mask to the input embedding (not really needed, could be removed)
-        x = x * atom_mask.unsqueeze(-1)  # [batch_size, max_atom_count + 1, n_embd]
-
-        # (14) Pool the atom embeddings into a molecule embedding
-        source_set_representation = x.sum(dim=1)  # [batch_size, n_embd]
+        # (9) Pool the atom embeddings into a molecule embedding
+        source_set_representation = global_add_pool(x_source, batch_source)  # [batch_size, n_embd]
 
         return source_set_representation
+    
 
-    def compute_residue_representations(
+    def prepend_start_token(
+        self,
+        x: torch.Tensor,
+        batch: torch.Tensor,
+        start_token: torch.Tensor,
+        num_graphs: int,
+    ):
+        """Prepends a start token embedding to the beginning of each graph in a PyG batch.
+
+        Args:
+            x (Tensor): Node features of shape (total_nodes, n_features).
+            batch (Tensor): Graph assignment index of shape (total_nodes,).
+            start_token (Tensor): Embedding tensor of shape (1, n_features) or
+            (n_features,).
+
+        Returns:
+            new_x (Tensor): Node features of shape (total_nodes + num_graphs,
+            n_features).
+            new_batch (Tensor): Graph assignment index of shape (total_nodes +
+            num_graphs,).
+        """
+        device = x.device
+        num_nodes, n_features = x.shape
+        #num_graphs = int(batch.max().item()) + 1
+
+        # 1. Count nodes per graph to determine new start token positions
+        nodes_per_graph = torch.bincount(batch, minlength=num_graphs)
+
+        # 2. Compute the new positions of start tokens: [0, (N_0 + 1), (N_0 + N_1 + 2), ...]
+        start_token_indices = torch.zeros(
+            num_graphs, dtype=torch.long, device=device
+        )
+        start_token_indices[1:] = torch.cumsum(nodes_per_graph + 1, dim=0)[
+            :-1
+        ]  # Shift right
+
+        # 3. Create a boolean mask of shape (total_nodes + num_graphs,) for start tokens
+        total_new_nodes = num_nodes + num_graphs
+        is_start_token = torch.zeros(
+            total_new_nodes, dtype=torch.bool, device=device
+        )
+        is_start_token[start_token_indices] = True
+
+        # 4. Allocate output tensor and scatter both tokens and original features
+        new_x = torch.empty(
+            (total_new_nodes, n_features), dtype=x.dtype, device=device
+        )
+        new_x[is_start_token] = start_token.squeeze(0)
+        new_x[~is_start_token] = x
+
+        # 5. Construct the updated batch tensor
+        new_batch = torch.empty(total_new_nodes, dtype=batch.dtype, device=device)
+        new_batch[is_start_token] = torch.arange(
+            num_graphs, dtype=batch.dtype, device=device
+        )
+        new_batch[~is_start_token] = batch
+
+        return new_x, new_batch
+
+
+    def cfg_dropout(
+        self,
+        x: torch.Tensor,  # Shape: (num_nodes, feature_dim)
+        batch: torch.Tensor,  # Shape: (num_graphs_in_batch,)
+        cfg_mask: torch.Tensor,  # Shape: (num_graphs,) - True to drop, False to keep
+        null_embedding: torch.Tensor,  # Shape: (feature_dim,) or (1, feature_dim)
+    ):
+        # 1. Identify which nodes belong to kept vs. dropped graphs
+        node_drop_mask = cfg_mask[batch]
+        kept_nodes_mask = ~node_drop_mask
+
+        # 2. Extract features and batch indices for all kept nodes
+        x_kept = x[kept_nodes_mask]
+        batch_kept = batch[kept_nodes_mask]
+
+        # 3. Create single null nodes for dropped graphs
+        dropped_graph_indices = torch.nonzero(cfg_mask, as_tuple=True)[0]
+        num_dropped = dropped_graph_indices.numel()
+
+        if num_dropped == 0:
+            return x_kept, batch_kept
+
+        x_null = null_embedding.view(1, -1).expand(num_dropped, -1)
+        batch_null = dropped_graph_indices
+
+        # 4. Concatenate and restore original graph ordering
+        x_out = torch.cat([x_kept, x_null], dim=0)
+        batch_out = torch.cat([batch_kept, batch_null], dim=0)
+
+        perm = torch.argsort(batch_out)
+        return x_out[perm], batch_out[perm]
+
+
+    def compute_pocket_representation(
         self,
         batch_size: int,
         device: torch.device,
@@ -606,132 +646,65 @@ class NEAT(LightningModule):
         residue_type_embedding = self.pocket_residue_type_embedding_layer(
             pocket_residue_type
         )
-        atom_tokens = self.dropout_layer(
+        x_atom = self.dropout_layer(
             atom_embedding + pos_embedding + residue_type_embedding
-        )  # shape: [n_atoms, n_embd]
-
-        # (2) Create attention mask on a residue level
+        )  # [n_atoms, n_embd]
         atom_count_per_residue = torch.bincount(pocket_residue_id)
-        dim = [
-            len(atom_count_per_residue),
-            atom_count_per_residue.max(),
-            self.hparams.n_embd,
-        ]
-        x_atom = torch.zeros(
-            dim, device=device
-        )  # [num_residues, max_atom_count_per_residue, n_embd]
-        context_range = torch.arange(
-            atom_count_per_residue.max(), device=atom_count_per_residue.device
-        ).unsqueeze(0)
-        atom_mask = context_range < atom_count_per_residue.unsqueeze(1)
-        attn_mask_atom = atom_mask.unsqueeze(1) * atom_mask.unsqueeze(
-            2
-        )  # [num_residues, max_atom_count_per_residue, max_atom_count_per_residue]
-        attn_mask_atom = attn_mask_atom.unsqueeze(1).expand(
-            -1, self.hparams.n_head, -1, -1
-        )  # [num_residues, n_head, max_atom_count_per_residue, max_atom_count_per_residue]
 
-        # (3) Pass throught atom-level transformer blocks
-        x_atom[atom_mask] = (
-            atom_tokens  # [num_residues, max_atom_count_per_residue, n_embd]
-        )
         for block in self.atom_level_pocket_transformer_blocks:
             x_atom = block(
-                x_atom, attn_mask=attn_mask_atom
-            )  # [num_residues, max_atom_count_per_residue, n_embd]
+                x_atom, batch=pocket_residue_id
+            )  # [n_atoms, n_embd]
         x_atom = self.layer_norm_after_atom_level_pocket_transformer_blocks(
             x_atom
-        )  # [num_residues, max_atom_count_per_residue, n_embd]
-        x_atom = x_atom * atom_mask.unsqueeze(
-            -1
-        )  # [num_residues, max_atom_count_per_residue, n_embd]
+        )  # [n_atoms, n_embd]
 
-        # (4) Pool atom-level tokens into residue-level tokens via sum pooling
+        # (2) Pool atom-level tokens into residue-level tokens via sum pooling
         if self.hparams.residue_pooling == "mean":
-            residue_tokens = x_atom.sum(dim=1) / atom_count_per_residue.unsqueeze(-1)
+            x_residues = global_mean_pool(x_atom, pocket_residue_id)  # [num_residues, n_embd]
         elif self.hparams.residue_pooling == "sum":
-            residue_tokens = x_atom.sum(dim=1)  # [num_residues, n_embd]
+            x_residues = global_add_pool(x_atom, pocket_residue_id)  # [num_residues, n_embd]
         else:
             raise ValueError(
                 f"Invalid residue_pooling: {self.hparams.residue_pooling}. Must be 'mean' or 'sum'."
             )
 
-        # (5) Now we need a residue-level attention mask
+        # (3) Now we need a residue-level batch vector
         ptr = torch.cat(
             [
                 torch.tensor([0], device=atom_count_per_residue.device),
                 torch.cumsum(atom_count_per_residue[:-1], dim=0),
             ]
         )
-        residue_idx = pocket_batch[ptr]
-        residue_count = torch.bincount(residue_idx)
+        batch_residue = pocket_batch[ptr]
 
-        dim = [len(residue_count), residue_count.max(), self.hparams.n_embd]
-        x_residues = torch.zeros(
-            dim, device=device
-        )  # [batch_size, max_residue_count, n_embd]
-        context_range_residues = torch.arange(
-            residue_count.max(), device=residue_count.device
-        ).unsqueeze(0)
-        residue_mask = context_range_residues < residue_count.unsqueeze(1)
-        attn_mask_residues = residue_mask.unsqueeze(1) * residue_mask.unsqueeze(
-            2
-        )  # [num_residues, max_atom_count_per_residue, max_atom_count_per_residue]
-        attn_mask_residues = attn_mask_residues.unsqueeze(1).expand(
-            -1, self.hparams.n_head, -1, -1
-        )  # [num_residues, n_head, max_atom_count_per_residue, max_atom_count_per_residue]
-        x_residues[residue_mask] = (
-            residue_tokens  # [batch_size, max_residue_count, n_embd]
-        )
-
-        # (6) Pass through the residue-level transformer blocks
+        # (4) Pass through the residue-level transformer blocks
         for block in self.residue_level_pocket_transformer_blocks:
             x_residues = block(
                 x_residues,
-                attn_mask=attn_mask_residues,
-            )  # [batch_size, max_residue_count, n_embd]
+                batch=batch_residue,
+            )  # [n_residues, n_embd]
         x_residues = self.layer_norm_after_residue_level_pocket_transformer_blocks(
             x_residues
-        )  # [batch_size, max_residue_count, n_embd]
-        x_residues = x_residues * residue_mask.unsqueeze(
-            -1
-        )  # [batch_size, max_residue_count, n_embd]
+        )  # [n_residues, n_embd]
 
-        # (7) Now we go back to residue-level attention on the atom level
-        x_atom[atom_mask] = (
-            x_atom[atom_mask] + x_residues[residue_mask][pocket_residue_id]
+        # (5) Now we go back to residue-level attention on the atom level
+        # (5.1) First the skip-connection
+        x_atom = (
+            x_atom + x_residues[pocket_residue_id]
         )
 
-        # (8) Pass through another round of atom-level transformer blocks
+        # (5.2) Then pass through another round of atom-level transformer blocks
         for block in self.atom_level_pocket_transformer_blocks_2:
             x_atom = block(
                 x_atom,
-                attn_mask=attn_mask_atom,
-            )  # [num_residues, max_atom_count_per_residue, n_embd]
+                batch=pocket_residue_id,
+            )  # [n_atoms, n_embd]
         x_atom = self.layer_norm_after_atom_level_pocket_transformer_blocks_2(
             x_atom
-        )  # [num_residues, max_atom_count_per_residue, n_embd]
-        x_atom = x_atom * atom_mask.unsqueeze(
-            -1
-        )  # [num_residues, max_atom_count_per_residue, n_embd]
+        )  # [n_atoms, n_embd]
 
-        # (9) Now we need to reshape the atom-level tokens according to the batch size
-        atom_count_per_residue = torch.bincount(pocket_batch)
-        dim = [
-            len(atom_count_per_residue),
-            atom_count_per_residue.max(),
-            self.hparams.n_embd,
-        ]
-        x_final = torch.zeros(
-            dim, device=device
-        )  # [num_residues, max_atom_count_per_residue, n_embd]
-        context_range = torch.arange(
-            atom_count_per_residue.max(), device=atom_count_per_residue.device
-        ).unsqueeze(0)
-        atom_mask_final = context_range < atom_count_per_residue.unsqueeze(1)
-        x_final[atom_mask_final] = x_atom[atom_mask]
-
-        return x_final, atom_mask_final.clone()
+        return x_atom
 
     def compute_atom_type_loss(
         self,
@@ -1175,14 +1148,15 @@ class NEAT(LightningModule):
                     pocket_info_masked = None
 
                 # (4.2) Compute source set representation
-                source_set_representation = self.compute_source_set_representation(
-                    masked_x,
-                    masked_pos,
-                    batch_source_remapped,
-                    active_batch_size,
-                    device,
-                    pocket_info=pocket_info_masked,
-                )  # [active_mol_count, n_embd]
+                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                    source_set_representation = self.compute_source_set_representation(
+                        masked_x,
+                        masked_pos,
+                        batch_source_remapped,
+                        active_batch_size,
+                        device,
+                        pocket_info=pocket_info_masked,
+                    )  # [active_mol_count, n_embd]
 
                 # (4.3) Compute atom type logits
                 logits = self.atom_type_prediction_head(
@@ -1192,15 +1166,16 @@ class NEAT(LightningModule):
                 # (4.4) For CFG, we compute the source set representation without 
                 #       conditioning on the pocket information. We apply CFG directly to the logits.
                 if pocket_info is not None and cfg_factor > 0.0:
-                    source_set_representation_unconditioned_for_cfg = (
-                        self.compute_source_set_representation(
-                            masked_x,
-                            masked_pos,
-                            batch_source_remapped,
-                            active_batch_size,
-                            device,
-                        )
-                    )  # [active_mol_count, n_embd]
+                    with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                        source_set_representation_unconditioned_for_cfg = (
+                            self.compute_source_set_representation(
+                                masked_x,
+                                masked_pos,
+                                batch_source_remapped,
+                                active_batch_size,
+                                device,
+                            )
+                        )  # [active_mol_count, n_embd]
                     logits_unconditioned = self.atom_type_prediction_head(
                         source_set_representation_unconditioned_for_cfg
                     )  # [active_mol_count, vocab_size]

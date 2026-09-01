@@ -57,7 +57,7 @@ class GenerationMonitor(Callback):
         trainer: Trainer,
         pl_module: LightningModule,
     ) -> None:
-        if trainer.current_epoch % self.every_n_epochs != 0:
+        if trainer.current_epoch % self.every_n_epochs != 0 or trainer.current_epoch == 0:
             return
 
         generated_mols = None
