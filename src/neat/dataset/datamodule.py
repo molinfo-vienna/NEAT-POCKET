@@ -358,6 +358,8 @@ class DataModule(LightningDataModule):
             drop_last=True,
             num_workers=self.num_workers,
             persistent_workers=True,
+            pin_memory=True,
+            prefetch_factor=4,
             collate_fn=(
                 self.source_target_split_fn
                 if self.task == "neat"

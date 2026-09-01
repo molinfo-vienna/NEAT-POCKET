@@ -63,7 +63,7 @@ def train(args: argparse.Namespace) -> None:
         flow_matching_noise_std=params["noise_std"],
         source_set_perturbation_fraction=params["perturbation_fraction"],
         source_set_perturbation_std=params["perturbation_std"],
-        num_workers=8,
+        num_workers=16,
     )
     datamodule.setup()
 

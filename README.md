@@ -21,7 +21,7 @@ conda activate neat_pc
 3. Install PyTorch according to your hardware. For example, with GPU and CUDA 13.0 on Linux:
 
 ```bash
-pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu130
+pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cu130
 ```
 
 For more info, visit https://pytorch.org/get-started/locally.
@@ -35,10 +35,10 @@ pip install -e .
 5. Install additional PyTorch-Geometrics dependencies:
 
 ```bash
-pip install pyg_lib torch_cluster torch_scatter -f https://data.pyg.org/whl/torch-2.9.0+cu130.html
+pip install pyg_lib torch_cluster torch_scatter -f https://data.pyg.org/whl/torch-2.12.1+cu130.html
 ```
 
-You need to replace the last part (2.9.0+cu130) with your PyTorch version.
+You need to replace the last part (2.12.1+cu130) with your PyTorch version.
 
 6. Download the model weights from TODO. Unzip and place into the project's root for using the generation script without modifications to the `config_generation_conditional.yaml` configuration file.
 
