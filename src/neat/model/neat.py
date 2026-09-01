@@ -370,6 +370,25 @@ class NEAT(LightningModule):
             loss = loss_ce + loss_fm
 
             return loss, loss_ce, loss_fm, None
+        
+    def shift_residue_ids_wrt_batch(self, pocket_residue_id: Tensor, pocket_batch: Tensor, batch_size: int) -> Tensor:
+        # Make the pocket_residue_id continuous across the batch
+        # e.g. [0,0,0,1,1,2,2,2,0,0,1,1] -> [0,0,0,1,1,2,2,2,3,3,4,4]
+        device = pocket_residue_id.device
+        num_res_per_graph = torch.zeros(batch_size, device=device, dtype=torch.long)
+        for graph_idx in range(batch_size):
+            mask_g = pocket_batch == graph_idx
+            if mask_g.any():
+                num_res_per_graph[graph_idx] = (
+                    int(pocket_residue_id[mask_g].max().item()) + 1
+                )
+        id_offsets = torch.cat(
+            [
+                torch.zeros(1, device=device, dtype=torch.long),
+                torch.cumsum(num_res_per_graph[:-1], dim=0),
+            ]
+        )
+        return pocket_residue_id + id_offsets[pocket_batch]
 
     def compute_source_set_representation(
         self,
@@ -399,33 +418,7 @@ class NEAT(LightningModule):
         pos_source = pos_source.to(device).float()
         batch_source = batch_source.to(device).long()
 
-        # (1) Process the pocket data if it is provided
-        if pocket_info is not None:
-            pocket_x = pocket_info["pocket_x"].to(device).long()
-            pocket_pos = pocket_info["pocket_pos"].to(device).float()
-            pocket_residue_id = pocket_info["pocket_residue_id"].to(device).long()
-            pocket_residue_type = pocket_info["pocket_residue_type"].to(device).long()
-            pocket_batch = pocket_info["pocket_batch"].to(device).long()
-
-            # Make the pocket_residue_id continuous across the batch
-            # e.g. [0,0,0,1,1,2,2,2,0,0,1,1] -> [0,0,0,1,1,2,2,2,3,3,4,4]
-            num_res_per_graph = torch.zeros(batch_size, device=device, dtype=torch.long)
-            for graph_idx in range(batch_size):
-                mask_g = pocket_batch == graph_idx
-                if mask_g.any():
-                    num_res_per_graph[graph_idx] = (
-                        int(pocket_residue_id[mask_g].max().item()) + 1
-                    )
-            id_offsets = torch.cat(
-                [
-                    torch.zeros(1, device=device, dtype=torch.long),
-                    torch.cumsum(num_res_per_graph[:-1], dim=0),
-                ]
-            )
-            pocket_residue_id = pocket_residue_id + id_offsets[pocket_batch]
-
-
-        # (2) Embed the atom types and positions
+        # (1) Embed the atom types and positions
         atom_type_embedding = self.atom_type_embedding_layer(
             x_source
         )  # [n_source_atoms, n_embd]
@@ -433,44 +426,100 @@ class NEAT(LightningModule):
             pos_source
         )  # [n_source_atoms, n_embd]
 
-        # (3) Combine the atom type embedding and the positional embedding
+        # (2) Combine the atom type embedding and the positional embedding
         input_embedding = (
             atom_type_embedding + positional_embedding
         )  # [n_source_atoms, n_embd]
 
-        # (4) Apply the dropout layer
+        # (3) Apply the dropout layer
         input_embedding = self.dropout_layer(
             input_embedding
         )  # [n_source_atoms, n_embd]
 
-        # (5) Insert start tokens
+        # (4) Insert start tokens
         x_source, batch_source = self.prepend_start_token(
             input_embedding, batch_source, self.start_token_embedding, batch_size
         )  # [n_source_atoms + batch_size, n_embd], [n_source_atoms + batch_size]
 
-        # (6.1) If we are given pocket information, encode the pocket with a lightweight
-        #        transformer. This yields the atom-level pocket representations for the 
-        #        cross-attention layers, and a global pocket conditioning vector for the 
-        # AdaLN layers.
+        # (5.1) If we are given pocket information, encode the pocket with a lightweight
+        #       transformer. This yields the atom-level pocket representations for the 
+        #       cross-attention layers, and a global pocket conditioning vector for the 
+        #       AdaLN layers.
         if pocket_info is not None:
-            x_pocket = self.compute_pocket_representation(
-                batch_size=batch_size,
-                device=device,
-                pocket_x=pocket_x,
-                pocket_pos=pocket_pos,
-                pocket_residue_id=pocket_residue_id,
-                pocket_residue_type=pocket_residue_type,
-                pocket_batch=pocket_batch,
-            )  # [n_pocket_atoms, n_embd]
+            pocket_x = pocket_info["pocket_x"].to(device).long()
+            pocket_pos = pocket_info["pocket_pos"].to(device).float()
+            pocket_residue_id = pocket_info["pocket_residue_id"].to(device).long()
+            pocket_residue_type = pocket_info["pocket_residue_type"].to(device).long()
+            pocket_batch = pocket_info["pocket_batch"].to(device).long()
+            
+        # (5.1.1) To apply CFG, we drop pockets according to the cfg_mask. We then 
+        #         compute the pocket representation only for the kept pockets, and 
+        #         insert null representations for the dropped pockets.
+            if cfg_mask is not None:
+                # 1. Split batch into kept vs dropped graph indices
+                kept_graph_indices = (~cfg_mask).nonzero(as_tuple=True)[0]
+                dropped_graph_indices = cfg_mask.nonzero(as_tuple=True)[0]
+
+                # 2. Filter out nodes belonging to dropped graphs
+                keep_nodes_mask = ~cfg_mask[pocket_batch]
+
+                # Compact new batch indices for the active nodes: map old batch ID -> [0 ... N_kept - 1]
+                active_pocket_batch = torch.searchsorted(kept_graph_indices, pocket_batch[keep_nodes_mask])
+
+                # 3. Compute representation only on active atoms
+                pocket_residue_id_batched = self.shift_residue_ids_wrt_batch(
+                    pocket_residue_id[keep_nodes_mask], 
+                    active_pocket_batch, 
+                    batch_size=len(kept_graph_indices)
+                )
+                x_pocket_valid = self.compute_pocket_representation(
+                    batch_size=kept_graph_indices.numel(),
+                    device=device,
+                    pocket_x=pocket_x[keep_nodes_mask],
+                    pocket_pos=pocket_pos[keep_nodes_mask],
+                    pocket_residue_id=pocket_residue_id_batched,
+                    pocket_residue_type=pocket_residue_type[keep_nodes_mask],
+                    pocket_batch=active_pocket_batch,
+                )
+
+                # 4. Construct null condition representations for dropped graphs
+                num_dropped = dropped_graph_indices.numel()
+                null_nodes = self.null_condition_embedding.expand(num_dropped, -1)
+
+                # 5. Concatenate valid nodes + null nodes
+                x_pocket = torch.cat([x_pocket_valid, null_nodes], dim=0)
+                pocket_batch = torch.cat([pocket_batch[keep_nodes_mask], dropped_graph_indices], dim=0)
+
+                # 6. Sort by pocket_batch to ensure nodes for each graph are contiguous
+                sort_order = torch.argsort(pocket_batch)
+                x_pocket = x_pocket[sort_order]
+                pocket_batch = pocket_batch[sort_order]
+                
+        # (5.1.2) If no CFG dropout is applied, we compute the pocket representation for 
+        #         all graphs in the batch.
+            else:
+                pocket_residue_id_batched = self.shift_residue_ids_wrt_batch(
+                    pocket_residue_id, 
+                    pocket_batch, 
+                    batch_size=batch_size
+                )
+                x_pocket = self.compute_pocket_representation(
+                    batch_size=batch_size,
+                    device=device,
+                    pocket_x=pocket_x,
+                    pocket_pos=pocket_pos,
+                    pocket_residue_id=pocket_residue_id_batched,
+                    pocket_residue_type=pocket_residue_type,
+                    pocket_batch=pocket_batch,
+                )  # [n_pocket_atoms, n_embd]
+        
+        # (5.1.3) Pool the atom-level pocket representations into a global pocket 
+        #         representation. This is used for AdaLN conditioning in the transformer blocks.        
             ada_ln_condition = global_add_pool(
                 x_pocket, pocket_batch
             )  # [batch_size, n_embd]
 
-            if cfg_mask is not None:
-                ada_ln_condition[cfg_mask] = self.null_condition_embedding # [batch_size, n_embd]
-                x_pocket, pocket_batch = self.cfg_dropout(x_pocket, pocket_batch, cfg_mask, self.null_condition_embedding) # [n_pocket_atoms, n_embd], [n_pocket_atoms]
-        
-        # (6.2) Without pocket information, we can still use the pocket-conditioned model with
+        # (5.2) Without pocket information, we can still use the pocket-conditioned model with
         #       null condition embedding for AdaLN layers and cross-attention layers.
         elif self.enable_cross_attention:
             x_pocket = None
@@ -480,20 +529,21 @@ class NEAT(LightningModule):
             )  # [batch_size, n_embd]
             pocket_batch = torch.arange(batch_size, device=device)  # [batch_size]
    
-        # (6.3) If we are not using cross-attention, we can skip the pocket encoding and AdaLN 
+        # (5.3) If we are not using cross-attention, we can skip the pocket encoding and AdaLN 
         #       conditioning. This is equivalent to the unconditional base model.
         else:
             x_pocket = None
             ada_ln_condition = None
+            pocket_batch = None
 
-        # (7) By default, we use AdaLN-single conditioning. Here we project the 
+        # (6) By default, we use AdaLN-single conditioning. Here we project the 
         #      global pocket representation to the AdaLN scale and shift parameters.
         if self.hparams.global_cond_proj:
             ada_ln_condition = self.global_condition_projection(
                 ada_ln_condition
             )  # [batch_size, n_embd * 8]
 
-        # (8) Pass through the transformer blocks
+        # (7) Pass through the transformer blocks
         for block in self.transformer_blocks:
             x_source = block(
                 x_source,
@@ -506,7 +556,7 @@ class NEAT(LightningModule):
             x_source
         ) # [n_source_atoms + batch_size, n_embd] 
 
-        # (9) Pool the atom embeddings into a molecule embedding
+        # (8) Pool the atom embeddings into a molecule embedding
         source_set_representation = global_add_pool(x_source, batch_source)  # [batch_size, n_embd]
 
         return source_set_representation
