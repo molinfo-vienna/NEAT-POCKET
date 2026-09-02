@@ -2,7 +2,7 @@ checkpoints_path: trained_models/neat_spindr                # Path to the traine
 output_path: output/generated_mols_spindr                   # Path to the output directory.
 data_set: SPINDR                                            # Dataset to use for generation.
 num_molecules: 100                                          # Number of molecules to generate.
-chunk_size: 3                                               # Number of chunks to process in parallel.
+chunk_size: 16                                              # Number of chunks to process in parallel.
 max_atoms: 100                                              # Maximum number of atoms per molecule.
 num_time_steps: 60                                          # Number of time steps for the flow matching integration.
 time_step_spacing: linear                                   # Time step spacing method for the flow matching integration.
