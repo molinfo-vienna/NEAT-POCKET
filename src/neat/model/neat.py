@@ -1410,26 +1410,30 @@ class NEAT(LightningModule):
         for dt, time_step in zip(dts, time_steps[:-1]):
             # (3.1) Compute the velocity at the current time step
             time_step = time_step.expand(x_next.shape[0])
-            velocity = self.compute_vector_field(
-                x_next,
-                pos_next,
-                time_step,
-                source_set_representation,
-                device=device,
-            )
-
+            
             # (3.2) If CFG: Compute the velocity of the unconditioned model and apply classifier-free guidance
             if source_set_representation_unconditioned_for_cfg is not None:
-                velocity_unconditioned_for_cfg = self.compute_vector_field(
-                    x_next,
-                    pos_next,
-                    time_step,
-                    source_set_representation_unconditioned_for_cfg,
+                velocities = self.compute_vector_field(
+                    torch.cat((x_next, x_next)),
+                    torch.cat((pos_next, pos_next)),
+                    torch.cat((time_step, time_step)),
+                    torch.cat((source_set_representation, source_set_representation_unconditioned_for_cfg)),
                     device=device,
                 )
+                velocity, velocity_unconditioned_for_cfg = velocities.split(x_next.shape[0], dim=0)
+
                 velocity = (
                     1 + cfg_factor
                 ) * velocity - cfg_factor * velocity_unconditioned_for_cfg
+                
+            else:
+                velocity = self.compute_vector_field(
+                    x_next,
+                    pos_next,
+                    time_step,
+                    source_set_representation,
+                    device=device,
+                )
 
             # (3.3) Update the positions with the computed velocity using the specified integration method
             if integration_method == "euler":
