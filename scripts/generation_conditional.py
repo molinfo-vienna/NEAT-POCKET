@@ -192,6 +192,7 @@ def generate(args: argparse.Namespace) -> None:
         print(f"Using fragment type: {fragment_type}")
 
     # Process pockets in chunks to bound GPU memory.
+    processing_times_per_chunk = []
     for chunk_start_idx in range(0, len(test_data), chunk_size):
         chunk_end_idx = min(chunk_start_idx + chunk_size, len(test_data))
         # Indices / fragments actually used for generation in this chunk
@@ -268,7 +269,7 @@ def generate(args: argparse.Namespace) -> None:
         pocket_info = datamodule.test_data.collate_pocket_info(
             data_point_list, samples_per_pocket=num_molecules, device=DEVICE
         )
-        pocket_start_time = datetime.now()
+        chunk_start_time = datetime.now()
         with torch.no_grad():
             model.eval()
             cfg_factor = params.get("cfg_factor", 0.0)
@@ -329,12 +330,20 @@ def generate(args: argparse.Namespace) -> None:
                 rdkit_mols, os.path.join(out_dir, "generated_mols.sdf")
             )
 
-        seed_end_time = datetime.now()
+        # Log processing time for this chunk and per-pocket average.
+        chunk_end_time = datetime.now()
+        num_pockets = len(included_data_indices)
+        chunk_time = chunk_end_time.timestamp() - chunk_start_time.timestamp()
         print(
-            f"Generation time for {len(included_data_indices)} pocket(s) "
+            f"Generation time for {num_pockets} pocket(s) "
             f"in chunk {chunk_start_idx}–{chunk_end_idx - 1}: "
-            f"{seed_end_time - pocket_start_time}"
+            f"{chunk_time}"
         )
+        for _ in range(num_pockets):
+            processing_times_per_chunk.append(chunk_time / num_pockets)
+
+    print(f"Average processing time per pocket: {np.mean(processing_times_per_chunk)}")
+    print(f"Standard deviation of processing time per pocket: {np.std(processing_times_per_chunk)}")
 
 
 if __name__ == "__main__":
