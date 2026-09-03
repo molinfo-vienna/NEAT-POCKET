@@ -281,8 +281,11 @@ class NEAT(LightningModule):
 
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         frozen_params = sum(p.numel() for p in self.parameters() if not p.requires_grad)
+        trainable_param_groups = len([p for p in self.parameters() if p.requires_grad])
+        frozen_param_groups = len([p for p in self.parameters() if not p.requires_grad])
         print(
-            f"Model configured: {trainable_params:,} trainable params | {frozen_params:,} frozen params."
+            f"Model configured: {trainable_params:,} trainable params | {frozen_params:,} frozen params.\n"
+            f"Trainable param groups: {trainable_param_groups}. Frozen param groups: {frozen_param_groups}.\n"
         )
 
     def forward(self, data: Data) -> tuple[Tensor, Tensor, Tensor]:
