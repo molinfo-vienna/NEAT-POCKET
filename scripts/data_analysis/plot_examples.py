@@ -108,7 +108,7 @@ MODELS: list[ModelSpec] = [
     ),
     ModelSpec(
         "FLOWR",
-        ROOT / "output" / "flowr_sample_from_train_dist",
+        ROOT / "output" / "flowr",
         "flowr",
     ),
     ModelSpec(
