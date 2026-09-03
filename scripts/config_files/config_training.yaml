@@ -1,5 +1,5 @@
 accumulate_grad_batches: 1                                    # Number of gradient updates to accumulate before performing an update on the model parameters.
-batch_size: 64                                                # Number of samples in a batch.
+batch_size: 128                                               # Number of samples in a batch.
 bias: true                                                    # Whether to use bias in the model.
 bond_predictor_dir: trained_models/bond_predictor/bp_spindr   # Directory containing the bond predictor model.
 cfg_dropout: 0.2                                              # Dropout rate for the CFG model.

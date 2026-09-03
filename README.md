@@ -1,32 +1,32 @@
-# NEAT-PC: <ins>P</ins>ocket-<ins>C</ins>onditioned 3D Molecular Generation with a <ins>N</ins>eighborhood-Guided, <ins>E</ins>fficient, <ins>A</ins>utoregressive Set <ins>T</ins>ransformer
+# NEAT-POCKET: <ins>P</ins>ocket-<ins>C</ins>onditioned 3D Molecular Generation with a <ins>N</ins>eighborhood-Guided, <ins>E</ins>fficient, <ins>A</ins>utoregressive Set <ins>T</ins>ransformer
 
-Welcome to the NEAT-PC repository. NEAT is an autoregressive model that builds 3D molecules one atom at a time using a set transformer. It feeds the transformer’s output into a flow model to predict where the next atom should be by modeling the probability over its possible positions.
+Welcome to the NEAT-POCKET repository. NEAT is an autoregressive model that builds 3D molecules one atom at a time using a set transformer. It feeds the transformer’s output into a flow model to predict where the next atom should be by modeling the probability over its possible positions.
 
 # Installation
 
 1. Clone the repository and cd into the repository's root:
 
 ```bash
-git clone https://github.com/molinfo-vienna/NEAT-PC.git
-cd NEAT-PC
+git clone https://github.com/molinfo-vienna/NEAT-POCKET.git
+cd NEAT-POCKET
 ```
 
 2. Create and activate an environment with the required python version:
 
 ```bash
-conda create --name neat_pc python=3.11
-conda activate neat_pc
+conda create --name neat-pocket python=3.11
+conda activate neat-pocket
 ```
 
 3. Install PyTorch according to your hardware. For example, with GPU and CUDA 13.0 on Linux:
 
 ```bash
-pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu130
+pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cu130
 ```
 
 For more info, visit https://pytorch.org/get-started/locally.
 
-4. Install NEAT-PC:
+4. Install NEAT-POCKET:
 
 ```bash
 pip install -e .
@@ -35,10 +35,10 @@ pip install -e .
 5. Install additional PyTorch-Geometrics dependencies:
 
 ```bash
-pip install pyg_lib torch_cluster torch_scatter -f https://data.pyg.org/whl/torch-2.9.0+cu130.html
+pip install pyg_lib torch_cluster torch_scatter -f https://data.pyg.org/whl/torch-2.12.0+cu130.html
 ```
 
-You need to replace the last part (2.9.0+cu130) with your PyTorch version.
+You need to replace the last part (2.12.0+cu130) with your PyTorch version.
 
 6. Download the model weights from TODO. Unzip and place into the project's root for using the generation script without modifications to the `config_generation_conditional.yaml` configuration file.
 

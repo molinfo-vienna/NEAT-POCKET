@@ -289,7 +289,7 @@ def safe_draw_median(ax, values, color):
 
 def get_mols(path):
     mols = []
-    if "spindr" in str(path):
+    if "all_ligands" in str(path):
         # Special loading for SPINDR data
         mols_file = os.path.join(path, "ligands.sdf")
         supplier = SDMolSupplier(mols_file, removeHs=False, sanitize=True)

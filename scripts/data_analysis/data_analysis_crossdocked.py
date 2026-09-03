@@ -292,7 +292,7 @@ def safe_draw_median(ax, values, color):
 
 def get_mols(path):
     mols = []
-    if "crossdocked" in str(path):
+    if "all_ligands" in str(path):
         # Special loading for CrossDocked data
         mols_file = os.path.join(path, "ligands_rdkit_default.sdf")
         supplier = SDMolSupplier(mols_file, removeHs=False, sanitize=True)

@@ -57,7 +57,7 @@ class GenerationMonitor(Callback):
         trainer: Trainer,
         pl_module: LightningModule,
     ) -> None:
-        if trainer.current_epoch % self.every_n_epochs != 0:
+        if trainer.current_epoch % self.every_n_epochs != 0 or trainer.current_epoch == 0:
             return
 
         generated_mols = None
@@ -235,31 +235,64 @@ class GenerationMonitor(Callback):
 
 
 class UnfreezeModelCallback(Callback):
+    """Unfreeze pretrained weights while preserving optimizer param-group layout.
+
+    ``configure_optimizers`` builds two AdamW groups (weight-decay / no-decay).
+    Newly unfrozen tensors are appended into those same groups so the LR
+    scheduler's ``base_lrs`` stay aligned.
+    """
+
     def __init__(self, unfreeze_epoch: int):
         super().__init__()
         self.unfreeze_epoch = unfreeze_epoch
         self._unfrozen = False
 
+    def state_dict(self) -> dict:
+        return {"_unfrozen": self._unfrozen}
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        self._unfrozen = bool(state_dict.get("_unfrozen", False))
+
     def on_train_epoch_start(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
-        # Check if we have hit the target epoch and haven't unfrozen yet
-        if trainer.current_epoch >= self.unfreeze_epoch and not self._unfrozen:
+        if trainer.current_epoch < self.unfreeze_epoch or self._unfrozen:
+            return
+
+        print(
+            f"\n[Callback] Epoch {trainer.current_epoch}: "
+            "Unfreezing all layers and extending optimizer param groups."
+        )
+
+        for param in pl_module.parameters():
+            param.requires_grad = True
+
+        for optimizer in trainer.optimizers:
+            if len(optimizer.param_groups) != 2:
+                raise RuntimeError(
+                    "UnfreezeModelCallback expects the NanoGPT-style 2-group "
+                    f"optimizer from configure_optimizers, got "
+                    f"{len(optimizer.param_groups)} groups."
+                )
+
+            already = {
+                id(p) for group in optimizer.param_groups for p in group["params"]
+            }
+            decay_params = []
+            nodecay_params = []
+            for param in pl_module.parameters():
+                if id(param) in already:
+                    continue
+                if param.dim() >= 2:
+                    decay_params.append(param)
+                else:
+                    nodecay_params.append(param)
+
+            optimizer.param_groups[0]["params"].extend(decay_params)
+            optimizer.param_groups[1]["params"].extend(nodecay_params)
             print(
-                f"\n[Callback] Epoch {trainer.current_epoch}: Unfreezing all layers and updating optimizer."
+                f"[Callback] Added {len(decay_params)} decay + "
+                f"{len(nodecay_params)} no-decay tensors to the optimizer."
             )
 
-            # 1. Unfreeze all parameters in the model
-            for param in pl_module.parameters():
-                param.requires_grad = True
-
-            # 2. Update the optimizer(s) so they track the newly unfrozen parameters
-            # We clear the old parameter groups and re-add all parameters.
-            for optimizer in trainer.optimizers:
-                optimizer.param_groups.clear()
-                # If you use multiple parameter groups (e.g., different learning rates),
-                # you would need to recreate that specific structure here.
-                optimizer.add_param_group({"params": pl_module.parameters()})
-
-            # Mark as done so we don't repeat this every epoch after
-            self._unfrozen = True
+        self._unfrozen = True

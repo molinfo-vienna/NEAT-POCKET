@@ -3,7 +3,7 @@ build
 plotting
 data
 fragments*
-logs 
+logs* 
 maestro_visualizations
 notebooks
 output*
