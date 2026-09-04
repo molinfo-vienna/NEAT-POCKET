@@ -808,7 +808,6 @@ def build_xae_molecule(positions, atom_types, dataset_info, bond_orders=None):
                         dists[i, j],
                         limit_bonds_to_one=True,
                     )
-            # TODO: a batched version of get_bond_order to avoid the for loop
             if order > 0:
                 # Warning: the graph should be DIRECTED
                 A[i, j] = 1

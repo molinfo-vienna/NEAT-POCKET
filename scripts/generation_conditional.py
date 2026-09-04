@@ -236,7 +236,6 @@ def generate(args: argparse.Namespace) -> None:
             supplier = Chem.SDMolSupplier(in_sdf_file, removeHs=False, sanitize=False)
             rdmol = supplier[0]
             rdmol = _largest_fragment(rdmol)
-            # TODO: decide which hydrogenation method to use
             rdmol = Chem.AddHs(rdmol, addCoords=True)
 
             conformer = rdmol.GetConformer()
