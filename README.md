@@ -1,6 +1,6 @@
-# NEAT-POCKET: <ins>P</ins>ocket-<ins>C</ins>onditioned 3D Molecular Generation with a <ins>N</ins>eighborhood-Guided, <ins>E</ins>fficient, <ins>A</ins>utoregressive Set <ins>T</ins>ransformer
+# NEAT-POCKET: Pocket-Conditioned Autoregressive 3D Molecular Generation with a Neighborhood-Guided Set Transformer
 
-Welcome to the NEAT-POCKET repository. NEAT is an autoregressive model that builds 3D molecules one atom at a time using a set transformer. It feeds the transformer’s output into a flow model to predict where the next atom should be by modeling the probability over its possible positions.
+Welcome to the NEAT-POCKET repository. NEAT is an autoregressive model that builds 3D drug-like molecules one atom at a time using a set transformer backbone. NEAT-POCKET is the protein-pocket-conditioned extension of NEAT.
 
 # Installation
 
@@ -21,10 +21,10 @@ conda activate neat-pocket
 3. Install PyTorch according to your hardware. For example, with GPU and CUDA 13.0 on Linux:
 
 ```bash
-pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cu130
+pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
 ```
 
-For more info, visit https://pytorch.org/get-started/locally.
+For more info, visit [PyTorch](https://pytorch.org/get-started/locally).
 
 4. Install NEAT-POCKET:
 
@@ -35,12 +35,18 @@ pip install -e .
 5. Install additional PyTorch-Geometrics dependencies:
 
 ```bash
-pip install pyg_lib torch_cluster torch_scatter -f https://data.pyg.org/whl/torch-2.12.0+cu130.html
+pip install pyg_lib torch_cluster torch_scatter -f https://data.pyg.org/whl/torch-2.11.0+cu130.html
 ```
 
-You need to replace the last part (2.12.0+cu130) with your PyTorch version.
+You need to replace the last part (2.11.0+cu130) with your PyTorch version.
 
-6. Download the model weights from TODO. Unzip and place into the project's root for using the generation script without modifications to the `config_generation_conditional.yaml` configuration file.
+6. Get the model weights:
+
+```bash
+python scripts/get_weights.py
+```
+
+Alternatively you can download the trained model weights manually from [figshare](https://doi.org/10.6084/m9.figshare.33426877). Unzip and place into the project's root for using the generation script without modifications to the `config_generation_conditional.yaml` configuration file.
 
 7. For docking score computation, add the Gnina binary to the conda environment:
 ```bash
