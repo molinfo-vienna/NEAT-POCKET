@@ -6,6 +6,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+import biotite.structure.io.pdb as pdb
 import biotite.structure.io.pdbx as pdbx
 import networkx as nx
 import torch
@@ -22,11 +23,26 @@ RDLogger.DisableLog("rdApp.*")
 SEED = 0
 
 
+def _load_pocket_structure(pocket_path: Path):
+    """Load a pocket structure from CIF or PDB via biotite."""
+    suffix = pocket_path.suffix.lower()
+    if suffix == ".cif":
+        file_obj = pdbx.CIFFile.read(str(pocket_path))
+        return pdbx.get_structure(file_obj, model=1)
+    if suffix in {".pdb", ".ent"}:
+        file_obj = pdb.PDBFile.read(str(pocket_path))
+        return pdb.get_structure(file_obj, model=1)
+    raise ValueError(
+        f"Unsupported pocket format '{suffix}' for {pocket_path}. "
+        "Use .cif or .pdb."
+    )
+
+
 def _process_protein_ligand_complex(pocket_path: Path, ligand_path: Path, split_name: str) -> Data | None:
     """Construct PyG Data object from raw protein-ligand complex
 
     Args:
-        pocket_path (Path): Path to the pocket file (CIF format)
+        pocket_path (Path): Path to the pocket file (CIF or PDB format)
         ligand_path (Path): Path to the ligand file (SD format)
         split_name (str): Name of the split to which the complex belongs
 
@@ -90,21 +106,20 @@ def _process_protein_ligand_complex(pocket_path: Path, ligand_path: Path, split_
     smiles = Chem.MolToSmiles(rdmol, canonical=True)
 
     # (3) Load pocket and construct point cloud object
-    file = pdbx.CIFFile.read(str(pocket_path))
-    cif_model = pdbx.get_structure(file, model=1)
+    pocket_model = _load_pocket_structure(pocket_path)
     pt = Chem.GetPeriodicTable()
     pocket_x = torch.tensor(
         [
             ATOM_VOCABULARY.get(pt.GetAtomicNumber(element))
-            for element in cif_model.element
+            for element in pocket_model.element
         ],
         dtype=torch.long,
     )
-    pocket_pos = torch.tensor(cif_model.coord)
-    pocket_residue_id = torch.tensor(cif_model.res_id, dtype=torch.long)
+    pocket_pos = torch.tensor(pocket_model.coord)
+    pocket_residue_id = torch.tensor(pocket_model.res_id, dtype=torch.long)
     _, pocket_residue_id = torch.unique(pocket_residue_id, return_inverse=True)
     pocket_residue_type = torch.tensor(
-        [AA_VOCABULARY.get(residue_type, 0) for residue_type in cif_model.res_name],
+        [AA_VOCABULARY.get(residue_type, 0) for residue_type in pocket_model.res_name],
         dtype=torch.long,
     )
 
