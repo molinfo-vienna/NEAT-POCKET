@@ -1,6 +1,6 @@
 # NEAT-POCKET: Pocket-Conditioned Autoregressive 3D Molecular Generation with a Neighborhood-Guided Set Transformer
 
-Welcome to the NEAT-POCKET repository. NEAT is an autoregressive model that builds 3D drug-like molecules one atom at a time using a set transformer backbone. NEAT-POCKET is the protein-pocket-conditioned extension of the [NEAT model](https://github.com/molinfo-vienna/NEAT-POCKET) for 3D molecular generation.
+Welcome to the NEAT-POCKET repository. NEAT is an autoregressive model that builds 3D drug-like molecules one atom at a time using a set transformer backbone. NEAT-POCKET ([Paper](https://arxiv.org/abs/2609.05097)) is the protein-pocket-conditioned extension of the NEAT model ([Code](https://github.com/molinfo-vienna/NEAT), [Paper](https://arxiv.org/abs/2512.05844)) for 3D molecular generation.
 
 <p align="center">
   <img src="images/overview.png" alt="image" width="600">
@@ -62,7 +62,7 @@ chmod +x $CONDA_PREFIX/bin/gnina
 
 ## Tutorial: generate new ligands for a given protein
 
-This tutorial shows how to generate a diverse set of ligands for a protein binding pocket. As an example, we use the AKR1C3 complex with ibuprofen from the Protein Data Bank: PDB ID 3R8G.
+This tutorial shows how to generate a diverse set of ligands for a protein binding pocket. As an example, we use the AKR1C3 complex with ibuprofen from the Protein Data Bank (ID 3R8G).
 
 The goal is to generate molecules that occupy the same region of the binding pocket as ibuprofen and form similar protein–ligand interactions.
 
@@ -74,9 +74,9 @@ We provide the necessary files in the example_input folder.
 - The ligand structure data file: IZP.sdf
 - Optional: We further provide a substructure of IZP.sdf for fragment-based design (IZP_fragment.sdf)
 
-In this example, the ligand is ibuprofen, which has the PDB ligand identifier IZP. Alternatively, you can provide your own structure data. Simply edit the protein_path and the ligand_path in the config_generation_from_pdb.yaml file accordingly. 
+Alternatively, you can provide your own structure data. Simply edit the protein_path and the ligand_path in the config_generation_from_pdb.yaml file accordingly. 
 
-2. Settings
+2. Settings:
 
 The config_generation_from_pdb.yaml file provides several options for customizing generation from a protein structure.
 
@@ -88,12 +88,11 @@ The config_generation_from_pdb.yaml file provides several options for customizin
 
 - Use `cfg_factor` to set the classifier-free-guidance scale (default: 0.5).
 
-- Use `pocket_cutoff` to change the distance cutoff used to define the binding pocket around the ligand. We recommend keeping the default value of 6 Å because this cutoff was used during model training.
+- Use `pocket_cutoff` to change the distance cutoff used to define the binding pocket around the ligand. We recommend keeping the default value of 6 Å since this cutoff was used during model training.
 
 - By default, the script adds hydrogens (`add_hs`) to the protein pocket. Only disable protonation if your input protein has already been protonated using another program.
 
-We recommend to leave all other parameters to the default setting. 
-
+We recommend to leave all other parameters to the default setting.
 
 3. Run ligand generation:
 
@@ -101,7 +100,7 @@ We recommend to leave all other parameters to the default setting.
 python scripts/generation_from_pdb.py
 ```
 
-The script automatically extracts the protein binding pocket using the same procedure as in the SPINDR dataset. By default, the pocket is defined as all protein atoms within 6 Angstrom of the reference ligand.
+The script automatically extracts the protein binding pocket with the procedure used to curate the SPINDR dataset, which was used to train NEAT-POCKET. By default, the pocket is defined as all protein atoms within 6 Angstrom of the reference ligand.
 
 Note: A ligand is currently required to identify the binding pocket. However, the ligand is only used to define the pocket region and is not used during the molecule generation process. Support for apo proteins will be added in a future release.
 
@@ -110,7 +109,7 @@ Note: A ligand is currently required to identify the binding pocket. However, th
 After the script finishes, the output folder will contain the following files:
 
 - pocket.pdb: the extracted protein pocket
-- ligand.sdf: the hydrogenated input ligand
+- ligand.sdf: the input ligand
 - generated_mols.sdf: the generated molecules
 
 Expected runtime for 100 molecules is approximately 4 seconds on an NVIDIA GeForce RTX 4090 GPU. 
