@@ -3,7 +3,7 @@
 Workflow:
   1. Load scripts/config_evaluation.yaml (or --config).
   2. Iterate result subdirectories under data_path/data_subdir whose names
-     start with seed_, prefix_, or pocket_ (see RESULT_SUBDIR_PREFIXES).
+     start with seed_, prefix_, pocket_, or run_ (see RESULT_SUBDIR_PREFIXES).
   3. For each subdirectory: build RDKit mols from generated_mols.pt (or load
      from .sdf), compute selected metrics, write evaluation_results.txt and
      visualization images.
@@ -97,7 +97,7 @@ def load_reference_smiles(params: dict) -> list[str] | None:
 
 
 def iter_result_subdirs(data_path: Path) -> Iterator[Path]:
-    """Yield seed_/prefix_/pocket_ result directories under data_path, sorted."""
+    """Yield seed_/prefix_/pocket_/run_ result directories under data_path, sorted."""
     for subdir in sorted(data_path.iterdir()):
         if subdir.is_dir() and subdir.name.startswith(RESULT_SUBDIR_PREFIXES):
             yield subdir
