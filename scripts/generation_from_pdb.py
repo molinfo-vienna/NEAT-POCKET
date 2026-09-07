@@ -17,9 +17,9 @@ Each invocation creates the next ``run_N`` under ``output_path``.
 ``num_molecules`` may exceed ``batch_size``; generation then runs in batches
 and concatenates all molecules into the same output files.
 
-Pocket cutting reimplements FlowR's logic (`process_pdb`) without importing
-FlowR. Preprocessing uses ``_process_protein_ligand_complex`` /
-``SpindrDataSet.collate_pocket_info`` from ``neat.dataset.dataset_spindr``.
+Pocket cutting reimplements FlowR's logic (`process_pdb`). 
+https://github.com/jule-c/flowr_root/blob/86a25f08161db16bd9b42cb9f6e03edd516d1534/flowr/data/preprocess_pdbs.py#L362
+
 The model runs in a ligand-COM-centered frame during sampling, then
 ``NEAT.generate`` recenters outputs onto the pocket COM. Generated molecules
 are translated by that pocket COM back into the target reference frame.
@@ -94,19 +94,6 @@ def load_ligand_mol(ligand_path: Union[str, Path]) -> Chem.Mol:
         mol = None
 
     if mol is None:
-        try:
-            from openbabel import pybel
-
-            mol_ob = next(pybel.readfile("sdf", str(ligand_path)), None)
-            if mol_ob is not None:
-                mol = Chem.MolFromMolBlock(mol_ob.write("mol"), removeHs=False)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Could not read ligand from {ligand_path} with RDKit "
-                f"or OpenBabel: {exc}"
-            ) from exc
-
-    if mol is None:
         raise RuntimeError(f"Could not parse ligand molecule from {ligand_path}")
     return mol
 
@@ -141,7 +128,7 @@ def load_protein_structure(
     if suffix == ".cif":
         file_obj = pdbx.CIFFile.read(str(protein_path))
         read_fn = pdbx.get_structure
-    elif suffix in {".pdb", ".ent"}:
+    elif suffix == ".pdb":
         file_obj = pdb.PDBFile.read(str(protein_path))
         read_fn = pdb.get_structure
     else:
@@ -446,7 +433,7 @@ def compute_preprocess_center(ligand_path: Path) -> torch.Tensor:
 
 
 def load_fragment_mol(fragment_path: Path) -> Chem.Mol:
-    """Load a fragment SDF for seeded generation (target reference frame)."""
+    """Load a fragment SDF for fragment-based generation (target reference frame)."""
     supplier = Chem.SDMolSupplier(
         str(fragment_path), removeHs=False, sanitize=False
     )
@@ -552,13 +539,8 @@ def generate_molecules(
     """Generate ligands conditioned on a preprocessed pocket.
 
     Runs ``ceil(num_molecules / batch_size)`` generation passes. Each batch is
-    converted to RDKit molecules and appended to ``generated_mols.sdf``
-    immediately (avoids one large bond-prediction call at the end).
+    converted to RDKit molecules and appended to ``generated_mols.sdf``.
 
-    ``model.generate`` returns coordinates centered on the pocket COM (see
-    step 5 in ``NEAT.generate``). ``frame_center`` should therefore be the
-    pocket geometric center in the target frame so outputs land on the
-    original protein/ligand coordinates.
     """
     if num_molecules < 1:
         raise ValueError(f"num_molecules must be >= 1, got {num_molecules}")
@@ -568,7 +550,7 @@ def generate_molecules(
     model, bond_predictor = load_model_and_bond_predictor(params)
     builder = MoleculeBuilder(vocab=params["data_set"])
     mode = (
-        "fragment-seeded"
+        "fragment-based"
         if fragment_mol_model_frame is not None
         else "pocket-conditioned"
     )
