@@ -62,26 +62,46 @@ This tutorial shows how to generate a diverse set of ligands for a protein bindi
 
 The goal is to generate molecules that occupy the same region of the binding pocket as ibuprofen and form similar protein–ligand interactions.
 
-1. Download the input files:
+1. Input files:
 
-Download the following files from the PDB entry for 3R8G:
+We provide the necessary files in the example_input folder.
 
 - The protein crystallographic information file: 3R8G.cif
-- The ligand structure data file: 3r8g-C_IZP.sdf
+- The ligand structure data file: IZP.sdf
+- Optional: We further provide a substructure of IZP.sdf for fragment-based design (IZP_fragment.sdf)
 
-In this example, the ligand is ibuprofen, which has the PDB ligand identifier IZP.
+In this example, the ligand is ibuprofen, which has the PDB ligand identifier IZP. Alternatively, you can provide your own structure data. Simply edit the protein_path and the ligand_path in the config_generation_from_pdb.yaml file accordingly. 
 
-2. Run ligand generation:
+2. Settings
+
+The config_generation_from_pdb.yaml file provides several options for customizing generation from a protein structure.
+
+- Use `num_molecules` to control how many molecules are generated (default: 100).
+
+- Use `batch_size` to pick a suitable batch size for your hardware (default: 100). E.g., we could generate a batch of 1600 molecules in parallel on an NVIDIA RTX 4090 GPU. 
+
+- The `max_atoms` parameter defines the maximum ligand size during generation (default: 100). 
+
+- Use `cfg_factor` to set the classifier-free-guidance scale (default: 0.5).
+
+- Use `pocket_cutoff` to change the distance cutoff used to define the binding pocket around the ligand. We recommend keeping the default value of 6 Å because this cutoff was used during model training.
+
+- By default, the script adds hydrogens (`add_hs`) to the protein pocket. Only disable protonation if your input protein has already been protonated using another program.
+
+We recommend to leave all other parameters to the default setting. 
+
+
+3. Run ligand generation:
 
 ```bash
-python scripts/generate_from_pdb.py --protein ./3R8G.cif --ligand ./3r8g-C_IZP.sdf
+python scripts/generation_from_pdb.py
 ```
 
 The script automatically extracts the protein binding pocket using the same procedure as in the SPINDR dataset. By default, the pocket is defined as all protein atoms within 6 Angstrom of the reference ligand.
 
 Note: A ligand is currently required to identify the binding pocket. However, the ligand is only used to define the pocket region and is not used during the molecule generation process. Support for apo proteins will be added in a future release.
 
-3. Output:
+4. Output:
 
 After the script finishes, the output folder will contain the following files:
 
@@ -89,66 +109,14 @@ After the script finishes, the output folder will contain the following files:
 - ligand.sdf: the hydrogenated input ligand
 - generated_mols.sdf: the generated molecules
 
-By default, the results are written to a folder named default, unless a custom session name is provided with the --session flag.
-
-4. General generation settings can be modified using the config file (scripts/config_files/config_generation_conditional.yaml).
-
-5. Command-line options:
-
-The generate_from_pdb.py script provides several options for customizing generation from a protein structure.
-
-Use --session to specify the name of the output folder:
-
-```bash
-python scripts/generate_from_pdb.py \
-  --protein ./3R8G.cif \
-  --ligand ./3r8g-C_IZP.sdf \
-  --session akr1c3_ibuprofen
-```
-Use --pocket_cutoff to change the distance cutoff used to define the binding pocket around the ligand:
-
-```bash
-python scripts/generate_from_pdb.py \
-  --protein ./3R8G.cif \
-  --ligand ./3r8g-C_IZP.sdf \
-  --pocket_cutoff 6.0
-```
-
-We recommend keeping the default value of 6 Å because this cutoff was used during model training.
-
-By default, the script adds hydrogens to the protein pocket. To disable this step, use:
-
-```bash
-python scripts/generate_from_pdb.py \
-  --protein ./3R8G.cif \
-  --ligand ./3r8g-C_IZP.sdf \
-  --no_add_hs
-```
-We recommend using protonated pockets. Only disable protonation if your input protein has already been protonated using another program.
-
-Use --num_molecules to control how many molecules are generated.
-
-```bash
-python scripts/generate_from_pdb.py \
-  --protein ./3R8G.cif \
-  --ligand ./3r8g-C_IZP.sdf \
-  --num_molecules 100
-```
-
 Expected runtime for 100 molecules is approximately 4 seconds on an NVIDIA GeForce RTX 4090 GPU. 
 
 Note: The number of molecules in generated_mols.sdf may be lower than the requested number. This can happen if some generated structures are invalid or cannot be converted into RDKit molecule objects.
 
-6. Fragment-constrained generation:
+5. Fragment-constrained generation:
 
-You can also generate molecules starting from a molecular fragment. To do this, provide the path to a fragment SDF using the --fragment argument:
+You can also generate molecules starting from a molecular fragment. To do this, provide the path to a fragment SDF in the configuration file. 
 
-```bash
-python scripts/generate_from_pdb.py \
-  --protein ./3R8G.cif \
-  --ligand ./3r8g-C_IZP.sdf \
-  --fragment ./fragment.sdf
-```
 
 ## Reproduce the results shown in the paper:
 
