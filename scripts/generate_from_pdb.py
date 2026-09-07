@@ -2,21 +2,20 @@
 """
 Extract a SPINDR-style protein pocket and generate molecules conditioned on it.
 
-Inputs are explicit protein and ligand file paths. Optionally pass ``--fragment``
-to seed generation from a fragment SDF (same coordinate frame as the target).
-Outputs are written under::
+All run parameters are read from a YAML config (default:
+``scripts/config_files/config_generation_from_pdb.yaml``). Outputs are written
+under ``<output_path>/run_<N>/``::
 
-  generated_mols/<session>/run_<N>/
-    pocket.pdb
-    <copy of protein>
-    <copy of ligand>
-    <copy of fragment>   # only if --fragment is set
-    generated_mols.sdf
-    generated_mols.pt
+  pocket.pdb
+  <copy of protein>
+  ligand.sdf
+  <copy of fragment>   # only if fragment_path is set
+  generated_mols.sdf
+  generated_mols.pt
 
-``--session`` groups related runs; each invocation creates the next ``run_N``.
-
-Protein protonation via hydride is enabled by default.
+Each invocation creates the next ``run_N`` under ``output_path``.
+``num_molecules`` may exceed ``batch_size``; generation then runs in batches
+and concatenates all molecules into the same output files.
 
 Pocket cutting reimplements FlowR's logic (`process_pdb`) without importing
 FlowR. Preprocessing uses ``_process_protein_ligand_complex`` /
@@ -27,11 +26,8 @@ are translated by that pocket COM back into the target reference frame.
 
 Example
 -------
-python scripts/generate_from_pdb.py --protein ./1KE6.cif --ligand ./lig.sdf
-python scripts/generate_from_pdb.py --protein ./prot.pdb --ligand ./lig.sdf \\
-    --session cdk2_screen --num_molecules 50
-python scripts/generate_from_pdb.py --protein ./prot.pdb --ligand ./lig.sdf \\
-    --fragment ./frag.sdf
+python scripts/generate_from_pdb.py
+python scripts/generate_from_pdb.py --config scripts/config_files/config_generation_from_pdb.yaml
 """
 
 from __future__ import annotations
@@ -54,6 +50,7 @@ from Bio.PDB.Polypeptide import is_aa
 from biotite.structure import AtomArray, BondList
 from lightning import seed_everything
 from rdkit import Chem
+from torch_geometric.data import Batch
 
 from neat.dataset.dataset_spindr import (SpindrDataSet,
                                          _process_protein_ligand_complex)
@@ -61,7 +58,6 @@ from neat.dataset.dataset_utils import _largest_fragment, _ligand_features
 from neat.model import NEAT
 from neat.model.bond_predictor import BondPredictor
 from neat.model.molecule_builder import MoleculeBuilder
-from neat.utils import save_molecules_to_sdf
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -74,10 +70,8 @@ seed_everything(42)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROOT = os.getcwd()
 DEFAULT_CONFIG = os.path.join(
-    ROOT, "scripts", "config_files", "config_generation_conditional.yaml"
+    ROOT, "scripts", "config_files", "config_generation_from_pdb.yaml"
 )
-DEFAULT_SESSION = "default"
-OUTPUT_ROOT = Path(ROOT) / "generated_mols"
 PROTEIN_SUFFIXES = {".pdb", ".cif", ".ent"}
 LIGAND_SUFFIXES = {".sdf", ".mol"}
 RUN_DIR_RE = re.compile(r"^run_(\d+)$")
@@ -168,7 +162,7 @@ def load_protein_structure(
         except ImportError as exc:
             raise ImportError(
                 "hydride is required for hydrogen addition (default). "
-                "Install hydride or pass --no_add_hs."
+                "Install hydride or set add_hs: false in the config."
             ) from exc
         structure, _mask = hydride.add_hydrogen(structure)
         structure.coord = hydride.relax_hydrogen(structure)
@@ -313,14 +307,22 @@ def extract_spindr_pocket(
     return pocket
 
 
+def resolve_path(path: Union[str, Path]) -> Path:
+    """Resolve a config path relative to the project root if not absolute."""
+    path = Path(path).expanduser()
+    if not path.is_absolute():
+        path = Path(ROOT) / path
+    return path.resolve()
+
+
 def validate_input_paths(
     protein_path: Union[str, Path],
     ligand_path: Union[str, Path],
     fragment_path: Union[str, Path, None] = None,
 ) -> tuple[Path, Path, Path | None]:
     """Validate protein/ligand/(optional) fragment paths and suffixes."""
-    protein_path = Path(protein_path).expanduser().resolve()
-    ligand_path = Path(ligand_path).expanduser().resolve()
+    protein_path = resolve_path(protein_path)
+    ligand_path = resolve_path(ligand_path)
 
     if not protein_path.is_file():
         raise FileNotFoundError(f"Protein file not found: {protein_path}")
@@ -340,7 +342,7 @@ def validate_input_paths(
 
     resolved_fragment = None
     if fragment_path is not None:
-        resolved_fragment = Path(fragment_path).expanduser().resolve()
+        resolved_fragment = resolve_path(fragment_path)
         if not resolved_fragment.is_file():
             raise FileNotFoundError(f"Fragment file not found: {resolved_fragment}")
         if resolved_fragment.suffix.lower() not in LIGAND_SUFFIXES:
@@ -352,9 +354,9 @@ def validate_input_paths(
     return protein_path, ligand_path, resolved_fragment
 
 
-def create_run_dir(session: str = DEFAULT_SESSION) -> Path:
-    """Create ``generated_mols/<session>/run_<N>`` with the next free index."""
-    session_dir = OUTPUT_ROOT / session
+def create_run_dir(output_path: Union[str, Path]) -> Path:
+    """Create ``<output_path>/run_<N>`` with the next free index."""
+    session_dir = resolve_path(output_path)
     session_dir.mkdir(parents=True, exist_ok=True)
 
     existing: list[int] = []
@@ -374,7 +376,7 @@ def create_run_dir(session: str = DEFAULT_SESSION) -> Path:
 def prepare_run_dir(
     protein_path: Union[str, Path],
     ligand_path: Union[str, Path],
-    session: str = DEFAULT_SESSION,
+    output_path: Union[str, Path],
     pocket_cutoff: float = 6.0,
     add_hs: bool = True,
     fragment_path: Union[str, Path, None] = None,
@@ -392,17 +394,17 @@ def prepare_run_dir(
     protein_path, ligand_path, fragment_path = validate_input_paths(
         protein_path, ligand_path, fragment_path=fragment_path
     )
-    run_dir = create_run_dir(session=session)
+    run_dir = create_run_dir(output_path)
 
     protein_copy = run_dir / protein_path.name
-    ligand_copy = run_dir / ligand_path.name
+    ligand_copy = run_dir / "ligand.sdf"
     shutil.copy2(protein_path, protein_copy)
     shutil.copy2(ligand_path, ligand_copy)
 
     fragment_copy = None
     if fragment_path is not None:
         fragment_name = fragment_path.name
-        if fragment_name in {protein_path.name, ligand_path.name}:
+        if fragment_name in {protein_path.name, "ligand.sdf"}:
             fragment_name = f"fragment{fragment_path.suffix.lower()}"
         fragment_copy = run_dir / fragment_name
         shutil.copy2(fragment_path, fragment_copy)
@@ -424,10 +426,9 @@ def prepare_run_dir(
     print(
         f"Protein: {protein_path.name}  |  Ligand: {ligand_path.name}"
         + (f"  |  Fragment: {fragment_path.name}" if fragment_path else "")
-        + f"\nSession: {session}  |  Run: {run_dir.name}\n"
+        + f"\nOutput: {run_dir.resolve()}\n"
         f"Wrote pocket ({len(pocket)} atoms, {n_res} residues, "
-        f"cutoff={pocket_cutoff} Å, add_hs={add_hs})\n"
-        f"  -> {run_dir.resolve()}"
+        f"cutoff={pocket_cutoff} Å, add_hs={add_hs})"
     )
     return run_dir, pocket_path, ligand_copy, fragment_copy, pocket_com
 
@@ -542,70 +543,118 @@ def load_model_and_bond_predictor(params: dict):
 def generate_molecules(
     pocket_data,
     num_molecules: int,
+    batch_size: int,
     params: dict,
     out_dir: Path,
     frame_center: torch.Tensor,
-    fragment_info: dict | None = None,
+    fragment_mol_model_frame: Chem.Mol | None = None,
 ) -> None:
     """Generate ligands conditioned on a preprocessed pocket.
+
+    Runs ``ceil(num_molecules / batch_size)`` generation passes. Each batch is
+    converted to RDKit molecules and appended to ``generated_mols.sdf``
+    immediately (avoids one large bond-prediction call at the end).
 
     ``model.generate`` returns coordinates centered on the pocket COM (see
     step 5 in ``NEAT.generate``). ``frame_center`` should therefore be the
     pocket geometric center in the target frame so outputs land on the
     original protein/ligand coordinates.
     """
+    if num_molecules < 1:
+        raise ValueError(f"num_molecules must be >= 1, got {num_molecules}")
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+
     model, bond_predictor = load_model_and_bond_predictor(params)
-
-    pocket_info = SpindrDataSet.collate_pocket_info(
-        [pocket_data], samples_per_pocket=num_molecules, device=DEVICE
-    )
-
-    mode = "fragment-seeded" if fragment_info is not None else "pocket-conditioned"
-    print(f"Generating {num_molecules} molecules ({mode})...")
-    with torch.no_grad():
-        model.eval()
-        cfg_factor = params.get("cfg_factor", 0.0)
-        generated_mols = model.generate(
-            batch_size=pocket_info["pocket_batch"].max().item() + 1,
-            max_atoms=params["max_atoms"],
-            num_time_steps=params["num_time_steps"],
-            time_step_spacing=params["time_step_spacing"],
-            integration_method=params["integration_method"],
-            pocket_info=pocket_info,
-            fragment_info=fragment_info,
-            cfg_factor=cfg_factor,
-            device=DEVICE,
-        )
-
-    generated_mols.batch -= generated_mols.batch.min()
-    # Map pocket-COM-centered model coords back to the target frame.
-    center = frame_center.to(
-        device=generated_mols.pos.device, dtype=generated_mols.pos.dtype
-    )
-    generated_mols.pos = generated_mols.pos + center
-    torch.save(generated_mols, out_dir / "generated_mols.pt")
-
     builder = MoleculeBuilder(vocab=params["data_set"])
-    if bond_predictor is not None:
-        rdkit_mols = builder.generate_rdkit_molecules_via_bond_predictor(
-            generated_mols.x,
-            generated_mols.pos,
-            generated_mols.batch,
-            bond_predictor=bond_predictor,
-            progress_bar=True,
-        )
-    else:
-        rdkit_mols = builder.generate_rdkit_molecules_via_xyz2mol(
-            generated_mols.x,
-            generated_mols.pos,
-            generated_mols.batch,
-            progress_bar=True,
-        )
-    save_molecules_to_sdf(rdkit_mols, out_dir / "generated_mols.sdf")
+    mode = (
+        "fragment-seeded"
+        if fragment_mol_model_frame is not None
+        else "pocket-conditioned"
+    )
     print(
-        f"Wrote generated molecules (target reference frame):\n"
-        f"  -> {(out_dir / 'generated_mols.pt').resolve()}\n"
-        f"  -> {(out_dir / 'generated_mols.sdf').resolve()}"
+        f"Generating {num_molecules} molecules ({mode}), "
+        f"batch_size={batch_size}..."
+    )
+
+    center = frame_center.to(device=DEVICE)
+    sdf_path = out_dir / "generated_mols.sdf"
+    molecules_done = 0
+    batch_idx = 0
+    n_written = 0
+
+    writer = Chem.SDWriter(str(sdf_path))
+    try:
+        while molecules_done < num_molecules:
+            this_batch = min(batch_size, num_molecules - molecules_done)
+            batch_idx += 1
+            print(
+                f"  Batch {batch_idx}: generating {this_batch} molecules "
+                f"({molecules_done + this_batch}/{num_molecules})"
+            )
+
+            pocket_info = SpindrDataSet.collate_pocket_info(
+                [pocket_data], samples_per_pocket=this_batch, device=DEVICE
+            )
+            fragment_info = None
+            if fragment_mol_model_frame is not None:
+                fragment_info = prepare_fragment_info(
+                    fragment_mol_model_frame, this_batch
+                )
+
+            with torch.no_grad():
+                model.eval()
+                cfg_factor = params.get("cfg_factor", 0.0)
+                generated_mols = model.generate(
+                    batch_size=pocket_info["pocket_batch"].max().item() + 1,
+                    max_atoms=params["max_atoms"],
+                    num_time_steps=params["num_time_steps"],
+                    time_step_spacing=params["time_step_spacing"],
+                    integration_method=params["integration_method"],
+                    pocket_info=pocket_info,
+                    fragment_info=fragment_info,
+                    cfg_factor=cfg_factor,
+                    device=DEVICE,
+                )
+
+            generated_mols.batch = generated_mols.batch - generated_mols.batch.min()
+            generated_mols.pos = generated_mols.pos + center.to(
+                device=generated_mols.pos.device, dtype=generated_mols.pos.dtype
+            )
+
+            if bond_predictor is not None:
+                rdkit_mols = builder.generate_rdkit_molecules_via_bond_predictor(
+                    generated_mols.x,
+                    generated_mols.pos,
+                    generated_mols.batch,
+                    bond_predictor=bond_predictor,
+                    progress_bar=True,
+                )
+            else:
+                rdkit_mols = builder.generate_rdkit_molecules_via_xyz2mol(
+                    generated_mols.x,
+                    generated_mols.pos,
+                    generated_mols.batch,
+                    progress_bar=True,
+                )
+
+            for mol in rdkit_mols:
+                if mol is None:
+                    continue
+                try:
+                    writer.write(mol)
+                    n_written += 1
+                except Exception as exc:
+                    print(f"Error while writing molecule to SDF: {exc}")
+
+            molecules_done += this_batch
+    finally:
+        writer.close()
+
+    print(
+        f"Wrote {n_written} molecules to SDF "
+        f"({num_molecules} generated, target reference frame):\n"
+        f"  -> {sdf_path.resolve()}\n"
     )
 
 
@@ -618,55 +667,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Cut a SPINDR-style pocket from a protein + ligand, preprocess it, "
-            "and generate molecules into generated_mols/<session>/run_<N>/."
+            "and generate molecules into <output_path>/run_<N>/."
         )
-    )
-    parser.add_argument(
-        "--protein",
-        type=str,
-        required=True,
-        help="Path to the protein structure (.pdb / .cif / .ent).",
-    )
-    parser.add_argument(
-        "--ligand",
-        type=str,
-        required=True,
-        help="Path to the reference ligand (.sdf / .mol).",
-    )
-    parser.add_argument(
-        "--fragment",
-        type=str,
-        default=None,
-        help=(
-            "Optional fragment SDF/MOL in the same coordinate frame as the "
-            "protein/ligand. If set, all molecules are seeded from this fragment."
-        ),
-    )
-    parser.add_argument(
-        "--session",
-        type=str,
-        default=DEFAULT_SESSION,
-        help=(
-            "Session folder under generated_mols/ for grouping related runs "
-            f"(default: {DEFAULT_SESSION})."
-        ),
-    )
-    parser.add_argument(
-        "--pocket_cutoff",
-        type=float,
-        default=6.0,
-        help="Distance cutoff in Angstroms for pocket residue selection (default: 6.0).",
-    )
-    parser.add_argument(
-        "--no_add_hs",
-        action="store_true",
-        help="Disable protein protonation with hydride (enabled by default).",
-    )
-    parser.add_argument(
-        "--num_molecules",
-        type=int,
-        default=100,
-        help="Number of molecules to generate (default: 100).",
     )
     parser.add_argument(
         "--config",
@@ -675,7 +677,7 @@ def parse_args() -> argparse.Namespace:
         metavar="<file>",
         help=(
             "Config file for generation (default: "
-            "scripts/config_files/config_generation_conditional.yaml)."
+            "scripts/config_files/config_generation_from_pdb.yaml)."
         ),
     )
     return parser.parse_args()
@@ -683,14 +685,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    config_path = args.config_file or DEFAULT_CONFIG
+    print(f"Using config: {config_path}")
+    params = yaml.load(open(config_path, "r"), Loader=yaml.FullLoader)
 
-    run_dir, pocket_path, ligand_path, fragment_path, pocket_com = prepare_run_dir(
-        protein_path=args.protein,
-        ligand_path=args.ligand,
-        session=args.session,
-        pocket_cutoff=args.pocket_cutoff,
-        add_hs=not args.no_add_hs,
-        fragment_path=args.fragment,
+    fragment_path = params.get("fragment_path", None)
+    run_dir, pocket_path, ligand_path, fragment_copy, pocket_com = prepare_run_dir(
+        protein_path=params["protein_path"],
+        ligand_path=params["ligand_path"],
+        output_path=params["output_path"],
+        pocket_cutoff=float(params.get("pocket_cutoff", 6.0)),
+        add_hs=bool(params.get("add_hs", True)),
+        fragment_path=fragment_path,
     )
 
     # Ligand COM subtracted during SPINDR preprocess (model input frame).
@@ -703,32 +709,24 @@ def main() -> None:
         f"Pocket COM (output frame): {pocket_com.tolist()}"
     )
 
-    fragment_info = None
-    if fragment_path is not None:
-        fragment_mol = load_fragment_mol(fragment_path)
+    fragment_mol_model_frame = None
+    if fragment_copy is not None:
+        fragment_mol = load_fragment_mol(fragment_copy)
         # Pocket tensors are ligand-COM centered; put the fragment in that frame.
-        fragment_model_frame = translate_mol(fragment_mol, -ligand_com.numpy())
-        fragment_info = prepare_fragment_info(
-            fragment_model_frame, args.num_molecules
-        )
+        fragment_mol_model_frame = translate_mol(fragment_mol, -ligand_com.numpy())
         print(
-            f"Using fragment seed: {fragment_path.name} "
+            f"Using fragment seed: {fragment_copy.name} "
             f"({fragment_mol.GetNumAtoms()} atoms)"
         )
 
-    config_path = args.config_file or DEFAULT_CONFIG
-    print(f"Using config: {config_path}")
-    params = yaml.load(open(config_path, "r"), Loader=yaml.FullLoader)
-
-    # model.generate recenters outputs onto the pocket COM; add it back so
-    # generated molecules sit in the target / pocket.pdb reference frame.
     generate_molecules(
         pocket_data=pocket_data,
-        num_molecules=args.num_molecules,
+        num_molecules=int(params["num_molecules"]),
+        batch_size=int(params["batch_size"]),
         params=params,
         out_dir=run_dir,
         frame_center=pocket_com,
-        fragment_info=fragment_info,
+        fragment_mol_model_frame=fragment_mol_model_frame,
     )
 
 

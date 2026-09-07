@@ -1,0 +1,19 @@
+# I/O paths
+protein_path: example_input/3R8G.cif                        # Path to the protein structure (.pdb / .cif).
+ligand_path: example_input/IZP.sdf                          # Path to the reference ligand (.sdf). Used to define the pocket region.
+fragment_path: null                                         # Path to the fragment structure (.sdf), or null.
+output_path: generated_mols/session_0                       # Path to the output directory.
+
+# Generation parameters
+checkpoints_path: trained_models/neat_spindr                # Path to the trained model weights.
+data_set: SPINDR                                            # Dataset vocabulary to use for generation.
+num_molecules: 200                                          # Total number of molecules to generate.
+batch_size: 100                                             # Molecules generated per batch.
+max_atoms: 100                                              # Maximum number of atoms per molecule.
+num_time_steps: 60                                          # Number of time steps for the flow matching integration.
+time_step_spacing: linear                                   # Time step spacing method for the flow matching integration.
+integration_method: euler_maruyama                          # Integration method for the flow matching integration.
+cfg_factor: 0.5                                             # Classifier-free guidance factor.
+bond_predictor_dir: trained_models/bond_predictor/bp_spindr # Path to the bond predictor model.
+pocket_cutoff: 6.0                                          # Cutoff distance for the pocket extraction.
+add_hs: true                                                # Add hydrogens to the protein structure. 
