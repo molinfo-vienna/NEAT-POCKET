@@ -7,7 +7,7 @@ output_path: generated_mols/session_0                       # Path to the output
 # Generation parameters
 checkpoints_path: trained_models/neat_spindr                # Path to the trained model weights.
 data_set: SPINDR                                            # Dataset vocabulary to use for generation.
-num_molecules: 200                                          # Total number of molecules to generate.
+num_molecules: 100                                          # Total number of molecules to generate.
 batch_size: 100                                             # Molecules generated per batch.
 max_atoms: 100                                              # Maximum number of atoms per molecule.
 num_time_steps: 60                                          # Number of time steps for the flow matching integration.
