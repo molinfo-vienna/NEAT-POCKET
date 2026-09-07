@@ -3,7 +3,6 @@ build
 plotting
 data
 generated_mols
-example*
 fragments*
 logs* 
 maestro_visualizations
