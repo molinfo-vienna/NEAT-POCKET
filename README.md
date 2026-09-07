@@ -1,6 +1,10 @@
 # NEAT-POCKET: Pocket-Conditioned Autoregressive 3D Molecular Generation with a Neighborhood-Guided Set Transformer
 
-Welcome to the NEAT-POCKET repository. NEAT is an autoregressive model that builds 3D drug-like molecules one atom at a time using a set transformer backbone. NEAT-POCKET is the protein-pocket-conditioned extension of NEAT.
+Welcome to the NEAT-POCKET repository. NEAT is an autoregressive model that builds 3D drug-like molecules one atom at a time using a set transformer backbone. NEAT-POCKET is the protein-pocket-conditioned extension of the [NEAT model](https://github.com/molinfo-vienna/NEAT-POCKET) for 3D molecular generation.
+
+<p align="center">
+  <img src="images/overview.png" alt="image" width="600">
+</p>
 
 # Installation
 
