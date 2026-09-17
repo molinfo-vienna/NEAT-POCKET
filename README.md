@@ -100,7 +100,7 @@ We recommend to leave all other parameters to the default setting.
 python scripts/generation_from_pdb.py
 ```
 
-The script automatically extracts the protein binding pocket with the procedure used to curate the SPINDR dataset, which was used to train NEAT-POCKET. By default, the pocket is defined as all protein atoms within 6 Angstrom of the reference ligand.
+The script automatically extracts the protein binding pocket with the procedure used to curate the SPINDR dataset, which was used to train NEAT-POCKET. By default, the pocket is defined as all protein atoms within 6 Å of the reference ligand.
 
 Note: A ligand is currently required to identify the binding pocket. However, the ligand is only used to define the pocket region and is not used during the molecule generation process. Support for apo proteins will be added in a future release.
 
@@ -121,7 +121,7 @@ Note: The number of molecules in generated_mols.sdf may be lower than the reques
 You can also generate molecules starting from a molecular fragment. To do this, provide the path to a fragment SDF in the configuration file. 
 
 
-## Reproduce the results shown in the paper:
+## Reproduce the results shown in the paper
 
 ### Train model
 
