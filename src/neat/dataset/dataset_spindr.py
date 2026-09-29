@@ -9,6 +9,7 @@ from pathlib import Path
 import biotite.structure.io.pdb as pdb
 import biotite.structure.io.pdbx as pdbx
 import networkx as nx
+import numpy as np
 import torch
 from dask.distributed import Client, LocalCluster, as_completed
 from rdkit import Chem, RDLogger
@@ -116,7 +117,11 @@ def _process_protein_ligand_complex(pocket_path: Path, ligand_path: Path, split_
         dtype=torch.long,
     )
     pocket_pos = torch.tensor(pocket_model.coord)
+    _, pocket_chain_id = np.unique(pocket_model.chain_id, return_inverse=True)
     pocket_residue_id = torch.tensor(pocket_model.res_id, dtype=torch.long)
+    if pocket_chain_id.max() > 0:
+        pocket_chain_id = torch.tensor(pocket_chain_id, dtype=torch.long)
+        pocket_residue_id += pocket_chain_id * (pocket_residue_id.max() + 1) 
     _, pocket_residue_id = torch.unique(pocket_residue_id, return_inverse=True)
     pocket_residue_type = torch.tensor(
         [AA_VOCABULARY.get(residue_type, 0) for residue_type in pocket_model.res_name],
