@@ -82,7 +82,7 @@ The config_generation_from_pdb.yaml file provides several options for customizin
 
 - Use `num_molecules` to control how many molecules are generated (default: 100).
 
-- Use `batch_size` to pick a suitable batch size for your hardware (default: 100). E.g., we could generate a batch of 1600 molecules in parallel on an NVIDIA RTX 4090 GPU. 
+- Use `batch_size` to pick a suitable batch size for your hardware (default: 100). E.g., we could generate a batch of 1000 molecules in parallel on an NVIDIA RTX 4090 GPU. 
 
 - The `max_atoms` parameter defines the maximum ligand size during generation (default: 100). 
 

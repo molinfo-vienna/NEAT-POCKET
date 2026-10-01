@@ -77,7 +77,7 @@ class MoleculeBuilder:
             1: 1,  # H
             6: 4,  # C
             7: 4,  # N (allows ammonium / nitro groups)
-            8: 3,  # O
+            8: 2,  # O
             9: 1,  # F
             15: 5,  # P
             16: 6,  # S
@@ -124,7 +124,6 @@ class MoleculeBuilder:
             (7, 2): -1,  # Amide anion N-
             # Oxygen
             (8, 1): -1,  # Carboxylate / alkoxide O-
-            (8, 3): 1,  # Oxonium / pyrylium O+
             # Sulfur
             (16, 1): -1,  # Thiolate S-
             (16, 3): 1,  # Sulfonium S+
