@@ -1,23 +1,23 @@
-accumulate_grad_batches: 1                                    # Number of gradient updates to accumulate before performing an update on the model parameters.
+accumulate_grad_batches: 2                                    # Number of gradient updates to accumulate before performing an update on the model parameters. Note that the actual batch size is batch_size * accumulate_grad_batches. This hyperparameter is not written to the output hparams.yaml file.
 batch_size: 128                                               # Number of samples in a batch.
 bias: true                                                    # Whether to use bias in the model.
 bond_predictor_dir: trained_models/bond_predictor/bp_spindr   # Directory containing the bond predictor model.
-cfg_dropout: 0.2                                              # Dropout rate for the CFG model.
-clash_penalty: 4.0                                            # Penalty for clashes.
-clash_penalty_margin: 0.0                                     # Margin for clashes.
+cfg_dropout: 0.2                                              # CFG dropout rate.
+clash_penalty: 4.0                                            # Penalty for clashes between generated atoms and protein pocket atoms.
+clash_penalty_margin: 0.0                                     # Margin for clashes between generated atoms and protein pocket atoms.
 data_set: SPINDR                                              # Dataset to use for training.
-dropout: 0.1                                                  # Dropout rate for the model.
+dropout: 0.1                                                  # General dropout rate.
 freeze_pretrained: true                                       # Whether to freeze the pretrained model for a certain number of epochs.
 global_cond_proj: true                                        # Whether to use a global conditional projection (AdaLN-single).
 learning_rate: 5.0e-05                                        # Learning rate.
 lr_decay_epochs: 5000                                         # Number of epochs to decay the learning rate.
 lr_min_ratio: 0.1                                             # Minimum ratio of the learning rate after decay.
 lr_warmup_epochs: 10                                          # Number of epochs to linearly warm up the learning rate.
-max_epochs: 5000                                              # Maximum number of epochs to train the model.
-n_embd: 768                                                   # Embedding size of the transformer trunk.
+max_epochs: 5000                                              # Number of training epochs.
+n_embd: 768                                                   # Embedding size of the source set transformer.
 n_embd_fm: 1536                                               # Embedding size of the flow matching head.
-n_head: 12                                                    # Number of attention heads in the transformer trunk.
-n_layer: 12                                                   # Number of layers in the transformer trunk.
+n_head: 12                                                    # Number of attention heads in the source set transformer.
+n_layer: 12                                                   # Number of layers in the source set transformer.
 n_layers_fm: 6                                                # Number of layers in the flow matching head.
 noise_std: 2.5                                                # Standard deviation of the noise for the flow matching head.
 perturbation_fraction: 0.5                                    # Fraction of the source-set positions to perturb for the flow matching head.
