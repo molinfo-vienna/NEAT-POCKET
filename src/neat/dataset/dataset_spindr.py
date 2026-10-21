@@ -21,7 +21,6 @@ from .dataset_utils import (AA_VOCABULARY, ATOM_VOCABULARY,
                                   _ligand_features)
 
 RDLogger.DisableLog("rdApp.*")
-SEED = 0
 
 
 def _load_pocket_structure(pocket_path: Path):

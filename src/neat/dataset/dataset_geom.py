@@ -11,8 +11,6 @@ from tqdm import tqdm
 
 RDLogger.DisableLog("rdApp.*")
 
-SEED = 0
-
 from .dataset_utils import RDKIT_BOND_TO_ID, ATOM_VOCABULARY
 
 

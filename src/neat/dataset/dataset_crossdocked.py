@@ -24,7 +24,6 @@ from .dataset_utils import (
 )
 
 RDLogger.DisableLog("rdApp.*")
-SEED = 0
 
 
 def _process_protein_ligand_complex(
