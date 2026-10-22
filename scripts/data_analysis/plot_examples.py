@@ -1,12 +1,19 @@
-"""Plot example generated molecules in 5x4 grids for each model.
+"""
+This script plots example generated molecules in 5x4 grids for each model.
 
-For each model, randomly samples 20 molecules from pockets with PoseBusters
-all above MIN_PB_VALID_PERCENT (from pocket evaluation_results.txt). If fewer
+For each model, it randomly samples 20 molecules from pockets with PoseBusters validity
+above MIN_PB_VALID_PERCENT (from pocket evaluation_results.txt). If fewer
 than 20 eligible pockets exist, pockets are reused until 20 molecules are
-collected. Saves:
+collected.
+
+The script saves the following images for each model:
   - a 3D ball-and-stick PNG (with hydrogens where applicable), oriented per
     molecule onto its first two principal components
   - a matching 2D structure PNG (explicit hydrogens removed)
+
+The images are saved in the output/examples directory.
+
+The script must be run from the repository root directory.
 """
 
 from __future__ import annotations

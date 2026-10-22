@@ -1,4 +1,7 @@
-"""Export benchmark data for evaluation.
+"""
+This script is used internally to export the sample molecules from the baseline models trained on CrossDocked for evaluation.
+The exported data is made available to the user via the shared data repository found on Figshare (see README).
+This script is not intended to be used by the user but is provided for completeness.
 
 Creates one folder per test pocket with the same layout as generation_conditional.py:
     pocket_{idx}/pocket.pdb   - pocket structure, centered at geometric COM

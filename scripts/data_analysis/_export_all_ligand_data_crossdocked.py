@@ -1,3 +1,12 @@
+"""
+This script is used to export the all ligands from the raw CrossDocked dataset.
+The exported data is made available to the user via the shared data repository found on Figshare (see README).
+This script is not intended to be used by the user but is provided for completeness.
+
+Since the raw CrossDocked data does not have hydrogens, we add them using RDKit and OpenBabel.
+The pros and cons of each method are discussed in the Appendix of the NEAT-POCKET paper.
+"""
+
 import os
 from pathlib import Path
 
@@ -11,8 +20,7 @@ from neat.dataset.dataset_crossdocked import (_add_hydrogens_with_openbabel,
 
 ROOT = os.getcwd()
 INPUT_DIR = os.path.join(ROOT, "data", "CROSSDOCKED", "raw", "crossdocked_pocket10")
-OUTPUT_DIR = os.path.join(ROOT, "output", "crossdocked_all_ligands")
-DATA_SET = "CROSSDOCKED"
+OUTPUT_DIR = os.path.join(ROOT, "generated_data", "crossdocked_all_ligands")
 
 split_file_path = os.path.join(ROOT, "data", "CROSSDOCKED", "raw", "split_by_name.pt")
 data_split = torch.load(split_file_path, map_location="cpu", weights_only=False)

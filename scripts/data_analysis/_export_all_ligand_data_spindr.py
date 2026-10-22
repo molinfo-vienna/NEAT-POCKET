@@ -1,3 +1,9 @@
+"""
+This script is used to export the all ligands from the raw SPINDR dataset.
+The exported data is made available to the user via the shared data repository found on Figshare (see README).
+This script is not intended to be used by the user but is provided for completeness.
+"""
+
 import os
 from pathlib import Path
 
@@ -5,8 +11,7 @@ from rdkit.Chem import SDMolSupplier, SDWriter
 
 ROOT = os.getcwd()
 INPUT_DIR = os.path.join(ROOT, "data", "SPINDR", "raw")
-OUTPUT_DIR = os.path.join(ROOT, "output", "spindr_all_ligands")
-DATA_SET = "CROSSDOCKED"
+OUTPUT_DIR = os.path.join(ROOT, "generated_data", "spindr_all_ligands")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
