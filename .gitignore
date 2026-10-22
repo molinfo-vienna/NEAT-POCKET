@@ -2,6 +2,7 @@ __pycache__/
 build
 plotting
 data
+generated_data
 generated_mols
 fragments*
 logs* 

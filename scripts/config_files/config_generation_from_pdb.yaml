@@ -1,6 +1,6 @@
 # I/O paths
-protein_path: example_input/3R8G.cif                        # Path to the protein structure (.pdb / .cif).
-ligand_path: example_input/IZP.sdf                          # Path to the reference ligand (.sdf). Used to define the pocket region.
+protein_path: example_input/35UA.cif                        # Path to the protein structure (.pdb / .cif).
+ligand_path: example_input/DMD.sdf                          # Path to the reference ligand (.sdf). Used to define the pocket region.
 fragment_path: null                                         # Path to the fragment structure (.sdf), or null.
 output_path: generated_mols/session_0                       # Path to the output directory.
 

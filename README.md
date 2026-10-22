@@ -62,17 +62,17 @@ chmod +x $CONDA_PREFIX/bin/gnina
 
 ## Tutorial: generate new ligands for a given protein
 
-This tutorial shows how to generate a diverse set of ligands for a protein binding pocket. As an example, we use the AKR1C3 complex with ibuprofen from the Protein Data Bank (ID 3R8G).
+This tutorial shows how to generate a diverse set of ligands for a protein binding pocket. As an example, we use a [1, 2, 4]triazolo[1, 5-a]pyridine derivative bound to the human KIT tyrosine kinase (PDB ID 35UA).
 
-The goal is to generate molecules that occupy the same region of the binding pocket as ibuprofen and form similar protein–ligand interactions.
+The goal is to generate molecules that occupy the same region of the binding pocket as the reference ligand and form similar protein–ligand interactions.
 
 1. Input files:
 
 We provide the necessary files in the example_input folder.
 
-- The protein crystallographic information file: 3R8G.cif
-- The ligand structure data file: IZP.sdf
-- Optional: We further provide a substructure of IZP.sdf for fragment-based design (IZP_fragment.sdf)
+- The protein crystallographic information file: 35UA.cif
+- The ligand structure data file: DMD.sdf
+- Optional: We further provide a substructure of DMD.sdf for fragment-based design (DMD_fragment.sdf)
 
 Alternatively, you can provide your own structure data. Simply edit the protein_path and the ligand_path in the config_generation_from_pdb.yaml file accordingly. 
 
