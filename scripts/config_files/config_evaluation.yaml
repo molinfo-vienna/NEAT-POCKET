@@ -2,6 +2,7 @@ data_path: output/generated_mols_spindr                # Path to the directory c
 data_subdir: conditional                               # Subdirectory containing the generated molecules.
 data_set: SPINDR                                       # Dataset to use for evaluation.
 num_workers: 8                                         # Number of workers.
+num_molecules: 100                                     # Number of generated molecules per pocket; fewer will be counted as invalid.
 compute_drugflow_clashes: true                         # Whether to compute drugflow clashes.
 compute_edm: true                                      # Whether to compute EDM metrics.
 compute_novelty: true                                  # Whether to compute novelty.

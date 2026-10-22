@@ -13,6 +13,12 @@ Subdirectories missing generated_mols.pt / generated_mols.sdf (e.g. pockets
 skipped during fragment-conditioned generation) are skipped rather than
 raising.
 
+Each subdirectory is padded with invalid molecules up to num_molecules (config,
+default 100), so validity is relative to the number of molecules requested; set
+num_molecules to 1 when evaluating the test-set reference ligands. Subdirectories
+without any valid molecule (e.g. an empty generated_mols.sdf) count as 0% RDKit
+valid and 0% RDKit x PoseBusters and are excluded from all other metrics.
+
 Metric flags in the config (compute_edm, compute_posebusters, …) control
 which scores are computed. Molecule construction uses xyz2mol by default,
 or a bond predictor if bond_predictor_path is set.
@@ -57,6 +63,7 @@ from neat.utils.sbdd_metrics import ClashEvaluator, GninaEvaluator
 # Constants
 # ---------------------------------------------------------------------------
 
+DEFAULT_NUM_MOLECULES = 100
 NUM_MOLECULES_PLOTTED = 100
 NUM_MOLECULES_PER_ROW = 5
 PLOT_RESOLUTION = 400
@@ -660,9 +667,11 @@ class AggregateResults:
 
         if run.rdkit is not None:
             self.rdkit_valid.append(run.rdkit.valid)
-            self.rdkit_unique.append(run.rdkit.unique)
-            if run.rdkit.novel is not None:
-                self.rdkit_novel.append(run.rdkit.novel)
+            # Unique and Novel are rates among valid molecules, undefined without any.
+            if run.rdkit.valid > 0:
+                self.rdkit_unique.append(run.rdkit.unique)
+                if run.rdkit.novel is not None:
+                    self.rdkit_novel.append(run.rdkit.novel)
             self.rdkit_valid_x_unique.append(run.rdkit.valid_x_unique)
             if run.rdkit.valid_x_unique_x_novel is not None:
                 self.rdkit_valid_x_unique_x_novel.append(
@@ -779,19 +788,23 @@ def evaluate_subdirectory(
         print(f"Skipping {subdir.name}: missing {generated_file.name}")
         return None
 
-    supplier = SDMolSupplier(str(generated_file), removeHs=False, sanitize=False)
     mols = []
-    for mol in supplier:
-        try:
-            Chem.SanitizeMol(mol)
-            if add_hydrogens:
-                mol = Chem.AddHs(mol, addCoords=True)
-            mols.append(mol)
-        except Exception as e:
-            print(f"Warning: Failed to sanitize a molecule: {e}")
-            continue
-    if len(mols) < 100:
-        mols += [None] * (100 - len(mols))  # Pad with None if fewer than 100 molecules
+    # RDKit cannot open an empty SD file (no molecule could be built for this pocket).
+    if generated_file.stat().st_size > 0:
+        supplier = SDMolSupplier(str(generated_file), removeHs=False, sanitize=False)
+        for mol in supplier:
+            try:
+                Chem.SanitizeMol(mol)
+                if add_hydrogens:
+                    mol = Chem.AddHs(mol, addCoords=True)
+                mols.append(mol)
+            except Exception as e:
+                print(f"Warning: Failed to sanitize a molecule: {e}")
+                continue
+    # Missing molecules count as invalid, so validity is relative to the number requested.
+    num_molecules = params.get("num_molecules", DEFAULT_NUM_MOLECULES)
+    if len(mols) < num_molecules:
+        mols += [None] * (num_molecules - len(mols))
 
     if add_hydrogens:
         save_molecules_to_sdf(mols, subdir / "generated_mols_with_hs.sdf")
@@ -819,6 +832,15 @@ def evaluate_subdirectory(
     )
 
     mols = [mol for mol, is_valid in zip(mols, validity_flag_list) if is_valid]
+
+    # Without valid molecules, only the validity metrics are defined: they count as 0 so that
+    # the pocket is not silently dropped from the RDKit valid and RDKit x PoseBusters averages.
+    if not mols:
+        if compute_posebusters:
+            result.rdkit_x_posebusters = 0.0
+        write_subdir_results(subdir, params, result, compute_novelty)
+        print(f"No valid molecules in {subdir.name}: only validity metrics are reported")
+        return result
 
     with tempfile.NamedTemporaryFile(suffix=".sdf", delete=False) as tmp:
         mol_sdf_path = tmp.name
